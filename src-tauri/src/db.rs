@@ -26,6 +26,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v4(&connection)?;
     migrate_to_v5(&connection)?;
     migrate_to_v6(&connection)?;
+    migrate_to_v7(&connection)?;
     Ok(connection)
 }
 
@@ -266,6 +267,55 @@ fn migrate_to_v6(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_to_v7(connection: &Connection) -> Result<(), String> {
+    for (table, column, definition) in [
+        ("assets", "deleted_at", "TEXT"),
+        ("assets", "delete_batch_id", "TEXT"),
+        ("categories", "deleted_at", "TEXT"),
+        ("categories", "delete_batch_id", "TEXT"),
+    ] {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| e.to_string())?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if !columns.iter().any(|value| value == column) {
+            connection
+                .execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                    [],
+                )
+                .map_err(|e| format!("升级数据库到 v7 失败：{e}"))?;
+        }
+    }
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS idx_assets_share_url;
+             CREATE INDEX IF NOT EXISTS idx_assets_normalized_share_url ON assets(normalized_share_url);
+             CREATE INDEX IF NOT EXISTS idx_assets_deleted ON assets(deleted_at,delete_batch_id);
+             CREATE INDEX IF NOT EXISTS idx_categories_deleted ON categories(deleted_at,delete_batch_id);
+             CREATE TABLE IF NOT EXISTS deletion_batches(
+               id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL CHECK(kind IN ('assets','category')),
+               label TEXT NOT NULL,
+               asset_count INTEGER NOT NULL DEFAULT 0,
+               category_count INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL
+             );",
+        )
+        .map_err(|e| format!("升级数据库到 v7 失败：{e}"))?;
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','7')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
@@ -358,8 +408,8 @@ pub fn library_meta(
     let mut statement = connection
         .prepare(
             "SELECT c.id, c.name, c.parent_id, c.sort_order,
-         (SELECT COUNT(*) FROM assets a WHERE a.category_id = c.id)
-         FROM categories c ORDER BY c.sort_order, c.name COLLATE NOCASE",
+         (SELECT COUNT(*) FROM assets a WHERE a.category_id = c.id AND a.deleted_at IS NULL)
+         FROM categories c WHERE c.deleted_at IS NULL ORDER BY c.sort_order, c.name COLLATE NOCASE",
         )
         .map_err(|e| e.to_string())?;
     let categories = statement
@@ -376,15 +426,19 @@ pub fn library_meta(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let total_assets = connection
-        .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
     let language = valid_language(content_language);
     let tags = query_strings_with_param(
         connection,
-        "SELECT name FROM localized_tags WHERE locale=?1 ORDER BY name COLLATE NOCASE",
+        "SELECT DISTINCT t.name FROM localized_tags t JOIN asset_localized_tags at ON at.tag_id=t.id JOIN assets a ON a.id=at.asset_id WHERE t.locale=?1 AND a.deleted_at IS NULL ORDER BY t.name COLLATE NOCASE",
         language,
     )?;
-    let licenses = query_strings_with_param(connection, "SELECT DISTINCT license FROM asset_localizations WHERE locale=?1 AND trim(license)<>'' ORDER BY license COLLATE NOCASE", language)?;
+    let licenses = query_strings_with_param(connection, "SELECT DISTINCT l.license FROM asset_localizations l JOIN assets a ON a.id=l.asset_id WHERE l.locale=?1 AND trim(l.license)<>'' AND a.deleted_at IS NULL ORDER BY l.license COLLATE NOCASE", language)?;
     let (dcc_tools, versions, formats) = collect_json_options(connection)?;
     Ok(LibraryMeta {
         categories,
@@ -415,7 +469,7 @@ fn collect_json_options(
     let mut versions = BTreeSet::new();
     let mut formats = BTreeSet::new();
     let mut statement = connection
-        .prepare("SELECT dcc_tools_json, versions_json, formats_json FROM assets")
+        .prepare("SELECT dcc_tools_json, versions_json, formats_json FROM assets WHERE deleted_at IS NULL")
         .map_err(|e| e.to_string())?;
     let mut rows = statement.query([]).map_err(|e| e.to_string())?;
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -440,7 +494,7 @@ fn category_descendants(connection: &Connection, roots: &[String]) -> Result<Vec
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!("WITH RECURSIVE tree(id) AS (SELECT id FROM categories WHERE id IN ({}) UNION ALL SELECT c.id FROM categories c JOIN tree t ON c.parent_id=t.id) SELECT DISTINCT id FROM tree", placeholders(roots.len()));
+    let sql = format!("WITH RECURSIVE tree(id) AS (SELECT id FROM categories WHERE deleted_at IS NULL AND id IN ({}) UNION ALL SELECT c.id FROM categories c JOIN tree t ON c.parent_id=t.id WHERE c.deleted_at IS NULL) SELECT DISTINCT id FROM tree", placeholders(roots.len()));
     let mut statement = connection.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = statement
         .query_map(params_from_iter(roots.iter()), |row| row.get(0))
@@ -462,7 +516,7 @@ pub fn search_assets(
     if use_fts {
         from_clause.push_str(" JOIN asset_search ON asset_search.asset_id=a.id");
     }
-    let mut conditions: Vec<String> = Vec::new();
+    let mut conditions: Vec<String> = vec!["a.deleted_at IS NULL".into()];
     let mut values: Vec<Value> = Vec::new();
     if !query.is_empty() {
         if use_fts {
@@ -564,7 +618,7 @@ pub fn search_assets(
       COALESCE((SELECT json_group_array(t.name) FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=a.id AND t.locale=CASE WHEN EXISTS(SELECT 1 FROM asset_localized_tags ax JOIN localized_tags tx ON tx.id=ax.tag_id WHERE ax.asset_id=a.id AND tx.locale='{language}') THEN '{language}' ELSE '{fallback}' END),'[]'),
       CASE WHEN COALESCE(lr.name,'')<>'' THEN '{language}' ELSE '{fallback}' END,
       CASE WHEN COALESCE(lr.name,'')<>'' THEN 0 ELSE 1 END,
-      a.link_check_status,a.link_checked_at,a.link_check_message
+      a.link_check_status,a.link_checked_at,a.link_check_message,CASE WHEN trim(a.share_url)<>'' THEN 1 ELSE 0 END
       {from_clause}{where_clause} ORDER BY {order} LIMIT ? OFFSET ?");
     let mut page_values = values;
     if request.sort == "relevance" && use_fts {
@@ -652,6 +706,7 @@ fn card_from_row(row: &Row<'_>) -> rusqlite::Result<AssetCard> {
         link_check_status: row.get(13)?,
         link_checked_at: row.get(14)?,
         link_check_message: row.get(15)?,
+        has_share_link: row.get::<_, i64>(16)? != 0,
     })
 }
 
@@ -664,7 +719,7 @@ pub fn get_asset(
     if mark_viewed {
         connection
             .execute(
-                "UPDATE assets SET last_viewed_at=?1 WHERE id=?2",
+                "UPDATE assets SET last_viewed_at=?1 WHERE id=?2 AND deleted_at IS NULL",
                 params![now(), id],
             )
             .map_err(|e| e.to_string())?;
@@ -676,22 +731,22 @@ pub fn get_asset(
       COALESCE((SELECT json_group_array(t.name) FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=a.id AND t.locale=CASE WHEN EXISTS(SELECT 1 FROM asset_localized_tags ax JOIN localized_tags tx ON tx.id=ax.tag_id WHERE ax.asset_id=a.id AND tx.locale='{language}') THEN '{language}' ELSE '{fallback}' END),'[]'),
       CASE WHEN COALESCE(lr.name,'')<>'' THEN '{language}' ELSE '{fallback}' END,
       CASE WHEN COALESCE(lr.name,'')<>'' THEN 0 ELSE 1 END,
-      a.link_check_status,a.link_checked_at,a.link_check_message,
+      a.link_check_status,a.link_checked_at,a.link_check_message,CASE WHEN trim(a.share_url)<>'' THEN 1 ELSE 0 END,
       COALESCE(NULLIF(lr.description,''),NULLIF(lf.description,''),a.description),a.category_id,a.size_bytes,a.author,a.source_url,COALESCE(NULLIF(lr.license,''),NULLIF(lf.license,''),a.license),a.share_url,a.extraction_code,a.created_at
-      FROM assets a LEFT JOIN categories c ON c.id=a.category_id LEFT JOIN asset_localizations lr ON lr.asset_id=a.id AND lr.locale='{language}' LEFT JOIN asset_localizations lf ON lf.asset_id=a.id AND lf.locale='{fallback}' WHERE a.id=?1");
+      FROM assets a LEFT JOIN categories c ON c.id=a.category_id LEFT JOIN asset_localizations lr ON lr.asset_id=a.id AND lr.locale='{language}' LEFT JOIN asset_localizations lf ON lf.asset_id=a.id AND lf.locale='{fallback}' WHERE a.id=?1 AND a.deleted_at IS NULL");
     let fields = connection
         .query_row(&sql, [id], |row| {
             Ok((
                 card_from_row(row)?,
-                row.get::<_, String>(16)?,
-                row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<i64>>(18)?,
-                row.get::<_, String>(19)?,
+                row.get::<_, String>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<i64>>(19)?,
                 row.get::<_, String>(20)?,
                 row.get::<_, String>(21)?,
                 row.get::<_, String>(22)?,
                 row.get::<_, String>(23)?,
                 row.get::<_, String>(24)?,
+                row.get::<_, String>(25)?,
             ))
         })
         .optional()
@@ -830,8 +885,24 @@ pub fn upsert_asset(
             .optional()
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| timestamp.clone());
-        let normalized_share_url =
-            normalize_share_url(&input.share_url).ok_or("分享链接格式无效")?;
+        let normalized_share_url = if input.share_url.trim().is_empty() {
+            String::new()
+        } else {
+            normalize_share_url(&input.share_url).ok_or("分享链接格式无效")?
+        };
+        if !normalized_share_url.is_empty() {
+            let duplicate: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM assets WHERE normalized_share_url=?1 AND id<>?2 AND deleted_at IS NULL LIMIT 1",
+                    params![normalized_share_url, id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if duplicate.is_some() {
+                return Err("该分享链接已存在于素材库".into());
+            }
+        }
         transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,license,share_url,normalized_share_url,extraction_code,favorite,created_at,updated_at)
           VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
           ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,updated_at=excluded.updated_at",
@@ -954,7 +1025,7 @@ fn validate_input(input: &AssetInput) -> Result<(), String> {
     {
         return Err("素材名称不能超过 200 个字符".into());
     }
-    validate_http_url(&input.share_url, true)?;
+    validate_http_url(&input.share_url, false)?;
     if !input.source_url.trim().is_empty() {
         validate_http_url(&input.source_url, false)?;
     }
@@ -1036,7 +1107,34 @@ fn category_path(connection: &Connection, category_id: Option<&str>) -> Result<S
 }
 
 pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), String> {
-    let row = connection.query_row("SELECT name,description,category_id,dcc_tools_json,versions_json,formats_json,author,source_url,license FROM assets WHERE id=?1", [asset_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?,row.get::<_,String>(8)?))).map_err(|e| e.to_string())?;
+    connection
+        .execute("DELETE FROM asset_search WHERE asset_id=?1", [asset_id])
+        .map_err(|e| e.to_string())?;
+    let active_clause = if table_has_column(connection, "assets", "deleted_at")? {
+        " AND deleted_at IS NULL"
+    } else {
+        ""
+    };
+    let sql = format!("SELECT name,description,category_id,dcc_tools_json,versions_json,formats_json,author,source_url,license FROM assets WHERE id=?1{active_clause}");
+    let Some(row) = connection
+        .query_row(&sql, [asset_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
     let tags = query_strings_with_param(
         connection,
         "SELECT t.name FROM asset_tags at JOIN tags t ON t.id=at.tag_id WHERE at.asset_id=?1",
@@ -1061,15 +1159,24 @@ pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), Stri
     .join(" ")
     .to_lowercase();
     connection
-        .execute("DELETE FROM asset_search WHERE asset_id=?1", [asset_id])
-        .map_err(|e| e.to_string())?;
-    connection
         .execute(
             "INSERT INTO asset_search(asset_id,text) VALUES(?1,?2)",
             params![asset_id, text],
         )
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(columns.iter().any(|value| value == column))
 }
 
 fn query_strings_with_param(
@@ -1102,7 +1209,7 @@ fn query_strings_with_params(
 pub fn set_favorite(connection: &Connection, id: &str, favorite: bool) -> Result<(), String> {
     if connection
         .execute(
-            "UPDATE assets SET favorite=?1,updated_at=?2 WHERE id=?3",
+            "UPDATE assets SET favorite=?1,updated_at=?2 WHERE id=?3 AND deleted_at IS NULL",
             params![favorite as i64, now(), id],
         )
         .map_err(|e| e.to_string())?
@@ -1113,12 +1220,242 @@ pub fn set_favorite(connection: &Connection, id: &str, favorite: bool) -> Result
     Ok(())
 }
 
-pub fn delete_asset(connection: &mut Connection, base_dir: &Path, id: &str) -> Result<(), String> {
-    let mut statement = connection
-        .prepare("SELECT original_rel_path,thumbnail_rel_path FROM images WHERE asset_id=?1")
+pub fn delete_asset(connection: &mut Connection, _base_dir: &Path, id: &str) -> Result<(), String> {
+    delete_library_items(
+        connection,
+        DeleteRequest {
+            asset_ids: vec![id.into()],
+            category_id: None,
+        },
+    )?;
+    Ok(())
+}
+
+pub fn select_asset_ids(
+    connection: &Connection,
+    base_dir: &Path,
+    request: &SearchRequest,
+) -> Result<AssetSelection, String> {
+    let mut ids = Vec::new();
+    let mut offset = 0;
+    loop {
+        let mut page_request = request.clone();
+        page_request.offset = offset;
+        page_request.limit = 200;
+        let page = search_assets(connection, base_dir, &page_request)?;
+        ids.extend(page.items.into_iter().map(|item| item.id));
+        if ids.len() as i64 >= page.total || page.limit == 0 {
+            break;
+        }
+        offset = ids.len() as i64;
+    }
+    Ok(AssetSelection {
+        total: ids.len(),
+        ids,
+    })
+}
+
+fn delete_impact_inner(
+    connection: &Connection,
+    request: &DeleteRequest,
+) -> Result<(String, Vec<String>, Vec<String>), String> {
+    if let Some(category_id) = request.category_id.as_deref() {
+        let label = connection
+            .query_row(
+                "SELECT name FROM categories WHERE id=?1 AND deleted_at IS NULL",
+                [category_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or("分类不存在")?;
+        let categories = query_strings_with_param(connection,
+            "WITH RECURSIVE tree(id) AS (SELECT id FROM categories WHERE id=?1 AND deleted_at IS NULL UNION ALL SELECT c.id FROM categories c JOIN tree t ON c.parent_id=t.id WHERE c.deleted_at IS NULL) SELECT id FROM tree",
+            category_id)?;
+        let mut assets = Vec::new();
+        for category in &categories {
+            assets.extend(query_strings_with_param(
+                connection,
+                "SELECT id FROM assets WHERE category_id=?1 AND deleted_at IS NULL",
+                category,
+            )?);
+        }
+        return Ok((label, unique_values(&assets), categories));
+    }
+    let requested = unique_values(&request.asset_ids);
+    if requested.is_empty() {
+        return Err("请先选择要删除的素材或分类".into());
+    }
+    let mut assets = Vec::new();
+    let mut first_name = String::new();
+    for id in requested {
+        if let Some(name) = connection
+            .query_row(
+                "SELECT name FROM assets WHERE id=?1 AND deleted_at IS NULL",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+        {
+            if first_name.is_empty() {
+                first_name = name;
+            }
+            assets.push(id);
+        }
+    }
+    if assets.is_empty() {
+        return Err("素材不存在或已在回收站".into());
+    }
+    let label = if assets.len() == 1 {
+        first_name
+    } else {
+        format!("{} 等 {} 项素材", first_name, assets.len())
+    };
+    Ok((label, assets, Vec::new()))
+}
+
+pub fn delete_impact(
+    connection: &Connection,
+    request: &DeleteRequest,
+) -> Result<DeleteResult, String> {
+    let (label, assets, categories) = delete_impact_inner(connection, request)?;
+    Ok(DeleteResult {
+        batch_id: String::new(),
+        label,
+        asset_count: assets.len(),
+        category_count: categories.len(),
+    })
+}
+
+pub fn delete_library_items(
+    connection: &mut Connection,
+    request: DeleteRequest,
+) -> Result<DeleteResult, String> {
+    let (label, assets, categories) = delete_impact_inner(connection, &request)?;
+    let batch_id = Uuid::new_v4().to_string();
+    let timestamp = now();
+    let kind = if categories.is_empty() {
+        "assets"
+    } else {
+        "category"
+    };
+    let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    transaction.execute("INSERT INTO deletion_batches(id,kind,label,asset_count,category_count,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![batch_id,kind,label,assets.len() as i64,categories.len() as i64,timestamp]).map_err(|e| e.to_string())?;
+    for id in &assets {
+        transaction.execute("UPDATE assets SET deleted_at=?1,delete_batch_id=?2 WHERE id=?3 AND deleted_at IS NULL", params![timestamp,batch_id,id]).map_err(|e| e.to_string())?;
+        transaction
+            .execute("DELETE FROM asset_search WHERE asset_id=?1", [id])
+            .map_err(|e| e.to_string())?;
+    }
+    for id in &categories {
+        transaction.execute("UPDATE categories SET deleted_at=?1,delete_batch_id=?2 WHERE id=?3 AND deleted_at IS NULL", params![timestamp,batch_id,id]).map_err(|e| e.to_string())?;
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(DeleteResult {
+        batch_id,
+        label,
+        asset_count: assets.len(),
+        category_count: categories.len(),
+    })
+}
+
+pub fn list_trash(
+    connection: &Connection,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<TrashBatch>, String> {
+    let offset = offset.max(0);
+    let limit = limit.clamp(1, 200);
+    let total = connection
+        .query_row("SELECT COUNT(*) FROM deletion_batches", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT id,kind,label,asset_count,category_count,created_at FROM deletion_batches ORDER BY created_at DESC LIMIT ?1 OFFSET ?2").map_err(|e| e.to_string())?;
+    let items = statement
+        .query_map(params![limit, offset], |row| {
+            Ok(TrashBatch {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                label: row.get(2)?,
+                asset_count: row.get(3)?,
+                category_count: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
+
+pub fn restore_trash_batch(
+    connection: &mut Connection,
+    batch_id: &str,
+) -> Result<DeleteResult, String> {
+    let batch = connection
+        .query_row(
+            "SELECT kind,label,asset_count,category_count FROM deletion_batches WHERE id=?1",
+            [batch_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("回收站记录不存在")?;
+    let ids = query_strings_with_param(
+        connection,
+        "SELECT id FROM assets WHERE delete_batch_id=?1",
+        batch_id,
+    )?;
+    let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "UPDATE categories SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "UPDATE assets SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
+        .map_err(|e| e.to_string())?;
+    for id in &ids {
+        reindex_asset(&transaction, id)?;
+    }
+    transaction.commit().map_err(|e| e.to_string())?;
+    Ok(DeleteResult {
+        batch_id: batch_id.into(),
+        label: batch.1,
+        asset_count: batch.2 as usize,
+        category_count: batch.3 as usize,
+    })
+}
+
+pub fn purge_trash_batch(
+    connection: &mut Connection,
+    base_dir: &Path,
+    batch_id: &str,
+) -> Result<(), String> {
+    let mut statement = connection.prepare("SELECT i.original_rel_path,i.thumbnail_rel_path FROM images i JOIN assets a ON a.id=i.asset_id WHERE a.delete_batch_id=?1").map_err(|e| e.to_string())?;
     let paths = statement
-        .query_map([id], |row| {
+        .query_map([batch_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|e| e.to_string())?
@@ -1126,23 +1463,74 @@ pub fn delete_asset(connection: &mut Connection, base_dir: &Path, id: &str) -> R
         .map_err(|e| e.to_string())?;
     drop(statement);
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
     transaction
-        .execute("DELETE FROM asset_search WHERE asset_id=?1", [id])
+        .execute("DELETE FROM assets WHERE delete_batch_id=?1", [batch_id])
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "UPDATE categories SET parent_id=NULL WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM categories WHERE delete_batch_id=?1",
+            [batch_id],
+        )
         .map_err(|e| e.to_string())?;
     if transaction
-        .execute("DELETE FROM assets WHERE id=?1", [id])
+        .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
         .map_err(|e| e.to_string())?
         == 0
     {
-        return Err("素材不存在".into());
+        return Err("回收站记录不存在".into());
     }
     transaction.execute("DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM asset_tags at WHERE at.tag_id=tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
         images::remove_managed_file(base_dir, &thumb);
     }
     Ok(())
+}
+
+pub fn empty_trash(connection: &mut Connection, base_dir: &Path) -> Result<usize, String> {
+    let ids = query_strings(
+        connection,
+        "SELECT id FROM deletion_batches ORDER BY created_at",
+    )?;
+    let count = ids.len();
+    for id in ids {
+        purge_trash_batch(connection, base_dir, &id)?;
+    }
+    Ok(count)
+}
+
+pub fn prepare_baidu_save_tasks(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<Vec<BaiduSaveTask>, String> {
+    let mut tasks = Vec::new();
+    for id in unique_values(ids) {
+        if let Some(task) = connection.query_row("SELECT id,name,share_url,extraction_code FROM assets WHERE id=?1 AND deleted_at IS NULL AND (normalized_share_url LIKE 'https://pan.baidu.com/%' OR normalized_share_url LIKE 'https://%.pan.baidu.com/%')", [&id], |row| Ok(BaiduSaveTask { id: row.get(0)?, name: row.get(1)?, share_url: row.get(2)?, extraction_code: row.get(3)? })).optional().map_err(|e| e.to_string())? { tasks.push(task); }
+    }
+    Ok(tasks)
+}
+
+pub fn prepare_reference_cover_ids(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    for id in unique_values(ids) {
+        let image = connection.query_row("SELECT i.id FROM images i JOIN assets a ON a.id=i.asset_id WHERE a.id=?1 AND a.deleted_at IS NULL ORDER BY i.is_cover DESC,i.sort_order LIMIT 1", [&id], |row| row.get::<_,String>(0)).optional().map_err(|error| error.to_string())?;
+        if let Some(image) = image {
+            result.push(image);
+        }
+    }
+    Ok(result)
 }
 
 pub fn image_path(
@@ -1169,7 +1557,7 @@ pub fn image_path(
 pub fn share_info(connection: &Connection, id: &str) -> Result<(String, String), String> {
     connection
         .query_row(
-            "SELECT share_url,extraction_code FROM assets WHERE id=?1",
+            "SELECT share_url,extraction_code FROM assets WHERE id=?1 AND deleted_at IS NULL",
             [id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1189,11 +1577,14 @@ pub fn upsert_category(
     if name.is_empty() {
         return Err("分类名称不能为空".into());
     }
+    if let Some(parent_id) = parent_id.as_deref() {
+        ensure_category_exists(connection, parent_id)?;
+    }
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
     if preserve_parent {
         connection
             .execute(
-                "UPDATE categories SET name=?1 WHERE id=?2",
+                "UPDATE categories SET name=?1 WHERE id=?2 AND deleted_at IS NULL",
                 params![name, id],
             )
             .map_err(map_constraint)?;
@@ -1207,38 +1598,17 @@ pub fn upsert_category(
     Ok(id)
 }
 
-pub fn delete_category(connection: &Connection, id: &str) -> Result<(), String> {
-    let children: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM categories WHERE parent_id=?1",
-            [id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    let assets: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM assets WHERE category_id=?1",
-            [id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if children > 0 || assets > 0 {
-        return Err("该分类仍包含子分类或素材，无法删除".into());
-    }
-    connection
-        .execute("DELETE FROM categories WHERE id=?1", [id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 pub fn duplicate_match(
     connection: &Connection,
     raw_url: &str,
 ) -> Result<Option<DuplicateMatch>, String> {
+    if raw_url.trim().is_empty() {
+        return Ok(None);
+    }
     let normalized = normalize_share_url(raw_url).ok_or("分享链接格式无效")?;
     connection
         .query_row(
-            "SELECT id,name,share_url FROM assets WHERE normalized_share_url=?1 LIMIT 1",
+            "SELECT id,name,share_url FROM assets WHERE normalized_share_url=?1 AND deleted_at IS NULL LIMIT 1",
             [normalized],
             |row| {
                 Ok(DuplicateMatch {
@@ -1260,9 +1630,6 @@ pub fn batch_update_assets(
     if ids.is_empty() {
         return Err("请先选择素材".into());
     }
-    if ids.len() > 5_000 {
-        return Err("单次最多批量处理 5000 条素材".into());
-    }
     let add_tags = unique_values(&update.add_tags);
     let remove_tags = unique_values(&update.remove_tags)
         .into_iter()
@@ -1275,7 +1642,7 @@ pub fn batch_update_assets(
     for id in &ids {
         let exists: bool = transaction
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1 AND deleted_at IS NULL)",
                 [id],
                 |row| row.get(0),
             )
@@ -1393,7 +1760,7 @@ pub struct CategoryMoveOutcome {
 fn ensure_category_exists(connection: &Connection, id: &str) -> Result<(), String> {
     let exists: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM categories WHERE id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM categories WHERE id=?1 AND deleted_at IS NULL)",
             [id],
             |row| row.get(0),
         )
@@ -1414,9 +1781,6 @@ pub fn move_assets_to_category(
     if ids.is_empty() {
         return Err("没有可移动的素材".into());
     }
-    if ids.len() > 5_000 {
-        return Err("单次最多移动 5000 条素材".into());
-    }
     if let Some(category_id) = category_id.as_deref() {
         ensure_category_exists(connection, category_id)?;
     }
@@ -1424,9 +1788,11 @@ pub fn move_assets_to_category(
     let mut previous = Vec::new();
     for id in &ids {
         let old_category = transaction
-            .query_row("SELECT category_id FROM assets WHERE id=?1", [id], |row| {
-                row.get::<_, Option<String>>(0)
-            })
+            .query_row(
+                "SELECT category_id FROM assets WHERE id=?1 AND deleted_at IS NULL",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
             .optional()
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("素材不存在：{id}"))?;
@@ -1671,17 +2037,17 @@ fn health_issue_ids(
     issue: &str,
 ) -> Result<Vec<String>, String> {
     let sql = match issue {
-        "noPreview" => Some("SELECT id FROM assets a WHERE NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id)"),
-        "uncategorized" => Some("SELECT id FROM assets WHERE category_id IS NULL"),
-        "noTags" => Some("SELECT id FROM assets a WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.asset_id=a.id)"),
-        "missingVersion" => Some("SELECT id FROM assets WHERE versions_json='[]'"),
-        "missingFormat" => Some("SELECT id FROM assets WHERE formats_json='[]'"),
-        "nonBaidu" => Some("SELECT id FROM assets WHERE normalized_share_url NOT LIKE 'https://pan.baidu.com/%' AND normalized_share_url NOT LIKE 'https://%.pan.baidu.com/%'"),
-        "duplicateLink" => Some("SELECT id FROM assets WHERE normalized_share_url<>'' AND normalized_share_url IN (SELECT normalized_share_url FROM assets GROUP BY normalized_share_url HAVING COUNT(*)>1)"),
-        "missingZh" => Some("SELECT id FROM assets a WHERE NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='zh-CN' AND trim(l.name)<>'')"),
-        "missingEn" => Some("SELECT id FROM assets a WHERE NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
-        "invalidLink" => Some("SELECT id FROM assets WHERE link_check_status='invalid'"),
-        "linkCheckError" => Some("SELECT id FROM assets WHERE link_check_status='error'"),
+        "noPreview" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id)"),
+        "uncategorized" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND category_id IS NULL"),
+        "noTags" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.asset_id=a.id)"),
+        "missingVersion" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND versions_json='[]'"),
+        "missingFormat" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND formats_json='[]'"),
+        "nonBaidu" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND normalized_share_url NOT LIKE 'https://pan.baidu.com/%' AND normalized_share_url NOT LIKE 'https://%.pan.baidu.com/%'"),
+        "duplicateLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND normalized_share_url IN (SELECT normalized_share_url FROM assets WHERE deleted_at IS NULL GROUP BY normalized_share_url HAVING COUNT(*)>1)"),
+        "missingZh" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='zh-CN' AND trim(l.name)<>'')"),
+        "missingEn" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
+        "invalidLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='invalid'"),
+        "linkCheckError" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='error'"),
         "missingFiles" => None,
         _ => return Err("未知的素材库检查类型".into()),
     };
@@ -1689,7 +2055,7 @@ fn health_issue_ids(
         return query_strings(connection, sql);
     }
     let mut statement = connection
-        .prepare("SELECT asset_id,original_rel_path,thumbnail_rel_path FROM images")
+        .prepare("SELECT i.asset_id,i.original_rel_path,i.thumbnail_rel_path FROM images i JOIN assets a ON a.id=i.asset_id WHERE a.deleted_at IS NULL")
         .map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -1773,7 +2139,7 @@ pub fn list_health_issues(
 
 pub fn all_link_check_targets(connection: &Connection) -> Result<Vec<LinkCheckTarget>, String> {
     let mut statement = connection
-        .prepare("SELECT id,share_url,normalized_share_url FROM assets ORDER BY id")
+        .prepare("SELECT id,share_url,normalized_share_url FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' ORDER BY id")
         .map_err(|e| e.to_string())?;
     let targets = statement
         .query_map([], |row| {
@@ -1792,7 +2158,7 @@ pub fn all_link_check_targets(connection: &Connection) -> Result<Vec<LinkCheckTa
 pub fn link_check_target(connection: &Connection, id: &str) -> Result<LinkCheckTarget, String> {
     connection
         .query_row(
-            "SELECT id,share_url,normalized_share_url FROM assets WHERE id=?1",
+            "SELECT id,share_url,normalized_share_url FROM assets WHERE id=?1 AND deleted_at IS NULL AND normalized_share_url<>''",
             [id],
             |row| {
                 Ok(LinkCheckTarget {
@@ -1844,11 +2210,22 @@ mod tests {
 
     #[test]
     fn category_lifecycle_and_meta() {
-        let (_dir, connection) = setup();
+        let (_dir, mut connection) = setup();
         let id = upsert_category(&connection, None, "环境".into(), None, false).unwrap();
         let meta = library_meta(&connection, "zh-CN").unwrap();
         assert_eq!(meta.categories[0].name, "环境");
-        delete_category(&connection, &id).unwrap();
+        delete_library_items(
+            &mut connection,
+            DeleteRequest {
+                asset_ids: Vec::new(),
+                category_id: Some(id),
+            },
+        )
+        .unwrap();
+        assert!(library_meta(&connection, "zh-CN")
+            .unwrap()
+            .categories
+            .is_empty());
     }
 
     #[test]
@@ -2042,7 +2419,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
     }
@@ -2198,12 +2575,13 @@ mod tests {
             make_input("A", "https://pan.baidu.com/s/demo?pwd=1111"),
         )
         .unwrap();
-        upsert_asset(
+        let second = upsert_asset(
             &mut connection,
             dir.path(),
-            make_input("B", "http://pan.baidu.com/s/demo?pwd=2222"),
+            make_input("B", "https://pan.baidu.com/s/other"),
         )
         .unwrap();
+        connection.execute("UPDATE assets SET share_url='http://pan.baidu.com/s/demo?pwd=2222',normalized_share_url='https://pan.baidu.com/s/demo' WHERE id=?1", [&second.card.id]).unwrap();
         let report = batch_update_assets(
             &mut connection,
             BatchAssetUpdate {
@@ -2230,6 +2608,51 @@ mod tests {
                 .unwrap()
                 .count,
             2
+        );
+    }
+
+    #[test]
+    fn allows_empty_links_and_restores_soft_deleted_assets() {
+        let (dir, mut connection) = setup();
+        let input = |name: &str| AssetInput {
+            id: None,
+            name: name.into(),
+            description: String::new(),
+            category_id: None,
+            tags: Vec::new(),
+            dcc_tools: Vec::new(),
+            versions: Vec::new(),
+            formats: Vec::new(),
+            size_bytes: None,
+            author: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            share_url: String::new(),
+            extraction_code: String::new(),
+            favorite: false,
+            images: Vec::new(),
+            localizations: HashMap::new(),
+            content_language: "zh-CN".into(),
+        };
+        let first = upsert_asset(&mut connection, dir.path(), input("无链接 A")).unwrap();
+        upsert_asset(&mut connection, dir.path(), input("无链接 B")).unwrap();
+        let deletion = delete_library_items(
+            &mut connection,
+            DeleteRequest {
+                asset_ids: vec![first.card.id.clone()],
+                category_id: None,
+            },
+        )
+        .unwrap();
+        assert!(get_asset(&connection, &first.card.id, false, "zh-CN").is_err());
+        assert_eq!(list_trash(&connection, 0, 20).unwrap().total, 1);
+        restore_trash_batch(&mut connection, &deletion.batch_id).unwrap();
+        assert_eq!(
+            get_asset(&connection, &first.card.id, false, "zh-CN")
+                .unwrap()
+                .card
+                .name,
+            "无链接 A"
         );
     }
 }

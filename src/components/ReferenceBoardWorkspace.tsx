@@ -198,7 +198,15 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
     {floating && <><button title={pinned ? "取消置顶" : "始终置顶"} onClick={async () => { const next = !pinned; try { await api.setReferenceWindowAlwaysOnTop(next); setPinned(next); } catch (error) { notify(String(error), true); } }}>{pinned ? <Pin size={16} /> : <PinOff size={16} />}</button><button title="收回主窗口" onClick={() => void attach()}><RotateCcw size={16} /></button><button title="关闭并收回" className="danger" onClick={() => void attach()}><X size={16} /></button></>}
   </div>;
 
-  return <div className={`reference-workspace ${floating ? "floating" : ""}`}>
+  const dragFloatingWindow = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!floating || !event.altKey || event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (!target.closest(".reference-canvas") || target.closest(".reference-board-item")) return;
+    event.preventDefault(); event.stopPropagation();
+    void getCurrentWebviewWindow().startDragging().catch(error => notify(`移动悬浮窗口失败：${String(error)}`, true));
+  };
+
+  return <div className={`reference-workspace ${floating ? "floating" : ""}`} onPointerDownCapture={dragFloatingWindow}>
     {floating && <div className="reference-window-drag-strip" data-tauri-drag-region>{toolbarVisible && toolbars}<span data-tauri-drag-region /></div>}
     {!floating && toolbars}
     <ReferenceCanvas ref={canvas} items={board.items} view={{ x: board.viewX, y: board.viewY, scale: board.viewScale }} background={board.background} selectedIds={selectedIds} onSelectionChange={setSelectedIds} onItemsLive={items => setBoard(current => ({ ...current, items }))} onItemsCommit={commitItems} onViewChange={(view: BoardView, commit) => { setBoard(current => ({ ...current, viewX: view.x, viewY: view.y, viewScale: view.scale })); if (commit) markDirty(); }} />

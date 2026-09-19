@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowDown, ArrowUp, ClipboardPaste, ImagePlus, Languages, Save, Sparkles, Star, Trash2, X } from "lucide-react";
@@ -8,7 +8,7 @@ import { ImagePreview } from "./ImagePreview";
 import { api } from "../lib/api";
 import { applyFabMetadata, isFabUrl } from "../lib/fab";
 
-interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; onClose: () => void; onSave: (input: AssetInput) => Promise<void> }
+interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<void> }
 
 const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", tags: [], license: "" });
 
@@ -40,7 +40,7 @@ function flattenCategories(categories: Category[]) {
   walk(null, 0); return result;
 }
 
-export function AssetEditor({ asset, categories, contentLanguage, initialShare, onClose, onSave }: Props) {
+export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave }: Props) {
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
   const [editLanguage, setEditLanguage] = useState<ContentLanguage>(contentLanguage);
   const [sizeText, setSizeText] = useState(asset?.sizeBytes ? formatBytes(asset.sizeBytes) : "");
@@ -52,6 +52,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const [fabStatus, setFabStatus] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [translating, setTranslating] = useState(false);
   const [translation, setTranslation] = useState<{ target: ContentLanguage; preview: TranslationPreview; selected: Set<keyof LocalizedAssetText>; characterCount?: number } | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const categoryOptions = useMemo(() => flattenCategories(categories), [categories]);
 
   const addPaths = (paths: string[]) => setForm(prev => {
@@ -68,6 +69,13 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
     }).then(fn => { unlisten = fn; }).catch(() => undefined);
     return () => unlisten?.();
   }, []);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const pressed = [event.ctrlKey || event.metaKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", !["Control","Shift","Alt","Meta"].includes(event.key) ? (event.key.length === 1 ? event.key.toUpperCase() : event.key) : ""].filter(Boolean).join("+");
+      if (pressed.toLowerCase() === saveShortcut.toLowerCase()) { event.preventDefault(); formRef.current?.requestSubmit(); }
+    };
+    window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler);
+  }, [saveShortcut]);
 
   const chooseImages = async () => {
     const result = await open({ multiple: true, filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"] }] });
@@ -162,7 +170,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
     if (Object.keys(validation.errors).length) return;
     setSaving(true);
     try {
-      const duplicate = await api.checkShareUrl(next.shareUrl);
+      const duplicate = next.shareUrl.trim() ? await api.checkShareUrl(next.shareUrl) : null;
       if (duplicate && duplicate.id !== asset?.id) {
         setErrors(current => ({ ...current, shareUrl: `该链接已属于“${duplicate.name}”` }));
         return;
@@ -177,7 +185,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
 
   return <div className="modal-backdrop"><section className="editor-modal" role="dialog" aria-modal="true">
     <header className="modal-header"><div><span className="eyebrow">{asset ? "编辑条目" : "录入素材"}</span><h2>{asset?.name || "添加新素材"}</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
-    <form onSubmit={submit} className="editor-form">
+    <form ref={formRef} onSubmit={submit} className="editor-form">
       <div className="form-section"><h3>基本信息</h3>
         <div className="fab-import-panel">
           <div className="fab-import-copy"><Sparkles size={17} /><div><strong>从 Fab 自动填充</strong><span>读取名称、描述、作者、标签、许可、格式和 UE 版本</span></div></div>
@@ -200,7 +208,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => update("sourceUrl", e.target.value)} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>百度网盘</h3><button type="button" className="secondary-button" onClick={parseClipboard}><ClipboardPaste size={15} />从剪贴板解析</button></div><div className="form-grid">
-        <label className="wide"><span>分享链接 *</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
+        <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
         <label><span>提取码</span><input value={form.extractionCode} onChange={e => update("extractionCode", e.target.value.trim())} maxLength={32} /></label>
         <label className="checkbox-label"><input type="checkbox" checked={form.favorite} onChange={e => update("favorite", e.target.checked)} />加入收藏</label>
         {warnings.map(warning => <div key={warning} className="form-warning wide">{warning}</div>)}

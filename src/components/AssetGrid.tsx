@@ -72,7 +72,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         {preferences?.cardFields.version !== false && <span className="asset-list-cell">{item.versions.join("、") || "—"}</span>}
         {preferences?.cardFields.format !== false && <span className="asset-list-cell">{item.formats.join("、") || "—"}</span>}
         {preferences?.cardFields.tags !== false && <span className="asset-list-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join("  ") || "—"}</span>}
-        {preferences?.cardFields.linkStatus !== false && <span className={`asset-list-status ${item.linkCheckStatus}`}>{item.linkCheckStatus === "invalid" ? "失效" : item.linkCheckStatus === "valid" ? "有效" : "未检查"}</span>}
+        {preferences?.cardFields.linkStatus !== false && <span className={`asset-list-status ${item.hasShareLink === false ? "missing" : item.linkCheckStatus}`}>{item.hasShareLink === false ? "无链接" : item.linkCheckStatus === "invalid" ? "失效" : item.linkCheckStatus === "valid" ? "有效" : "未检查"}</span>}
         <button className={`list-favorite ${item.favorite ? "active" : ""}`} onClick={event => { event.stopPropagation(); onFavorite(item); }}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /></button>
         <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
       </article>;
@@ -80,6 +80,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         <div className="card-image">
           <ImagePreview imageId={item.coverImageId} alt={item.name} className="card-image-content" style={{ objectFit: preferences?.coverFit || "cover" }} />
           {preferences?.cardFields.linkStatus !== false && item.linkCheckStatus === "invalid" && <span className="link-invalid-badge">网盘失效</span>}
+          {preferences?.cardFields.linkStatus !== false && item.hasShareLink === false && <span className="link-missing-badge">无网盘链接</span>}
           {selectionMode && <button className={`select-button ${checked ? "active" : ""}`} onClick={event => { event.stopPropagation(); lastSelected.current = itemIndex; onToggleSelect?.(item.id); }}><span>{checked && <Check size={13} />}</span></button>}
           <button className={`favorite-button ${item.favorite ? "active" : ""}`} title={item.favorite ? "取消收藏" : "收藏"} onClick={event => { event.stopPropagation(); onFavorite(item); }}>
             <Heart size={17} fill={item.favorite ? "currentColor" : "none"} />

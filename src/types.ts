@@ -1,10 +1,10 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
-export type ViewMode = "library" | "favorites" | "recent" | "tagManager" | "health" | "reference";
-export type ModuleId = "library" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference";
+export type ViewMode = "library" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ModuleId = "library" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
-export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection";
+export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection" | "selectAll" | "saveAsset" | "deleteSelected";
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 
@@ -105,6 +105,7 @@ export interface AssetCard {
   linkCheckStatus: LinkCheckStatus;
   linkCheckedAt: string | null;
   linkCheckMessage: string;
+  hasShareLink?: boolean;
 }
 
 export interface Page<T> {
@@ -193,6 +194,13 @@ export interface ImportReport {
   failed: number;
   rows: ImportRowResult[];
 }
+
+export interface ImportProgress { current: number; total: number; imported: number; skipped: number; failed: number; currentName: string; phase: string }
+export interface AssetSelection { ids: string[]; total: number }
+export interface DeleteRequest { assetIds: string[]; categoryId: string | null }
+export interface DeleteResult { batchId: string; label: string; assetCount: number; categoryCount: number }
+export interface TrashBatch { id: string; kind: "assets" | "category"; label: string; assetCount: number; categoryCount: number; createdAt: string }
+export interface BaiduSaveTask { id: string; name: string; shareUrl: string; extractionCode: string }
 
 export interface LibraryLocation {
   path: string;

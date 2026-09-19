@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AssetDetail, AssetInput, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport } from "../types";
+import type { AssetDetail, AssetInput, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, BaiduSaveTask } from "../types";
 
 export const api = {
   getMeta: (contentLanguage: ContentLanguage) => invoke<LibraryMeta>("get_library_meta", { contentLanguage }),
   search: (request: SearchRequest) => invoke<Page<AssetCard>>("search_assets", { request }),
+  selectAssetIds: (request: SearchRequest) => invoke<AssetSelection>("select_asset_ids", { request }),
   getAsset: (id: string, contentLanguage: ContentLanguage) => invoke<AssetDetail>("get_asset", { id, contentLanguage }),
   saveAsset: (input: AssetInput) => invoke<AssetDetail>("upsert_asset", { input }),
   deleteAsset: (id: string) => invoke<void>("delete_asset", { id }),
@@ -11,6 +12,14 @@ export const api = {
   addCategory: (name: string, parentId: string | null) => invoke("upsert_category", { id: null, name, parentId }),
   renameCategory: (id: string, name: string) => invoke("upsert_category", { id, name, parentId: null, preserveParent: true }),
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
+  getDeleteImpact: (request: DeleteRequest) => invoke<DeleteResult>("get_delete_impact", { request }),
+  deleteLibraryItems: (request: DeleteRequest) => invoke<DeleteResult>("delete_library_items", { request }),
+  listTrash: (offset = 0, limit = 100) => invoke<Page<TrashBatch>>("list_trash", { offset, limit }),
+  restoreTrashBatch: (batchId: string) => invoke<DeleteResult>("restore_trash_batch", { batchId }),
+  purgeTrashBatch: (batchId: string) => invoke<void>("purge_trash_batch", { batchId }),
+  emptyTrash: () => invoke<number>("empty_trash"),
+  prepareBaiduSaveTasks: (ids: string[]) => invoke<BaiduSaveTask[]>("prepare_baidu_save_tasks", { ids }),
+  prepareReferenceCoverIds: (ids: string[]) => invoke<string[]>("prepare_reference_cover_ids", { ids }),
   imageData: (imageId: string, thumbnail = true) => invoke<string>("get_image_data", { imageId, thumbnail }),
   openShare: (id: string) => invoke<void>("open_share_link", { id }),
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),

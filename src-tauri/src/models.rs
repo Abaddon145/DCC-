@@ -76,6 +76,7 @@ pub fn default_module_order() -> Vec<String> {
         "tagManager",
         "health",
         "reference",
+        "trash",
     ]
     .into_iter()
     .map(str::to_string)
@@ -124,6 +125,9 @@ pub fn default_shortcuts() -> HashMap<String, String> {
         ("quickAdd", "Ctrl+Shift+N"),
         ("settings", "Ctrl+,"),
         ("toggleSelection", "Ctrl+M"),
+        ("selectAll", "Ctrl+A"),
+        ("saveAsset", "Ctrl+S"),
+        ("deleteSelected", "Delete"),
     ]
     .into_iter()
     .map(|(key, value)| (key.into(), value.into()))
@@ -505,6 +509,7 @@ pub struct AssetCard {
     pub link_check_status: String,
     pub link_checked_at: Option<String>,
     pub link_check_message: String,
+    pub has_share_link: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +645,62 @@ pub struct ImportReport {
     pub skipped: usize,
     pub failed: usize,
     pub rows: Vec<ImportRowResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProgress {
+    pub current: usize,
+    pub total: usize,
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub current_name: String,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetSelection {
+    pub ids: Vec<String>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRequest {
+    #[serde(default)]
+    pub asset_ids: Vec<String>,
+    pub category_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteResult {
+    pub batch_id: String,
+    pub label: String,
+    pub asset_count: usize,
+    pub category_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashBatch {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub asset_count: i64,
+    pub category_count: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaiduSaveTask {
+    pub id: String,
+    pub name: String,
+    pub share_url: String,
+    pub extraction_code: String,
 }
 
 #[derive(Debug, Clone)]

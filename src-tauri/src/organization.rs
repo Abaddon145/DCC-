@@ -4,7 +4,7 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const KNOWN_MODULES: [&str; 7] = [
+const KNOWN_MODULES: [&str; 8] = [
     "library",
     "smartCollections",
     "favorites",
@@ -12,6 +12,7 @@ const KNOWN_MODULES: [&str; 7] = [
     "tagManager",
     "health",
     "reference",
+    "trash",
 ];
 
 pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreferences, String> {
@@ -351,7 +352,7 @@ pub fn list_tags(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    let mut statement = connection.prepare("SELECT t.id,t.locale,t.name,COUNT(at.asset_id),COUNT(DISTINCT at.asset_id) FROM localized_tags t LEFT JOIN asset_localized_tags at ON at.tag_id=t.id WHERE t.locale=?1 AND t.name LIKE ?2 ESCAPE '\\' GROUP BY t.id ORDER BY COUNT(at.asset_id) DESC,t.name COLLATE NOCASE LIMIT ?3 OFFSET ?4").map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT t.id,t.locale,t.name,COUNT(a.id),COUNT(DISTINCT a.id) FROM localized_tags t LEFT JOIN asset_localized_tags at ON at.tag_id=t.id LEFT JOIN assets a ON a.id=at.asset_id AND a.deleted_at IS NULL WHERE t.locale=?1 AND t.name LIKE ?2 ESCAPE '\\' GROUP BY t.id ORDER BY COUNT(a.id) DESC,t.name COLLATE NOCASE LIMIT ?3 OFFSET ?4").map_err(|e| e.to_string())?;
     let items = statement
         .query_map(
             params![locale, pattern, limit.clamp(1, 200), offset.max(0)],

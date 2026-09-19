@@ -13,6 +13,7 @@ describe("asset validation", () => {
   it("accepts a normal Baidu entry", () => expect(validateAsset(base)).toEqual({ errors: {}, warnings: [] }));
   it("rejects unsafe protocols", () => expect(validateAsset({ ...base, shareUrl: "file:///tmp/a" }).errors.shareUrl).toBeTruthy());
   it("warns for a non-Baidu link", () => expect(validateAsset({ ...base, shareUrl: "https://example.com/a" }).warnings).toHaveLength(1));
+  it("accepts an asset without a Baidu link", () => expect(validateAsset({ ...base, shareUrl: "" })).toEqual({ errors: {}, warnings: [] }));
   it("normalizes separated values", () => expect(splitValues("UE;ue, Nanite；Nanite")).toEqual(["UE", "Nanite"]));
   it("parses readable sizes", () => expect(parseSize("1.5 GB")).toBe(1610612736));
 });

@@ -9,7 +9,7 @@ use url::Url;
 
 #[tauri::command]
 pub fn get_library_meta(
-    state: State<AppState>,
+    state: State<'_, AppState>,
     content_language: Option<String>,
 ) -> Result<LibraryMeta, String> {
     let language = content_language.unwrap_or_else(default_content_language);
@@ -29,6 +29,22 @@ pub fn search_assets(
                 total: 0,
                 offset: request.offset,
                 limit: request.limit,
+            }),
+        }
+    })
+}
+
+#[tauri::command]
+pub fn select_asset_ids(
+    state: State<AppState>,
+    request: SearchRequest,
+) -> Result<AssetSelection, String> {
+    state.with_library(|connection, base_dir| {
+        match organization::resolve_smart_collection(connection, &request)? {
+            Some(request) => db::select_asset_ids(connection, base_dir, &request),
+            None => Ok(AssetSelection {
+                ids: Vec::new(),
+                total: 0,
             }),
         }
     })
@@ -231,7 +247,77 @@ pub fn upsert_category(
 
 #[tauri::command]
 pub fn delete_category(state: State<AppState>, id: String) -> Result<(), String> {
-    state.with_library(|connection, _| db::delete_category(connection, &id))
+    state.with_library_mut(|connection, _| {
+        db::delete_library_items(
+            connection,
+            DeleteRequest {
+                asset_ids: Vec::new(),
+                category_id: Some(id),
+            },
+        )
+        .map(|_| ())
+    })
+}
+
+#[tauri::command]
+pub fn get_delete_impact(
+    state: State<AppState>,
+    request: DeleteRequest,
+) -> Result<DeleteResult, String> {
+    state.with_library(|connection, _| db::delete_impact(connection, &request))
+}
+
+#[tauri::command]
+pub fn delete_library_items(
+    state: State<AppState>,
+    request: DeleteRequest,
+) -> Result<DeleteResult, String> {
+    state.with_library_mut(|connection, _| db::delete_library_items(connection, request))
+}
+
+#[tauri::command]
+pub fn list_trash(
+    state: State<AppState>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<TrashBatch>, String> {
+    state.with_library(|connection, _| db::list_trash(connection, offset, limit))
+}
+
+#[tauri::command]
+pub fn restore_trash_batch(
+    state: State<AppState>,
+    batch_id: String,
+) -> Result<DeleteResult, String> {
+    state.with_library_mut(|connection, _| db::restore_trash_batch(connection, &batch_id))
+}
+
+#[tauri::command]
+pub fn purge_trash_batch(state: State<AppState>, batch_id: String) -> Result<(), String> {
+    state.with_library_mut(|connection, base_dir| {
+        db::purge_trash_batch(connection, base_dir, &batch_id)
+    })
+}
+
+#[tauri::command]
+pub fn empty_trash(state: State<AppState>) -> Result<usize, String> {
+    state.with_library_mut(|connection, base_dir| db::empty_trash(connection, base_dir))
+}
+
+#[tauri::command]
+pub fn prepare_baidu_save_tasks(
+    state: State<AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<BaiduSaveTask>, String> {
+    state.with_library(|connection, _| db::prepare_baidu_save_tasks(connection, &ids))
+}
+
+#[tauri::command]
+pub fn prepare_reference_cover_ids(
+    state: State<AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    state.with_library(|connection, _| db::prepare_reference_cover_ids(connection, &ids))
 }
 
 #[tauri::command]
@@ -260,6 +346,9 @@ pub fn copy_extraction_code(state: State<AppState>, id: String) -> Result<(), St
 #[tauri::command]
 pub fn open_share_link(state: State<AppState>, id: String) -> Result<(), String> {
     let (link, code) = state.with_library(|connection, _| db::share_info(connection, &id))?;
+    if link.trim().is_empty() {
+        return Err("该素材未添加百度网盘链接".into());
+    }
     if !code.is_empty() {
         Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(code))
@@ -300,14 +389,185 @@ pub fn preview_import(
 }
 
 #[tauri::command]
-pub fn import_assets(
-    state: State<AppState>,
+pub async fn import_assets(
+    app: AppHandle,
+    state: State<'_, AppState>,
     path: String,
     mapping: HashMap<String, String>,
 ) -> Result<ImportReport, String> {
+    if importer::is_fab_import(&mapping) {
+        let rows = importer::fab_rows(&PathBuf::from(&path), mapping)?;
+        let total = rows.len();
+        let mut report = ImportReport {
+            imported: 0,
+            skipped: 0,
+            failed: 0,
+            rows: Vec::new(),
+        };
+        for (index, row) in rows.into_iter().enumerate() {
+            emit_import_progress(
+                &app,
+                index + 1,
+                total,
+                &report,
+                &row.fab_url,
+                "读取 Fab 元数据",
+            );
+            if row.fab_url.trim().is_empty() {
+                report.failed += 1;
+                report.rows.push(ImportRowResult {
+                    row: row.row,
+                    name: String::new(),
+                    status: "error".into(),
+                    messages: vec!["缺少 Fab URL".into()],
+                });
+                continue;
+            }
+            let already_exists = state.with_library(|connection, _| connection.query_row("SELECT EXISTS(SELECT 1 FROM assets WHERE deleted_at IS NULL AND source_url=?1)", [&row.fab_url], |value| value.get::<_, bool>(0)).map_err(|error| error.to_string()))?;
+            if already_exists {
+                report.skipped += 1;
+                report.rows.push(ImportRowResult {
+                    row: row.row,
+                    name: row.fab_url.clone(),
+                    status: "skipped".into(),
+                    messages: vec!["Fab 素材已存在".into()],
+                });
+                continue;
+            }
+            let metadata = match fab::fetch_metadata(&row.fab_url).await {
+                Ok(value) => value,
+                Err(error) => {
+                    report.failed += 1;
+                    report.rows.push(ImportRowResult {
+                        row: row.row,
+                        name: row.fab_url.clone(),
+                        status: "error".into(),
+                        messages: vec![error],
+                    });
+                    continue;
+                }
+            };
+            emit_import_progress(
+                &app,
+                index + 1,
+                total,
+                &report,
+                &metadata.name,
+                "保存预览图与素材信息",
+            );
+            let parsed_share = if row.baidu_text.trim().is_empty() {
+                ParsedShareText::default()
+            } else {
+                parse_share_text_value(&row.baidu_text).unwrap_or_else(|_| ParsedShareText {
+                    share_url: row.baidu_text.trim().into(),
+                    extraction_code: String::new(),
+                })
+            };
+            let mut localizations = HashMap::new();
+            localizations.insert(
+                "en".into(),
+                LocalizedAssetText {
+                    name: metadata.name.clone(),
+                    description: metadata.description.clone(),
+                    tags: metadata.tags.clone(),
+                    license: metadata.license.clone(),
+                },
+            );
+            let images = metadata
+                .preview_images
+                .iter()
+                .enumerate()
+                .map(|(image_index, image)| ImageInput {
+                    id: None,
+                    source_path: Some(image.source_path.clone()),
+                    original_name: Some(image.original_name.clone()),
+                    is_cover: image_index == 0,
+                    sort_order: image_index as i64,
+                })
+                .collect();
+            let input = AssetInput {
+                id: None,
+                name: metadata.name.clone(),
+                description: metadata.description.clone(),
+                category_id: None,
+                tags: metadata.tags.clone(),
+                dcc_tools: metadata.dcc_tools.clone(),
+                versions: if row.ue_versions.is_empty() {
+                    metadata.versions.clone()
+                } else {
+                    row.ue_versions.clone()
+                },
+                formats: metadata.formats.clone(),
+                size_bytes: None,
+                author: metadata.author.clone(),
+                source_url: metadata.canonical_url.clone(),
+                license: metadata.license.clone(),
+                share_url: parsed_share.share_url,
+                extraction_code: parsed_share.extraction_code,
+                favorite: false,
+                images,
+                localizations,
+                content_language: "en".into(),
+            };
+            match state.with_library_mut(|connection, base_dir| {
+                db::upsert_asset(connection, base_dir, input)
+            }) {
+                Ok(_) => {
+                    report.imported += 1;
+                    let mut messages = Vec::new();
+                    if let Some(warning) = metadata.image_warning {
+                        messages.push(warning);
+                    }
+                    report.rows.push(ImportRowResult {
+                        row: row.row,
+                        name: metadata.name,
+                        status: if messages.is_empty() {
+                            "imported".into()
+                        } else {
+                            "warning".into()
+                        },
+                        messages,
+                    });
+                }
+                Err(error) => {
+                    report.failed += 1;
+                    report.rows.push(ImportRowResult {
+                        row: row.row,
+                        name: metadata.name,
+                        status: "error".into(),
+                        messages: vec![error],
+                    });
+                }
+            }
+        }
+        emit_import_progress(&app, total, total, &report, "", "完成");
+        return Ok(report);
+    }
     state.with_library_mut(|connection, base_dir| {
         importer::commit(connection, base_dir, &PathBuf::from(path), mapping)
     })
+}
+
+fn emit_import_progress(
+    app: &AppHandle,
+    current: usize,
+    total: usize,
+    report: &ImportReport,
+    current_name: &str,
+    phase: &str,
+) {
+    let _ = app.emit(
+        "fab-import-progress",
+        ImportProgress {
+            current,
+            total,
+            imported: report.imported,
+            skipped: report.skipped,
+            failed: report.failed,
+            current_name: current_name.into(),
+            phase: phase.into(),
+        },
+    );
 }
 
 #[tauri::command]

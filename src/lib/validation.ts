@@ -8,12 +8,14 @@ export function validateAsset(input: AssetInput): ValidationResult {
   const names = Object.values(input.localizations || {}).map(value => value?.name.trim() || "");
   if (!names.some(Boolean)) errors.name = "请至少填写一种语言的素材名称";
   if (names.some(name => name.length > 200)) errors.name = "名称不能超过 200 个字符";
-  try {
-    const url = new URL(input.shareUrl);
-    if (!['http:', 'https:'].includes(url.protocol)) errors.shareUrl = "仅支持 http/https 链接";
-    if (!/(^|\.)pan\.baidu\.com$/i.test(url.hostname)) warnings.push("这不是百度网盘域名，保存前请确认链接来源");
-  } catch {
-    errors.shareUrl = "请输入有效的分享链接";
+  if (input.shareUrl.trim()) {
+    try {
+      const url = new URL(input.shareUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) errors.shareUrl = "仅支持 http/https 链接";
+      if (!/(^|\.)pan\.baidu\.com$/i.test(url.hostname)) warnings.push("这不是百度网盘域名，保存前请确认链接来源");
+    } catch {
+      errors.shareUrl = "请输入有效的分享链接";
+    }
   }
   if (input.sourceUrl.trim()) {
     try {

@@ -8,6 +8,7 @@ export const moduleRegistry: Array<{ id: ModuleId; label: string; description: s
   { id: "tagManager", label: "标签管理", description: "重命名、合并和清理标签" },
   { id: "health", label: "素材库检查", description: "检查缺失信息和失效链接" },
   { id: "reference", label: "参考板", description: "PureRef 风格无限画布" },
+  { id: "trash", label: "回收站", description: "恢复或永久清理已删除内容" },
 ];
 
 export const commandRegistry: Array<{ id: CommandId; label: string; keywords: string }> = [
@@ -17,12 +18,15 @@ export const commandRegistry: Array<{ id: CommandId; label: string; keywords: st
   { id: "quickAdd", label: "快速录入", keywords: "clipboard 网盘" },
   { id: "settings", label: "打开设置", keywords: "preferences 个性化" },
   { id: "toggleSelection", label: "切换多选", keywords: "select batch 批量" },
+  { id: "selectAll", label: "全选当前结果", keywords: "select all 全选" },
+  { id: "saveAsset", label: "保存素材编辑", keywords: "save 保存" },
+  { id: "deleteSelected", label: "删除选择", keywords: "delete trash 删除" },
 ];
 
 export const defaultGlobalPreferences: GlobalPreferences = {
   theme: "graphite", accentColor: "#D99A42", density: "comfortable", reduceMotion: false,
   sidebarWidth: 248, detailWidth: 420,
-  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M" },
+  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete" },
 };
 
 export const defaultLibraryPreferences: LibraryPreferences = {

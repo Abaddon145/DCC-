@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS categories (
   parent_id TEXT REFERENCES categories(id) ON DELETE RESTRICT,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
+  deleted_at TEXT,
+  delete_batch_id TEXT,
   UNIQUE(parent_id, name)
 );
 
@@ -33,13 +35,23 @@ CREATE TABLE IF NOT EXISTS assets (
   favorite INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  last_viewed_at TEXT
+  last_viewed_at TEXT,
+  deleted_at TEXT,
+  delete_batch_id TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_share_url ON assets(share_url);
 CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category_id);
 CREATE INDEX IF NOT EXISTS idx_assets_updated ON assets(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(favorite, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS deletion_batches (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('assets','category')),
+  label TEXT NOT NULL,
+  asset_count INTEGER NOT NULL DEFAULT 0,
+  category_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS tags (
   id TEXT PRIMARY KEY,

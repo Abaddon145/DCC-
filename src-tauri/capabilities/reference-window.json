@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "reference-window",
+  "description": "Reference board floating window capabilities",
+  "windows": ["reference-board"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:allow-open", "dialog:allow-save"]
+}

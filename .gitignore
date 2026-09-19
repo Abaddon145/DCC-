@@ -9,3 +9,13 @@ src-tauri/target/
 coverage/
 *.dccassetlib
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
+app-settings.json
+library.json
+library.sqlite*
+managed-images/
+reference-boards/
+release-artifacts/
+*.exe.sha256

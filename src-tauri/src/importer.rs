@@ -6,6 +6,9 @@ use url::Url;
 use uuid::Uuid;
 
 const CANONICAL: &[(&str, &[&str])] = &[
+    ("fab_url", &["fab_url", "Fab URL", "Fab网址", "Fab 链接"]),
+    ("baidu_url", &["baidu_url", "百度网盘链接", "百度分享文本"]),
+    ("ue_versions", &["ue_versions", "UE版本", "UE 版本"]),
     ("name", &["name", "素材名称", "名称"]),
     ("name_zh", &["name_zh", "中文名称"]),
     ("name_en", &["name_en", "英文名称"]),
@@ -99,9 +102,9 @@ pub fn commit(
         }
         let share_url = value(&row, "share_url");
         let normalized = db::normalize_share_url(share_url).unwrap_or_default();
-        let exists: bool = connection
+        let exists: bool = !normalized.is_empty() && connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM assets WHERE normalized_share_url=?1)",
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE normalized_share_url=?1 AND deleted_at IS NULL)",
                 [normalized],
                 |r| r.get(0),
             )
@@ -224,50 +227,49 @@ pub fn export_template(path: &Path) -> Result<(), String> {
         .from_path(path)
         .map_err(|e| e.to_string())?;
     writer
-        .write_record([
-            "中文名称",
-            "英文名称",
-            "中文描述",
-            "英文描述",
-            "分类路径",
-            "中文标签",
-            "英文标签",
-            "DCC软件",
-            "版本",
-            "格式",
-            "素材大小",
-            "作者",
-            "来源地址",
-            "中文许可",
-            "英文许可",
-            "分享链接",
-            "提取码",
-            "预览图路径",
-        ])
+        .write_record(["fab_url", "baidu_url", "ue_versions"])
         .map_err(|e| e.to_string())?;
     writer
         .write_record([
-            "中世纪古堡环境包",
-            "Medieval Castle Environment",
-            "包含建筑与道具",
-            "Includes architecture and props",
-            "环境/建筑",
-            "写实;Nanite",
-            "Realistic;Nanite",
-            "Unreal Engine",
+            "https://www.fab.com/listings/00000000-0000-0000-0000-000000000000",
+            "https://pan.baidu.com/s/example?pwd=a1b2",
             "5.4;5.5",
-            "uasset;FBX",
-            "2.4 GB",
-            "示例工作室",
-            "https://example.com",
-            "商用需授权",
-            "Commercial use requires authorization",
-            "https://pan.baidu.com/s/example",
-            "a1b2",
-            r"D:\Previews\castle-01.jpg;D:\Previews\castle-02.jpg",
         ])
         .map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone)]
+pub struct FabImportRow {
+    pub row: usize,
+    pub fab_url: String,
+    pub baidu_text: String,
+    pub ue_versions: Vec<String>,
+}
+
+pub fn is_fab_import(mapping: &HashMap<String, String>) -> bool {
+    mapping.contains_key("fab_url")
+}
+
+pub fn fab_rows(
+    path: &Path,
+    mapping: HashMap<String, String>,
+) -> Result<Vec<FabImportRow>, String> {
+    let (headers, raw_rows) = read_table(path)?;
+    let effective = if mapping.is_empty() {
+        suggest_mapping(&headers)
+    } else {
+        mapping
+    };
+    Ok(mapped_rows(&headers, raw_rows, &effective)
+        .into_iter()
+        .map(|row| FabImportRow {
+            row: row.row,
+            fab_url: value(&row, "fab_url").to_string(),
+            baidu_text: value(&row, "baidu_url").to_string(),
+            ue_versions: split(value(&row, "ue_versions")),
+        })
+        .collect())
 }
 
 fn read_table(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
@@ -373,6 +375,27 @@ fn mapped_rows(
 }
 
 fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<ImportRowResult, String> {
+    if row.values.contains_key("fab_url") {
+        let fab_url = value(row, "fab_url");
+        let mut messages = Vec::new();
+        let valid = Url::parse(fab_url).ok().is_some_and(|url| {
+            matches!(url.host_str(), Some("fab.com" | "www.fab.com"))
+                && url.path().contains("/listings/")
+        });
+        if !valid {
+            messages.push("Fab URL 无效或缺失".into());
+        }
+        return Ok(ImportRowResult {
+            row: row.row,
+            name: fab_url.into(),
+            status: if valid {
+                "valid".into()
+            } else {
+                "error".into()
+            },
+            messages,
+        });
+    }
     let name = [
         value(row, "name_zh"),
         value(row, "name_en"),
@@ -388,36 +411,35 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
         messages.push("缺少素材名称".into());
         status = "error";
     }
-    if link.is_empty() {
-        messages.push("缺少分享链接".into());
-        status = "error";
-    } else if Url::parse(link)
-        .ok()
-        .is_none_or(|u| !matches!(u.scheme(), "http" | "https"))
-    {
-        messages.push("分享链接格式无效".into());
-        status = "error";
-    } else {
-        let normalized = db::normalize_share_url(link).unwrap_or_default();
-        let exists: bool = connection
+    if !link.is_empty() {
+        if Url::parse(link)
+            .ok()
+            .is_none_or(|u| !matches!(u.scheme(), "http" | "https"))
+        {
+            messages.push("分享链接格式无效".into());
+            status = "error";
+        } else {
+            let normalized = db::normalize_share_url(link).unwrap_or_default();
+            let exists: bool = connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM assets WHERE normalized_share_url=?1)",
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE normalized_share_url=?1 AND deleted_at IS NULL)",
                 [normalized],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
-        if exists && status != "error" {
-            messages.push("分享链接已存在，导入时将跳过".into());
-            status = "warning";
-        }
-        if Url::parse(link)
-            .ok()
-            .and_then(|u| u.host_str().map(ToString::to_string))
-            .is_some_and(|h| h != "pan.baidu.com" && !h.ends_with(".pan.baidu.com"))
-            && status != "error"
-        {
-            messages.push("不是百度网盘域名".into());
-            status = "warning";
+            if exists && status != "error" {
+                messages.push("分享链接已存在，导入时将跳过".into());
+                status = "warning";
+            }
+            if Url::parse(link)
+                .ok()
+                .and_then(|u| u.host_str().map(ToString::to_string))
+                .is_some_and(|h| h != "pan.baidu.com" && !h.ends_with(".pan.baidu.com"))
+                && status != "error"
+            {
+                messages.push("不是百度网盘域名".into());
+                status = "warning";
+            }
         }
     }
     for path in split(value(row, "preview_paths")) {
@@ -490,4 +512,24 @@ fn ensure_category_path(connection: &Connection, raw: &str) -> Result<Option<Str
         parent = Some(id);
     }
     Ok(parent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn reads_the_simplified_fab_template_and_user_versions() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("fab.csv");
+        std::fs::write(&path, "fab_url,baidu_url,ue_versions\nhttps://www.fab.com/listings/11111111-1111-1111-1111-111111111111,https://pan.baidu.com/s/demo?pwd=a1b2,5.4;5.5\n").unwrap();
+        let mapping =
+            suggest_mapping(&["fab_url".into(), "baidu_url".into(), "ue_versions".into()]);
+        assert!(is_fab_import(&mapping));
+        let rows = fab_rows(&path, mapping).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ue_versions, vec!["5.4", "5.5"]);
+        assert!(rows[0].baidu_text.contains("pwd=a1b2"));
+    }
 }

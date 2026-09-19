@@ -42,4 +42,18 @@ describe("DetailPanel bilingual content", () => {
     fireEvent.click(screen.getByRole("button", { name: /重新检查/ }));
     expect(handlers.onCheckLink).toHaveBeenCalled();
   });
+
+  it("opens only the detected HTTP link from a description", () => {
+    const onOpenExternal = vi.fn();
+    const linked: AssetDetail = { ...asset, localizations: { ...asset.localizations, "zh-CN": { ...asset.localizations["zh-CN"]!, description: "文档 https://example.com/help。" } } };
+    render(<DetailPanel asset={linked} contentLanguage="zh-CN" loading={false} {...handlers} onOpenExternal={onOpenExternal} />);
+    fireEvent.click(screen.getByRole("button", { name: "https://example.com/help。" }));
+    expect(onOpenExternal).toHaveBeenCalledWith("https://example.com/help");
+  });
+
+  it("shows a neutral missing-link state", () => {
+    render(<DetailPanel asset={{ ...asset, shareUrl: "" }} contentLanguage="zh-CN" loading={false} {...handlers} />);
+    expect(screen.getByText("未添加百度网盘链接")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重新检查/ })).not.toBeInTheDocument();
+  });
 });
