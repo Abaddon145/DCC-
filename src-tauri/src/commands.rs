@@ -1,6 +1,6 @@
 use crate::{
-    backup, db, fab, images, importer, link_checker, models::*, organization, reference_boards,
-    state::AppState, translation,
+    backup, baidu_netdisk, db, fab, images, importer, link_checker, models::*, organization,
+    reference_boards, state::AppState, translation,
 };
 use arboard::Clipboard;
 use std::{collections::HashMap, path::PathBuf};
@@ -310,6 +310,74 @@ pub fn prepare_baidu_save_tasks(
     ids: Vec<String>,
 ) -> Result<Vec<BaiduSaveTask>, String> {
     state.with_library(|connection, _| db::prepare_baidu_save_tasks(connection, &ids))
+}
+
+#[tauri::command]
+pub fn get_baidu_netdisk_settings() -> Result<BaiduNetdiskSettings, String> {
+    baidu_netdisk::get_settings()
+}
+
+#[tauri::command]
+pub fn save_baidu_netdisk_credentials(
+    app_id: String,
+    app_key: String,
+    secret_key: String,
+) -> Result<BaiduNetdiskSettings, String> {
+    baidu_netdisk::save_credentials(&app_id, &app_key, &secret_key)?;
+    baidu_netdisk::get_settings()
+}
+
+#[tauri::command]
+pub fn delete_baidu_netdisk_credentials() -> Result<(), String> {
+    baidu_netdisk::delete_credentials()
+}
+
+#[tauri::command]
+pub fn disconnect_baidu_netdisk() -> Result<BaiduNetdiskSettings, String> {
+    baidu_netdisk::disconnect()
+}
+
+#[tauri::command]
+pub async fn start_baidu_netdisk_authorization() -> Result<BaiduDeviceAuthorization, String> {
+    baidu_netdisk::start_authorization().await
+}
+
+#[tauri::command]
+pub async fn complete_baidu_netdisk_authorization() -> Result<BaiduNetdiskSettings, String> {
+    baidu_netdisk::complete_authorization().await
+}
+
+#[tauri::command]
+pub async fn list_baidu_netdisk_folders(path: String) -> Result<Vec<BaiduNetdiskFolder>, String> {
+    baidu_netdisk::list_folders(&path).await
+}
+
+#[tauri::command]
+pub fn set_baidu_netdisk_default_path(path: String) -> Result<BaiduNetdiskSettings, String> {
+    baidu_netdisk::set_default_path(&path)
+}
+
+#[tauri::command]
+pub async fn transfer_baidu_save_task(
+    state: State<'_, AppState>,
+    asset_id: String,
+    destination: String,
+) -> Result<BaiduTransferResult, String> {
+    let task = state.with_library(|connection, _| {
+        db::prepare_baidu_save_tasks(connection, std::slice::from_ref(&asset_id))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "素材没有可转存的百度网盘链接".to_string())
+    })?;
+    baidu_netdisk::transfer(&task, &destination).await
+}
+
+#[tauri::command]
+pub async fn query_baidu_transfer_task(
+    asset_id: String,
+    task_id: String,
+) -> Result<BaiduTransferResult, String> {
+    baidu_netdisk::query_transfer(&asset_id, &task_id).await
 }
 
 #[tauri::command]
