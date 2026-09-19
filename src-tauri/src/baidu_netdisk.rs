@@ -228,6 +228,17 @@ pub fn save_credentials(app_id: &str, app_key: &str, secret_key: &str) -> Result
     if app_id.trim().is_empty() || app_key.trim().is_empty() || secret_key.trim().is_empty() {
         return Err("App ID、App Key 和 Secret Key 不能为空".into());
     }
+    if app_id
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .is_none()
+    {
+        return Err(
+            "App ID 必须是百度网盘开放平台应用详情中的纯数字应用 ID，不能填写 App Key".into(),
+        );
+    }
     let mut bundle = load_bundle()?;
     let changed = bundle.app_id != app_id.trim()
         || bundle.app_key != app_key.trim()
@@ -484,10 +495,13 @@ async fn checked_pan_reply<T: DeserializeOwned>(
 ) -> Result<T, String> {
     let reply: PanReply<T> = json_response(response).await?;
     if reply.errno != 0 {
-        let message = if reply.show_msg.trim().is_empty() {
-            map_pan_error(reply.errno, action)
-        } else {
-            format!("{}（错误码 {}）", reply.show_msg, reply.errno)
+        let message = match reply.errno {
+            -6 | 2 | 13998 | 13000 | 13001 | 13003 | 13004 | 13010 | 13041 | 13045 | 13063
+            | 13070 | 13071 | 13072 | 13073 | 13076 | 13077 => map_pan_error(reply.errno, action),
+            _ if !reply.show_msg.trim().is_empty() => {
+                format!("{}（错误码 {}）", reply.show_msg, reply.errno)
+            }
+            _ => map_pan_error(reply.errno, action),
         };
         return Err(message);
     }
@@ -500,12 +514,18 @@ fn map_pan_error(errno: i64, action: &str) -> String {
     match errno {
         -6 => "百度网盘登录已失效或权限不足，请重新授权".into(),
         2 => format!("{action}：请求参数错误"),
-        13998 => "当前应用未开通文件分享服务权限".into(),
+        13998 => "当前百度网盘应用尚未开通“文件分享服务”权限（错误码 13998）。请确认 App ID 来自当前网盘应用，并在百度网盘开放平台申请开通后重新授权".into(),
         13000 | 13001 | 13004 => "分享链接已失效、取消或不存在".into(),
         13003 => "分享链接需要提取码或提取码错误".into(),
+        13010 => "分享文件已被删除或不存在".into(),
+        13041 => "待转存文件不属于当前分享链接".into(),
+        13045 => "不能将自己创建的分享链接转存回同一百度网盘账号".into(),
+        13063 => "百度网盘转存失败，请稍后重试".into(),
         13070 => "转存任务暂时无法查询，请稍后在百度网盘中确认".into(),
         13071 => "已有其他转存任务正在进行，请稍后再试".into(),
         13072 | 13073 => "分享内容超过当前账号单次转存数量上限".into(),
+        13076 => "目标目录已存在同名文件".into(),
+        13077 => "百度网盘空间不足，请清理或扩充容量后重试".into(),
         _ => format!("{action}（错误码 {errno}）"),
     }
 }
@@ -686,5 +706,11 @@ mod tests {
         assert_eq!(validate_path("/apps/栈藏/").unwrap(), "/apps/栈藏");
         assert!(validate_path("apps/栈藏").is_err());
         assert!(validate_path("/apps/../private").is_err());
+    }
+
+    #[test]
+    fn explains_missing_share_permission_instead_of_forwarding_invalid_app() {
+        assert!(map_pan_error(13998, "提交转存任务失败").contains("文件分享服务"));
+        assert!(map_pan_error(13998, "提交转存任务失败").contains("13998"));
     }
 }
