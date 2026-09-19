@@ -396,6 +396,7 @@ pub async fn import_assets(
     mapping: HashMap<String, String>,
 ) -> Result<ImportReport, String> {
     if importer::is_fab_import(&mapping) {
+        let (_, fab_auto_translate) = state.preferences()?;
         let rows = importer::fab_rows(&PathBuf::from(&path), mapping)?;
         let total = rows.len();
         let mut report = ImportReport {
@@ -473,6 +474,33 @@ pub async fn import_assets(
                     license: metadata.license.clone(),
                 },
             );
+            let mut messages = Vec::new();
+            if fab_auto_translate {
+                emit_import_progress(
+                    &app,
+                    index + 1,
+                    total,
+                    &report,
+                    &metadata.name,
+                    "在线翻译中文信息",
+                );
+                let request = TranslationRequest {
+                    source_language: "en".into(),
+                    target_language: "zh-CN".into(),
+                    fields: LocalizedAssetText {
+                        name: metadata.name.clone(),
+                        description: metadata.description.clone(),
+                        tags: metadata.tags.clone(),
+                        license: metadata.license.clone(),
+                    },
+                };
+                match translation::translate(request).await {
+                    Ok(preview) => {
+                        apply_fab_translation(&mut localizations, &mut messages, preview)
+                    }
+                    Err(error) => messages.push(format!("自动翻译跳过：{error}")),
+                }
+            }
             let images = metadata
                 .preview_images
                 .iter()
@@ -514,7 +542,6 @@ pub async fn import_assets(
             }) {
                 Ok(_) => {
                     report.imported += 1;
-                    let mut messages = Vec::new();
                     if let Some(warning) = metadata.image_warning {
                         messages.push(warning);
                     }
@@ -546,6 +573,29 @@ pub async fn import_assets(
     state.with_library_mut(|connection, base_dir| {
         importer::commit(connection, base_dir, &PathBuf::from(path), mapping)
     })
+}
+
+fn apply_fab_translation(
+    localizations: &mut HashMap<String, LocalizedAssetText>,
+    messages: &mut Vec<String>,
+    preview: TranslationPreview,
+) {
+    messages.extend(
+        preview
+            .warnings
+            .into_iter()
+            .map(|warning| format!("自动翻译：{warning}")),
+    );
+    let translated = preview.fields;
+    if !translated.name.trim().is_empty()
+        || !translated.description.trim().is_empty()
+        || !translated.tags.is_empty()
+        || !translated.license.trim().is_empty()
+    {
+        localizations.insert("zh-CN".into(), translated);
+    } else if messages.is_empty() {
+        messages.push("自动翻译未返回可保存的中文内容".into());
+    }
 }
 
 fn emit_import_progress(
@@ -1049,5 +1099,26 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.share_url, "https://pan.baidu.com/s/demo?pwd=a1b2");
         assert_eq!(parsed.extraction_code, "a1b2");
+    }
+
+    #[test]
+    fn keeps_partial_batch_translation_and_reports_failed_fields() {
+        let mut localizations = HashMap::new();
+        let mut messages = Vec::new();
+        apply_fab_translation(
+            &mut localizations,
+            &mut messages,
+            TranslationPreview {
+                fields: LocalizedAssetText {
+                    name: "未来城市".into(),
+                    ..Default::default()
+                },
+                warnings: vec!["description：请求超时".into()],
+                failed_fields: vec!["description".into()],
+                character_count: 12,
+            },
+        );
+        assert_eq!(localizations["zh-CN"].name, "未来城市");
+        assert!(messages[0].contains("请求超时"));
     }
 }

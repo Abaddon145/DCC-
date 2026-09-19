@@ -282,6 +282,7 @@ input, textarea, select { border: 1px solid var(--border-light); border-radius: 
 .import-drop { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #3a4452; border-radius: 10px; color: var(--muted); }
 .import-drop h3 { margin: 14px 0 4px; color: #d8dde5; font-size: 15px; }
 .import-drop p { margin: 0 0 18px; font-size: 11px; }
+.import-hint { margin: -4px 0 12px; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .import-drop > div { display: flex; gap: 8px; }
 .selected-file { display: flex; align-items: center; gap: 9px; padding: 10px 12px; margin-bottom: 20px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2); }
 .selected-file span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }

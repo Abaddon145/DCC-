@@ -1,10 +1,16 @@
 use crate::{db, models::*};
 use calamine::{open_workbook_auto, Reader};
+use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
-use std::{collections::HashMap, fs::File, io::Write, path::Path};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+};
 use url::Url;
 use uuid::Uuid;
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const CANONICAL: &[(&str, &[&str])] = &[
     ("fab_url", &["fab_url", "Fab URL", "Fab网址", "Fab 链接"]),
@@ -363,19 +369,165 @@ fn read_table(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
                 .ok_or("表格中没有工作表")?
                 .map_err(|e| e.to_string())?;
             let mut iter = range.rows();
-            let headers = iter
+            let headers: Vec<String> = iter
                 .next()
                 .ok_or("表格为空")?
                 .iter()
                 .map(|c| c.to_string())
                 .collect();
-            let rows = iter
+            let mut rows: Vec<Vec<String>> = iter
                 .map(|row| row.iter().map(|c| c.to_string()).collect())
                 .collect();
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("xlsx"))
+            {
+                apply_url_hyperlinks(path, &headers, &mut rows);
+            }
             Ok((headers, rows))
         }
         _ => Err("仅支持 .xlsx 和 .csv 文件".into()),
     }
+}
+
+fn apply_url_hyperlinks(path: &Path, headers: &[String], rows: &mut [Vec<String>]) {
+    let Ok(hyperlinks) = xlsx_hyperlinks(path) else {
+        return;
+    };
+    let mapping = suggest_mapping(headers);
+    for canonical in ["fab_url", "baidu_url", "share_url", "source_url"] {
+        let Some(header) = mapping.get(canonical) else {
+            continue;
+        };
+        let Some(column) = headers.iter().position(|value| value == header) else {
+            continue;
+        };
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            if let Some(target) = hyperlinks.get(&(row_index + 2, column + 1)) {
+                if Url::parse(target)
+                    .ok()
+                    .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+                {
+                    if row.len() <= column {
+                        row.resize(column + 1, String::new());
+                    }
+                    row[column] = target.clone();
+                }
+            }
+        }
+    }
+}
+
+fn xlsx_hyperlinks(path: &Path) -> Result<HashMap<(usize, usize), String>, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|error| error.to_string())?;
+    let workbook_xml = zip_text(&mut archive, "xl/workbook.xml")?;
+    let workbook_rels = zip_text(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let first_sheet = Regex::new(r#"<sheet\b[^>]*>"#)
+        .map_err(|error| error.to_string())?
+        .find(&workbook_xml)
+        .ok_or_else(|| "Excel 工作簿没有工作表".to_string())?
+        .as_str();
+    let relationship_id =
+        xml_attribute(first_sheet, "r:id").ok_or_else(|| "Excel 工作表关系无效".to_string())?;
+    let sheet_target = relationship_target(&workbook_rels, &relationship_id)
+        .ok_or_else(|| "Excel 工作表路径无效".to_string())?;
+    let sheet_path = if sheet_target.starts_with('/') {
+        sheet_target.trim_start_matches('/').to_string()
+    } else {
+        format!("xl/{}", sheet_target.trim_start_matches("../"))
+    };
+    let (sheet_directory, sheet_file) = sheet_path
+        .rsplit_once('/')
+        .ok_or_else(|| "Excel 工作表路径无效".to_string())?;
+    let sheet_rels_path = format!("{sheet_directory}/_rels/{sheet_file}.rels");
+    let sheet_xml = zip_text(&mut archive, &sheet_path)?;
+    let sheet_rels = match zip_text(&mut archive, &sheet_rels_path) {
+        Ok(value) => value,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let mut targets = HashMap::new();
+    let relationship_tag =
+        Regex::new(r#"<Relationship\b[^>]*>"#).map_err(|error| error.to_string())?;
+    for item in relationship_tag.find_iter(&sheet_rels) {
+        let tag = item.as_str();
+        if let (Some(id), Some(target)) = (xml_attribute(tag, "Id"), xml_attribute(tag, "Target")) {
+            targets.insert(id, xml_unescape(&target));
+        }
+    }
+    let hyperlink_tag = Regex::new(r#"<hyperlink\b[^>]*>"#).map_err(|error| error.to_string())?;
+    let mut result = HashMap::new();
+    for item in hyperlink_tag.find_iter(&sheet_xml) {
+        let tag = item.as_str();
+        let Some(reference) = xml_attribute(tag, "ref") else {
+            continue;
+        };
+        let Some(id) = xml_attribute(tag, "r:id") else {
+            continue;
+        };
+        if let (Some(cell), Some(target)) = (cell_position(&reference), targets.get(&id)) {
+            result.insert(cell, target.clone());
+        }
+    }
+    Ok(result)
+}
+
+fn zip_text(archive: &mut ZipArchive<File>, name: &str) -> Result<String, String> {
+    let mut value = String::new();
+    archive
+        .by_name(name)
+        .map_err(|error| error.to_string())?
+        .read_to_string(&mut value)
+        .map_err(|error| error.to_string())?;
+    Ok(value)
+}
+
+fn xml_attribute(tag: &str, name: &str) -> Option<String> {
+    Regex::new(&format!(r#"\b{}="([^"]*)""#, regex::escape(name)))
+        .ok()?
+        .captures(tag)
+        .and_then(|capture| capture.get(1))
+        .map(|value| value.as_str().to_string())
+}
+
+fn relationship_target(xml: &str, id: &str) -> Option<String> {
+    let relationship_tag = Regex::new(r#"<Relationship\b[^>]*>"#).ok()?;
+    let result = relationship_tag.find_iter(xml).find_map(|item| {
+        let tag = item.as_str();
+        (xml_attribute(tag, "Id").as_deref() == Some(id))
+            .then(|| xml_attribute(tag, "Target"))
+            .flatten()
+            .map(|value| xml_unescape(&value))
+    });
+    result
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn cell_position(reference: &str) -> Option<(usize, usize)> {
+    let letters = reference
+        .chars()
+        .take_while(|value| value.is_ascii_alphabetic())
+        .collect::<String>();
+    let digits = reference
+        .chars()
+        .skip_while(|value| value.is_ascii_alphabetic())
+        .collect::<String>();
+    let row = digits.parse::<usize>().ok()?;
+    let column = letters.chars().try_fold(0usize, |value, letter| {
+        value
+            .checked_mul(26)?
+            .checked_add((letter.to_ascii_uppercase() as u8 - b'A' + 1) as usize)
+    })?;
+    (row > 0 && column > 0).then_some((row, column))
 }
 
 fn suggest_mapping(headers: &[String]) -> HashMap<String, String> {
@@ -573,6 +725,43 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn write_hyperlink_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut archive = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Fab批量导入" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>fab_url</t></is></c><c r="B1" t="inlineStr"><is><t>baidu_url</t></is></c><c r="C1" t="inlineStr"><is><t>ue_versions</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>https://www.fab.com/listings/11111111-1111-1111-1111-111111111111</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Futuristic Rooftop City Environment | Fab</t></is></c><c r="B3" t="inlineStr"><is><t>通过网盘分享的文件：City.rar&#10;链接: https://pan.baidu.com/s/demo?pwd=6666 提取码: 6666</t></is></c></row></sheetData><hyperlinks><hyperlink ref="A3" r:id="rId1"/></hyperlinks></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/_rels/sheet1.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://www.fab.com/listings/6b1e9d82-2d94-45d0-993e-d5e730eac7de" TargetMode="External"/></Relationships>"#,
+            ),
+        ];
+        for (name, content) in parts {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
     #[test]
     fn reads_the_simplified_fab_template_and_user_versions() {
         let directory = tempdir().unwrap();
@@ -601,5 +790,21 @@ mod tests {
         );
         assert!(rows[0].baidu_text.contains("pwd=a1b2"));
         assert_eq!(rows[0].ue_versions, vec!["5.4", "5.5"]);
+    }
+
+    #[test]
+    fn reads_fab_url_from_a_titled_excel_hyperlink() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("linked-template.xlsx");
+        write_hyperlink_fixture(&path);
+
+        let rows = fab_rows(&path, HashMap::new()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].row, 3);
+        assert_eq!(
+            rows[1].fab_url,
+            "https://www.fab.com/listings/6b1e9d82-2d94-45d0-993e-d5e730eac7de"
+        );
+        assert!(rows[1].baidu_text.contains("提取码: 6666"));
     }
 }
