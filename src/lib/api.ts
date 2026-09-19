@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AssetDetail, AssetInput, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, BaiduSaveTask, BaiduNetdiskSettings, BaiduDeviceAuthorization, BaiduNetdiskFolder, BaiduTransferResult } from "../types";
+import type { AssetDetail, AssetInput, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, BaiduSaveTask } from "../types";
 
 export const api = {
   getMeta: (contentLanguage: ContentLanguage) => invoke<LibraryMeta>("get_library_meta", { contentLanguage }),
@@ -19,16 +19,6 @@ export const api = {
   purgeTrashBatch: (batchId: string) => invoke<void>("purge_trash_batch", { batchId }),
   emptyTrash: () => invoke<number>("empty_trash"),
   prepareBaiduSaveTasks: (ids: string[]) => invoke<BaiduSaveTask[]>("prepare_baidu_save_tasks", { ids }),
-  getBaiduNetdiskSettings: () => invoke<BaiduNetdiskSettings>("get_baidu_netdisk_settings"),
-  saveBaiduNetdiskCredentials: (appId: string, appKey: string, secretKey: string) => invoke<BaiduNetdiskSettings>("save_baidu_netdisk_credentials", { appId, appKey, secretKey }),
-  deleteBaiduNetdiskCredentials: () => invoke<void>("delete_baidu_netdisk_credentials"),
-  disconnectBaiduNetdisk: () => invoke<BaiduNetdiskSettings>("disconnect_baidu_netdisk"),
-  startBaiduNetdiskAuthorization: () => invoke<BaiduDeviceAuthorization>("start_baidu_netdisk_authorization"),
-  completeBaiduNetdiskAuthorization: () => invoke<BaiduNetdiskSettings>("complete_baidu_netdisk_authorization"),
-  listBaiduNetdiskFolders: (path: string) => invoke<BaiduNetdiskFolder[]>("list_baidu_netdisk_folders", { path }),
-  setBaiduNetdiskDefaultPath: (path: string) => invoke<BaiduNetdiskSettings>("set_baidu_netdisk_default_path", { path }),
-  transferBaiduSaveTask: (assetId: string, destination: string) => invoke<BaiduTransferResult>("transfer_baidu_save_task", { assetId, destination }),
-  queryBaiduTransferTask: (assetId: string, taskId: string) => invoke<BaiduTransferResult>("query_baidu_transfer_task", { assetId, taskId }),
   prepareReferenceCoverIds: (ids: string[]) => invoke<string[]>("prepare_reference_cover_ids", { ids }),
   imageData: (imageId: string, thumbnail = true) => invoke<string>("get_image_data", { imageId, thumbnail }),
   openShare: (id: string) => invoke<void>("open_share_link", { id }),

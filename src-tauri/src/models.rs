@@ -703,42 +703,6 @@ pub struct BaiduSaveTask {
     pub extraction_code: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaiduNetdiskSettings {
-    pub configured: bool,
-    pub connected: bool,
-    pub account_name: Option<String>,
-    pub default_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaiduDeviceAuthorization {
-    pub user_code: String,
-    pub verification_url: String,
-    pub qrcode_url: String,
-    pub expires_in: i64,
-    pub interval: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaiduNetdiskFolder {
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaiduTransferResult {
-    pub asset_id: String,
-    pub task_id: String,
-    pub status: String,
-    pub message: String,
-    pub saved_count: usize,
-}
-
 #[derive(Debug, Clone)]
 pub struct ParsedImportRow {
     pub row: usize,

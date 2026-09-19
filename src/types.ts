@@ -201,10 +201,6 @@ export interface DeleteRequest { assetIds: string[]; categoryId: string | null }
 export interface DeleteResult { batchId: string; label: string; assetCount: number; categoryCount: number }
 export interface TrashBatch { id: string; kind: "assets" | "category"; label: string; assetCount: number; categoryCount: number; createdAt: string }
 export interface BaiduSaveTask { id: string; name: string; shareUrl: string; extractionCode: string }
-export interface BaiduNetdiskSettings { configured: boolean; connected: boolean; accountName: string | null; defaultPath: string }
-export interface BaiduDeviceAuthorization { userCode: string; verificationUrl: string; qrcodeUrl: string; expiresIn: number; interval: number }
-export interface BaiduNetdiskFolder { name: string; path: string }
-export interface BaiduTransferResult { assetId: string; taskId: string; status: "submitted" | "success" | "failed"; message: string; savedCount: number }
 
 export interface LibraryLocation {
   path: string;

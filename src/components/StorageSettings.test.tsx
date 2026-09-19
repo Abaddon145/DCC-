@@ -9,9 +9,6 @@ vi.mock("../lib/api", () => ({ api: {
     recent: [], startupWarning: null
   }),
   getTranslationSettings: vi.fn().mockResolvedValue({ provider: "baidu", configured: false, fabAutoTranslate: true, contentLanguage: "zh-CN" }),
-  getBaiduNetdiskSettings: vi.fn().mockResolvedValue({ configured: false, connected: false, accountName: null, defaultPath: "/" }),
-  saveBaiduNetdiskCredentials: vi.fn(), startBaiduNetdiskAuthorization: vi.fn(), completeBaiduNetdiskAuthorization: vi.fn(),
-  disconnectBaiduNetdisk: vi.fn(), deleteBaiduNetdiskCredentials: vi.fn(), openExternal: vi.fn(),
   saveTranslationCredentials: vi.fn().mockResolvedValue(undefined),
   testTranslationService: vi.fn().mockResolvedValue({ success: true, message: "连接成功" }),
   setFabAutoTranslate: vi.fn(), deleteTranslationCredentials: vi.fn(), changeLibrary: vi.fn(), forgetRecentLibrary: vi.fn()

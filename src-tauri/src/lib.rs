@@ -1,5 +1,4 @@
 mod backup;
-mod baidu_netdisk;
 mod commands;
 mod db;
 mod fab;
@@ -18,6 +17,9 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Ok(entry) = keyring::Entry::new("DCCAssetLibrary.BaiduNetdisk", "default") {
+        let _ = entry.delete_credential();
+    }
     let state = AppState::initialize().unwrap_or_else(|error| panic!("无法启动素材库：{error}"));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -44,16 +46,6 @@ pub fn run() {
             purge_trash_batch,
             empty_trash,
             prepare_baidu_save_tasks,
-            get_baidu_netdisk_settings,
-            save_baidu_netdisk_credentials,
-            delete_baidu_netdisk_credentials,
-            disconnect_baidu_netdisk,
-            start_baidu_netdisk_authorization,
-            complete_baidu_netdisk_authorization,
-            list_baidu_netdisk_folders,
-            set_baidu_netdisk_default_path,
-            transfer_baidu_save_task,
-            query_baidu_transfer_task,
             prepare_reference_cover_ids,
             get_image_data,
             copy_extraction_code,
