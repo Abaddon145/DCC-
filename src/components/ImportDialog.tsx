@@ -38,8 +38,8 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
     if (typeof result === "string") { setPath(result); setReport(null); await inspect(result); }
   };
   const exportTemplate = async () => {
-    const result = await save({ defaultPath: "DCC素材导入模板.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
-    if (result) { await api.exportTemplate(result); notify("导入模板已保存"); }
+    const result = await save({ defaultPath: "栈藏-Fab批量导入模板.xlsx", filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }] });
+    if (result) { await api.exportTemplate(result); notify("Excel 导入模板已保存"); }
   };
   const commit = async () => {
     setBusy(true);
@@ -56,7 +56,7 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true">
     <header className="modal-header"><div><span className="eyebrow">批量录入</span><h2>导入 Excel / CSV</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
     <div className="import-body">
-      {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>支持 .xlsx 和 UTF-8 .csv，可在下一步映射列名。</p><div><button className="primary-button" onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载模板</button></div></div> : <>
+      {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>推荐使用下载的 Excel 模板；旧版 .xlsx 和 UTF-8 .csv 仍可继续导入。</p><div><button className="primary-button" onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载 Excel 模板</button></div></div> : <>
         <div className="selected-file"><FileSpreadsheet size={20} /><span title={path}>{path.split(/[\\/]/).at(-1)}</span><button onClick={choose}>更换文件</button></div>
         <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3><div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select value={mapping[field.key] || ""} onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
         {preview && <><div className="import-summary"><span className="valid"><CheckCircle2 size={15} />有效 {preview.validCount}</span><span className="warning"><AlertCircle size={15} />警告 {preview.warningCount}</span><span className="error"><AlertCircle size={15} />错误 {preview.errorCount}</span></div>

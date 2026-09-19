@@ -1,9 +1,10 @@
 use crate::{db, models::*};
 use calamine::{open_workbook_auto, Reader};
 use rusqlite::{Connection, OptionalExtension};
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, fs::File, io::Write, path::Path};
 use url::Url;
 use uuid::Uuid;
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const CANONICAL: &[(&str, &[&str])] = &[
     ("fab_url", &["fab_url", "Fab URL", "Fab网址", "Fab 链接"]),
@@ -223,20 +224,73 @@ pub fn commit(
 }
 
 pub fn export_template(path: &Path) -> Result<(), String> {
-    let mut writer = csv::WriterBuilder::new()
-        .from_path(path)
-        .map_err(|e| e.to_string())?;
-    writer
-        .write_record(["fab_url", "baidu_url", "ue_versions"])
-        .map_err(|e| e.to_string())?;
-    writer
-        .write_record([
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_none_or(|value| !value.eq_ignore_ascii_case("xlsx"))
+    {
+        return Err("导入模板必须保存为 .xlsx 文件".into());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file = File::create(path).map_err(|error| format!("创建 Excel 模板失败：{error}"))?;
+    let mut archive = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let parts = [
+        ("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_string()),
+        ("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string()),
+        ("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Fab批量导入" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string()),
+        ("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_string()),
+        ("xl/worksheets/sheet1.xml", template_sheet_xml()),
+    ];
+    for (name, content) in parts {
+        archive
+            .start_file(name, options)
+            .map_err(|error| error.to_string())?;
+        archive
+            .write_all(content.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    archive.finish().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn template_sheet_xml() -> String {
+    let rows = [
+        ["fab_url", "baidu_url", "ue_versions"],
+        [
             "https://www.fab.com/listings/00000000-0000-0000-0000-000000000000",
             "https://pan.baidu.com/s/example?pwd=a1b2",
             "5.4;5.5",
-        ])
-        .map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+        ],
+    ];
+    let mut sheet = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="72" customWidth="1"/><col min="2" max="2" width="48" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/></cols><sheetData>"#,
+    );
+    for (row_index, row) in rows.iter().enumerate() {
+        sheet.push_str(&format!("<row r=\"{}\">", row_index + 1));
+        for (column_index, value) in row.iter().enumerate() {
+            let column = (b'A' + column_index as u8) as char;
+            sheet.push_str(&format!(
+                "<c r=\"{column}{}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
+                row_index + 1,
+                xml_escape(value)
+            ));
+        }
+        sheet.push_str("</row>");
+    }
+    sheet.push_str("</sheetData></worksheet>");
+    sheet
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[derive(Debug, Clone)]
@@ -531,5 +585,21 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ue_versions, vec!["5.4", "5.5"]);
         assert!(rows[0].baidu_text.contains("pwd=a1b2"));
+    }
+
+    #[test]
+    fn exports_a_real_excel_template_that_can_be_imported_again() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("fab-template.xlsx");
+        export_template(&path).unwrap();
+
+        let rows = fab_rows(&path, HashMap::new()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].fab_url,
+            "https://www.fab.com/listings/00000000-0000-0000-0000-000000000000"
+        );
+        assert!(rows[0].baidu_text.contains("pwd=a1b2"));
+        assert_eq!(rows[0].ue_versions, vec!["5.4", "5.5"]);
     }
 }
