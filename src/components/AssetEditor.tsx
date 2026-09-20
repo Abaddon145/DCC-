@@ -1,20 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDown, ArrowUp, ClipboardPaste, ImagePlus, Languages, Save, Sparkles, Star, Trash2, X } from "lucide-react";
-import type { AssetDetail, AssetInput, Category, ContentLanguage, FabDuplicateMatch, ImageInput, LocalizedAssetText, ParsedShareText, TranslationPreview } from "../types";
+import { ArrowDown, ArrowUp, ClipboardPaste, FileVideo, ImagePlus, Languages, RefreshCw, Save, Sparkles, Star, Trash2, X } from "lucide-react";
+import type { AssetDetail, AssetInput, AssetMedia, Category, ContentLanguage, FabDuplicateMatch, ImageInput, LocalizedAssetText, ParsedShareText, TranslationPreview } from "../types";
 import { formatBytes, parseSize, splitValues, validateAsset } from "../lib/validation";
 import { ImagePreview } from "./ImagePreview";
 import { api } from "../lib/api";
 import { applyFabMetadata, isFabUrl } from "../lib/fab";
+import { MediaPreview } from "./MediaPreview";
 
-interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<void>; onOpenExisting?: (id: string) => void }
+interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<AssetDetail | void>; onMediaImported?: (id:string)=>Promise<void>; onOpenExisting?: (id: string) => void }
 
 const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", tags: [], license: "" });
 
 const empty: AssetInput = {
   name: "", description: "", categoryId: null, tags: [], dccTools: ["Unreal Engine"], versions: [], formats: [],
-  sizeBytes: null, author: "", sourceUrl: "", fabListingId: null, autoCategoryPath: [], license: "", shareUrl: "", extractionCode: "", favorite: false, images: [],
+  sizeBytes: null, author: "", sourceUrl: "", fabListingId: null, autoCategoryPath: [], license: "", shareUrl: "", extractionCode: "", favorite: false, rating: 0, images: [],
   localizations: { "zh-CN": blankLocalized(), en: blankLocalized() }, contentLanguage: "zh-CN"
 };
 
@@ -25,7 +26,7 @@ function toInput(asset: AssetDetail | null, contentLanguage: ContentLanguage, in
     dccTools: asset.dccTools, versions: asset.versions, formats: asset.formats, sizeBytes: asset.sizeBytes,
     author: asset.author, sourceUrl: asset.sourceUrl, license: asset.license, shareUrl: asset.shareUrl,
     fabListingId: asset.fabListingId, autoCategoryPath: [],
-    extractionCode: asset.extractionCode, favorite: asset.favorite,
+    extractionCode: asset.extractionCode, favorite: asset.favorite, rating: asset.rating || 0,
     images: asset.images.map(image => ({ id: image.id, originalName: image.originalName, isCover: image.isCover, sortOrder: image.sortOrder })),
     localizations: { "zh-CN": asset.localizations["zh-CN"] || blankLocalized(), en: asset.localizations.en || blankLocalized() }, contentLanguage
   };
@@ -41,7 +42,7 @@ function flattenCategories(categories: Category[]) {
   walk(null, 0); return result;
 }
 
-export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onOpenExisting }: Props) {
+export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onMediaImported, onOpenExisting }: Props) {
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
   const [editLanguage, setEditLanguage] = useState<ContentLanguage>(contentLanguage);
   const [sizeText, setSizeText] = useState(asset?.sizeBytes ? formatBytes(asset.sizeBytes) : "");
@@ -54,6 +55,9 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const [fabDuplicate, setFabDuplicate] = useState<FabDuplicateMatch | null>(null);
   const [translating, setTranslating] = useState(false);
   const [translation, setTranslation] = useState<{ target: ContentLanguage; preview: TranslationPreview; selected: Set<keyof LocalizedAssetText>; characterCount?: number } | null>(null);
+  const [media, setMedia] = useState<AssetMedia[]>(asset?.media || []);
+  const [pendingMediaPaths, setPendingMediaPaths] = useState<string[]>([]);
+  const [mediaBusy, setMediaBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const categoryOptions = useMemo(() => flattenCategories(categories), [categories]);
 
@@ -67,7 +71,11 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
     if (!("__TAURI_INTERNALS__" in window)) return;
     let unlisten: (() => void) | undefined;
     getCurrentWebviewWindow().onDragDropEvent(event => {
-      if (event.payload.type === "drop") addPaths(event.payload.paths);
+      if (event.payload.type === "drop") {
+        const imagePaths = event.payload.paths.filter(path => /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(path));
+        const mediaPaths = event.payload.paths.filter(path => /\.(mp4|webm|mov|mkv|mp3|wav|ogg|flac|glb|gltf|fbx|obj|stl)$/i.test(path));
+        addPaths(imagePaths); if (mediaPaths.length) void importMedia(mediaPaths);
+      }
     }).then(fn => { unlisten = fn; }).catch(() => undefined);
     return () => unlisten?.();
   }, []);
@@ -83,6 +91,23 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
     const result = await open({ multiple: true, filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"] }] });
     if (result) addPaths(Array.isArray(result) ? result : [result]);
   };
+
+  const importMedia = async (paths: string[]) => {
+    if (!paths.length) return;
+    if (!asset) { setPendingMediaPaths(previous=>[...new Set([...previous,...paths])]); return; }
+    setMediaBusy(true);
+    try { const imported = await api.importAssetMedia(asset.id, paths); setMedia(previous => [...previous, ...imported].sort((a,b) => a.sortOrder-b.sortOrder)); }
+    catch (error) { setWarnings([String(error)]); }
+    finally { setMediaBusy(false); }
+  };
+  const chooseMedia = async () => {
+    const result = await open({ multiple: true, filters: [{ name: "视频、音频与 3D", extensions: ["mp4","webm","mov","mkv","mp3","wav","ogg","flac","glb","gltf","fbx","obj","stl"] }] });
+    if (result) await importMedia(Array.isArray(result) ? result : [result]);
+  };
+  const deleteMedia = async (id: string) => { if (!window.confirm("删除这个预览附件？原素材记录不会被删除。")) return; setMediaBusy(true); try { await api.deleteAssetMedia(id); setMedia(previous => previous.filter(item => item.id !== id)); } catch (error) { setWarnings([String(error)]); } finally { setMediaBusy(false); } };
+  const retryMedia = async (id: string) => { setMediaBusy(true); try { const updated=await api.retryAssetMedia(id); setMedia(previous => previous.map(item => item.id===id?updated:item)); } catch (error) { setWarnings([String(error)]); } finally { setMediaBusy(false); } };
+  const moveMedia = async (index: number, delta: number) => { if (!asset) return; const next=index+delta; if (next<0||next>=media.length) return; const values=[...media]; [values[index],values[next]]=[values[next],values[index]]; const normalized=values.map((item,i)=>({...item,sortOrder:i})); setMedia(normalized); try { await api.reorderAssetMedia(asset.id, normalized.map(item=>item.id)); } catch (error) { setMedia(asset.media || []); setWarnings([String(error)]); } };
+  const setMediaCover = async (id: string) => { if (!asset) return; try { await api.setAssetCoverMedia(asset.id,id,null); setMedia(previous=>previous.map(item=>({...item,isCover:item.id===id}))); setForm(previous=>({...previous,images:previous.images.map(image=>({...image,isCover:false}))})); } catch(error) { setWarnings([String(error)]); } };
 
   const update = <K extends keyof AssetInput>(key: K, value: AssetInput[K]) => setForm(prev => ({ ...prev, [key]: value }));
   const localized = form.localizations[editLanguage] || blankLocalized();
@@ -188,7 +213,12 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         ...next,
         images: next.images.map(({ previewDataUrl: _previewDataUrl, remoteUrl: _remoteUrl, ...image }) => image)
       };
-      await onSave(payload);
+      const saved=await onSave(payload);
+      if (saved && pendingMediaPaths.length) {
+        try { await api.importAssetMedia(saved.id,pendingMediaPaths); await onMediaImported?.(saved.id); }
+        catch(error) { window.alert(`素材已保存，但部分预览附件导入失败：${String(error)}`); }
+      }
+      onClose();
     } finally { setSaving(false); }
   };
 
@@ -220,6 +250,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
         <label><span>提取码</span><input value={form.extractionCode} onChange={e => update("extractionCode", e.target.value.trim())} maxLength={32} /></label>
         <label className="checkbox-label"><input type="checkbox" checked={form.favorite} onChange={e => update("favorite", e.target.checked)} />加入收藏</label>
+        <label><span>评分</span><select value={form.rating || 0} onChange={e => update("rating", Number(e.target.value))}>{[0,1,2,3,4,5].map(value => <option key={value} value={value}>{value === 0 ? "未评分" : `${value} 星`}</option>)}</select></label>
         {warnings.map(warning => <div key={warning} className="form-warning wide">{warning}</div>)}
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>预览图片</h3><button type="button" className="secondary-button" onClick={chooseImages}><ImagePlus size={16} />选择图片</button></div>
@@ -229,6 +260,11 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
           <button type="button" className="cover-toggle" onClick={() => setCover(index)}><Star size={13} fill={image.isCover ? "currentColor" : "none"} />{image.isCover ? "封面" : "设为封面"}</button>
           <div className="image-order"><button type="button" onClick={() => moveImage(index, -1)} disabled={index === 0}><ArrowUp size={13} /></button><button type="button" onClick={() => moveImage(index, 1)} disabled={index === form.images.length - 1}><ArrowDown size={13} /></button><button type="button" onClick={() => removeImage(index)}><Trash2 size={13} /></button></div>
         </div>)}</div>
+      </div>
+      <div className="form-section"><div className="section-heading"><h3>视频、音频与 3D 预览</h3><button type="button" className="secondary-button" disabled={!asset || mediaBusy} onClick={() => void chooseMedia()}><FileVideo size={16} />{mediaBusy ? "处理中…" : "添加附件"}</button></div>
+        <p className="section-help">支持 MP4/WebM/MOV/MKV、MP3/WAV/OGG/FLAC 与 GLB/GLTF/FBX/OBJ/STL。新素材的附件会在保存基本信息后自动导入。</p>
+        {!!pendingMediaPaths.length&&<div className="pending-media-list">{pendingMediaPaths.map(path=><div key={path}><FileVideo size={14}/><span>{path.split(/[\\/]/).at(-1)}</span><button type="button" onClick={()=>setPendingMediaPaths(previous=>previous.filter(value=>value!==path))}><X size={13}/></button></div>)}</div>}
+        <div className="media-editor-list">{media.map((item,index)=><div className={`media-editor-item ${item.isCover ? "cover" : ""}`} key={item.id}><MediaPreview media={item} className="editor-thumb" /><div className="media-editor-info"><strong>{item.originalName}</strong><span>{item.kind === "video" ? "视频" : item.kind === "audio" ? "音频" : "3D 模型"} · {item.processingStatus === "ready" ? "可预览" : item.processingStatus === "error" ? "处理失败" : "处理中"}</span>{item.processingMessage && <small>{item.processingMessage}</small>}</div><button type="button" className="cover-toggle" onClick={()=>void setMediaCover(item.id)}><Star size={13} fill={item.isCover?"currentColor":"none"}/>{item.isCover?"封面":"设为封面"}</button><div className="image-order"><button type="button" onClick={()=>void moveMedia(index,-1)} disabled={index===0}><ArrowUp size={13}/></button><button type="button" onClick={()=>void moveMedia(index,1)} disabled={index===media.length-1}><ArrowDown size={13}/></button>{item.processingStatus==="error"&&<button type="button" title="重试处理" onClick={()=>void retryMedia(item.id)}><RefreshCw size={13}/></button>}<button type="button" onClick={()=>void deleteMedia(item.id)}><Trash2 size={13}/></button></div></div>)}</div>
       </div>
       <footer className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}><Save size={17} />{saving ? "正在保存…" : "保存素材"}</button></footer>
     </form>

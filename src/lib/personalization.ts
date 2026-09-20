@@ -3,6 +3,7 @@ import type { CommandId, GlobalPreferences, LibraryPreferences, ModuleId } from 
 export const moduleRegistry: Array<{ id: ModuleId; label: string; description: string }> = [
   { id: "library", label: "素材库", description: "浏览、搜索与整理全部素材" },
   { id: "projects", label: "创作项目", description: "项目素材、镜头任务、参考板与工程入口" },
+  { id: "collections", label: "合集", description: "树状策展分组与手动排序" },
   { id: "smartCollections", label: "智能集合", description: "保存可动态更新的搜索条件" },
   { id: "favorites", label: "收藏", description: "快速访问收藏素材" },
   { id: "recent", label: "最近查看", description: "回到最近打开的素材" },

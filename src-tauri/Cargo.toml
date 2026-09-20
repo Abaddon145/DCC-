@@ -1,6 +1,6 @@
 [package]
 name = "dcc-asset-library"
-version = "0.11.0"
+version = "0.12.0"
 description = "Local DCC and Unreal Engine asset library"
 authors = ["DCC Asset Library"]
 edition = "2021"

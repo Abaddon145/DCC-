@@ -1,10 +1,11 @@
-import { BriefcaseBusiness, Calendar, Copy, Edit3, ExternalLink, FileBox, Heart, Images, Link2, RefreshCw, Trash2, UserRound, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { BriefcaseBusiness, Calendar, Copy, Edit3, ExternalLink, FileBox, Heart, Images, Link2, RefreshCw, Star, Trash2, UserRound, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AssetDetail, ContentLanguage } from "../types";
 import { formatBytes } from "../lib/validation";
 import { ImagePreview } from "./ImagePreview";
-import { ImageLightbox } from "./ImageLightbox";
+import { MediaPreview } from "./MediaPreview";
+import { MediaViewer, type PreviewItem } from "./MediaViewer";
 
 interface Props {
   asset: AssetDetail | null;
@@ -22,23 +23,28 @@ interface Props {
   checkingLink: boolean;
   onAddReference?: (imageIds: string[]) => void;
   onAddProject?: (assetId: string) => void;
+  onRating?: (rating: number) => void;
 }
 
-export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject }: Props) {
-  const [selectedImage, setSelectedImage] = useState(0);
+export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onRating }: Props) {
+  const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
   const [referenceMenu, setReferenceMenu] = useState<{ left: number; top: number } | null>(null);
   const referenceButton = useRef<HTMLButtonElement>(null);
+  const previews = useMemo<PreviewItem[]>(() => asset ? [...asset.images.map(image => ({ type: "image" as const, image })), ...(asset.media || []).map(media => ({ type: "media" as const, media }))] : [], [asset]);
   useEffect(() => {
     if (!asset) return;
-    const cover = asset.images.findIndex(image => image.isCover);
-    setSelectedImage(cover >= 0 ? cover : 0);
+    const previews: PreviewItem[] = [...asset.images.map(image => ({ type: "image" as const, image })), ...(asset.media || []).map(media => ({ type: "media" as const, media }))];
+    const cover = previews.findIndex(item => item.type === "image" ? item.image.isCover : item.media.isCover);
+    setSelectedPreview(cover >= 0 ? cover : 0);
     setLightbox(false);
     setReferenceMenu(null);
     setDetailLanguage(contentLanguage);
   }, [asset?.id]);
+  useEffect(() => { const handler=(event:KeyboardEvent)=>{ if(event.code!=="Space" || !asset || !previews.length || (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")) return; event.preventDefault(); setLightbox(true); }; window.addEventListener("keydown",handler); return()=>window.removeEventListener("keydown",handler); },[asset,previews.length]);
   if (!asset && !loading) return null;
+  const currentPreview = previews[selectedPreview] || previews[0];
   const preferred = asset?.localizations[detailLanguage];
   const alternateLanguage: ContentLanguage = detailLanguage === "zh-CN" ? "en" : "zh-CN";
   const alternate = asset?.localizations[alternateLanguage];
@@ -49,13 +55,14 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
   return <aside className="detail-panel">
     {loading || !asset ? <div className="detail-loading">正在加载详情…</div> : <>
       <div className="detail-hero">
-        <button className="detail-image-button" onClick={() => asset.images.length && setLightbox(true)} title="查看大图"><ImagePreview imageId={asset.images[selectedImage]?.id || null} alt={shownName} thumbnail={false} className="detail-image" /></button>
+        <button className="detail-image-button" onClick={() => previews.length && setLightbox(true)} title="打开媒体查看器">{currentPreview?.type === "image" ? <ImagePreview imageId={currentPreview.image.id} alt={shownName} thumbnail={false} className="detail-image" /> : currentPreview?.type === "media" ? <MediaPreview media={currentPreview.media} className="detail-image" /> : <ImagePreview imageId={null} alt={shownName} className="detail-image" />}</button>
         <button className="detail-close" onClick={onClose}><X size={18} /></button>
       </div>
-      {asset.images.length > 1 && <div className="thumb-strip">{asset.images.map((image, index) => <button key={image.id} className={index === selectedImage ? "active" : ""} onClick={() => setSelectedImage(index)}><ImagePreview imageId={image.id} alt={image.originalName} className="detail-thumb" /></button>)}</div>}
+      {previews.length > 1 && <div className="thumb-strip">{previews.map((item, index) => <button key={item.type === "image" ? item.image.id : item.media.id} className={index === selectedPreview ? "active" : ""} onClick={() => setSelectedPreview(index)}>{item.type === "image" ? <ImagePreview imageId={item.image.id} alt={item.image.originalName} className="detail-thumb" /> : <MediaPreview media={item.media} className="detail-thumb" />}</button>)}</div>}
       <div className="detail-content">
         <div className="detail-language-row"><div className="language-tabs compact"><button className={detailLanguage === "zh-CN" ? "active" : ""} onClick={() => setDetailLanguage("zh-CN")}>中文</button><button className={detailLanguage === "en" ? "active" : ""} onClick={() => setDetailLanguage("en")}>English</button></div>{!preferred?.name.trim() && <span>{detailLanguage === "zh-CN" ? "暂无中文，当前显示英文" : "No English version · 当前显示中文"}</span>}</div>
         <div className="detail-title-row"><div><span className="eyebrow">{asset.categoryName || "未分类"}</span><h2>{shownName}</h2></div><button className={`icon-button ${asset.favorite ? "favorite-active" : ""}`} onClick={onFavorite}><Heart size={19} fill={asset.favorite ? "currentColor" : "none"} /></button></div>
+        <div className="detail-rating" aria-label="素材评分">{[1,2,3,4,5].map(value => <button key={value} className={value <= (asset.rating || 0) ? "active" : ""} title={`${value} 星`} onClick={() => onRating?.(value === asset.rating ? 0 : value)}><Star size={18} fill={value <= (asset.rating || 0) ? "currentColor" : "none"} /></button>)}</div>
         {shownDescription && <p className="description"><LinkifiedText text={shownDescription} onOpen={onOpenExternal} /></p>}
         <div className="detail-tags">{shownTags.map(tag => <span key={tag}>#{tag}</span>)}</div>
         <dl className="property-grid">
@@ -76,8 +83,8 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
         <button className="secondary-button" onClick={onEdit} title="编辑"><Edit3 size={17} /></button>
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>
       </div>
-      {lightbox && <ImageLightbox images={asset.images} initialIndex={selectedImage} title={shownName} onClose={() => setLightbox(false)} />}
-      {referenceMenu && onAddReference && createPortal(<><button className="popover-dismiss-layer" aria-label="关闭菜单" onClick={() => setReferenceMenu(null)} /><div className="reference-portal-menu" style={referenceMenu}><button onClick={() => { onAddReference([asset.images[selectedImage].id]); setReferenceMenu(null); }}>加入当前图片</button><button onClick={() => { onAddReference(asset.images.map(image => image.id)); setReferenceMenu(null); }}>加入全部预览图</button></div></>, document.body)}
+      {lightbox && <MediaViewer items={previews} initialIndex={selectedPreview} title={shownName} onClose={() => setLightbox(false)} />}
+      {referenceMenu && onAddReference && createPortal(<><button className="popover-dismiss-layer" aria-label="关闭菜单" onClick={() => setReferenceMenu(null)} /><div className="reference-portal-menu" style={referenceMenu}>{currentPreview?.type === "image" && <button onClick={() => { onAddReference([currentPreview.image.id]); setReferenceMenu(null); }}>加入当前图片</button>}<button onClick={() => { onAddReference(asset.images.map(image => image.id)); setReferenceMenu(null); }}>加入全部预览图</button></div></>, document.body)}
     </>}
   </aside>;
 }

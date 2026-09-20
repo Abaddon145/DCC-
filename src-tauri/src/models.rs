@@ -64,6 +64,12 @@ pub struct SearchRequest {
     pub project_id: Option<String>,
     #[serde(default)]
     pub project_asset_status: Option<String>,
+    #[serde(default)]
+    pub manual_collection_id: Option<String>,
+    #[serde(default = "default_true_value")]
+    pub include_child_collections: bool,
+    #[serde(default)]
+    pub ratings: Vec<i64>,
     pub sort: String,
     pub offset: i64,
     pub limit: i64,
@@ -75,6 +81,7 @@ pub fn default_module_order() -> Vec<String> {
     [
         "library",
         "projects",
+        "collections",
         "smartCollections",
         "favorites",
         "recent",
@@ -299,6 +306,39 @@ pub struct SmartCollection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ManualCollectionInput {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub cover_asset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualCollection {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub cover_asset_id: Option<String>,
+    pub cover_image_id: Option<String>,
+    pub sort_order: i64,
+    pub direct_asset_count: i64,
+    pub descendant_asset_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionMutationReport {
+    pub affected_assets: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TagUsage {
     pub id: String,
     pub locale: String,
@@ -409,6 +449,8 @@ pub struct BatchAssetUpdate {
     #[serde(default)]
     pub remove_tags: Vec<String>,
     pub favorite: Option<bool>,
+    #[serde(default)]
+    pub rating: Option<i64>,
     #[serde(default = "default_content_language")]
     pub content_language: String,
 }
@@ -519,9 +561,12 @@ pub struct AssetCard {
     pub versions: Vec<String>,
     pub formats: Vec<String>,
     pub favorite: bool,
+    pub rating: i64,
     pub updated_at: String,
     pub last_viewed_at: Option<String>,
     pub cover_image_id: Option<String>,
+    pub cover_media_id: Option<String>,
+    pub cover_media_kind: Option<String>,
     pub content_language: String,
     pub language_fallback: bool,
     pub link_check_status: String,
@@ -550,6 +595,26 @@ pub struct AssetImage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AssetMedia {
+    pub id: String,
+    pub asset_id: String,
+    pub kind: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub file_size: i64,
+    pub duration_ms: Option<i64>,
+    pub pixel_width: Option<i64>,
+    pub pixel_height: Option<i64>,
+    pub sort_order: i64,
+    pub is_cover: bool,
+    pub processing_status: String,
+    pub processing_message: String,
+    pub has_proxy: bool,
+    pub has_thumbnail: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssetDetail {
     #[serde(flatten)]
     pub card: AssetCard,
@@ -563,6 +628,7 @@ pub struct AssetDetail {
     pub share_url: String,
     pub extraction_code: String,
     pub images: Vec<AssetImage>,
+    pub media: Vec<AssetMedia>,
     pub created_at: String,
     pub localizations: HashMap<String, LocalizedAssetText>,
 }
@@ -600,6 +666,8 @@ pub struct AssetInput {
     pub share_url: String,
     pub extraction_code: String,
     pub favorite: bool,
+    #[serde(default)]
+    pub rating: i64,
     pub images: Vec<ImageInput>,
     #[serde(default)]
     pub localizations: HashMap<String, LocalizedAssetText>,

@@ -236,6 +236,7 @@ pub fn commit(
             share_url: share_url.into(),
             extraction_code: value(&row, "extraction_code").into(),
             favorite: false,
+            rating: 0,
             images: image_paths,
             localizations,
             content_language: primary_locale.into(),

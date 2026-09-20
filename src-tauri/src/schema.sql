@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS assets (
   link_check_message TEXT NOT NULL DEFAULT '',
   extraction_code TEXT NOT NULL DEFAULT '',
   favorite INTEGER NOT NULL DEFAULT 0,
+  rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_viewed_at TEXT,
@@ -44,7 +45,6 @@ CREATE TABLE IF NOT EXISTS assets (
 CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category_id);
 CREATE INDEX IF NOT EXISTS idx_assets_updated ON assets(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(favorite, updated_at DESC);
-
 CREATE TABLE IF NOT EXISTS deletion_batches (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK(kind IN ('assets','category')),
@@ -78,6 +78,29 @@ CREATE TABLE IF NOT EXISTS images (
 );
 
 CREATE INDEX IF NOT EXISTS idx_images_asset ON images(asset_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS asset_media (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('video','audio','model')),
+  original_name TEXT NOT NULL,
+  original_rel_path TEXT NOT NULL,
+  proxy_rel_path TEXT,
+  thumbnail_rel_path TEXT,
+  mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER,
+  pixel_width INTEGER,
+  pixel_height INTEGER,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_cover INTEGER NOT NULL DEFAULT 0,
+  processing_status TEXT NOT NULL DEFAULT 'pending' CHECK(processing_status IN ('pending','processing','ready','error')),
+  processing_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_media_asset ON asset_media(asset_id, sort_order);
 CREATE VIRTUAL TABLE IF NOT EXISTS asset_search USING fts5(asset_id UNINDEXED, text, tokenize='trigram');
 
 CREATE TABLE IF NOT EXISTS asset_localizations (
@@ -153,6 +176,29 @@ CREATE TABLE IF NOT EXISTS smart_collections (
 );
 
 CREATE INDEX IF NOT EXISTS idx_smart_collections_sort ON smart_collections(sort_order, name);
+
+CREATE TABLE IF NOT EXISTS manual_collections (
+  id TEXT PRIMARY KEY,
+  parent_id TEXT REFERENCES manual_collections(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  cover_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(parent_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS manual_collection_assets (
+  collection_id TEXT NOT NULL REFERENCES manual_collections(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY(collection_id, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_collections_parent ON manual_collections(parent_id, sort_order, name);
+CREATE INDEX IF NOT EXISTS idx_manual_collection_assets_order ON manual_collection_assets(collection_id, sort_order);
 
 CREATE TABLE IF NOT EXISTS library_preferences (
   id INTEGER PRIMARY KEY CHECK(id=1),
