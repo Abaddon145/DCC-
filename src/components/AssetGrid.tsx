@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Box, Check, Heart } from "lucide-react";
+import { Box, Check, Heart, Star } from "lucide-react";
 import type { AssetCard, LibraryPreferences } from "../types";
 import type { LibraryDragPayload } from "../types";
 import { ImagePreview } from "./ImagePreview";
 import type { BeginLibraryPointerDrag } from "../lib/drag";
+import { MediaCover } from "./MediaPreview";
 
 interface Props {
   items: AssetCard[];
@@ -20,13 +21,14 @@ interface Props {
   onToggleSelect?: (id: string, rangeIds?: string[]) => void;
   onPointerDragStart?: BeginLibraryPointerDrag;
   preferences?: LibraryPreferences;
+  query?: string;
 }
 
 export function assetIdsForDrag(itemId: string, selectionMode: boolean, selectedIds: Set<string>) {
   return selectionMode && selectedIds.has(itemId) ? [...selectedIds] : [itemId];
 }
 
-export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavorite, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences }: Props) {
+export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavorite, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences, query = "" }: Props) {
   const [width, setWidth] = useState(900);
   const lastSelected = useRef<number | null>(null);
   const viewMode = preferences?.assetView || "grid";
@@ -66,19 +68,20 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
       }};
       if (viewMode === "list") return <article key={item.id} className={`asset-list-item ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
         {selectionMode && <button className={`list-select ${checked ? "active" : ""}`} onClick={event => { event.stopPropagation(); onToggleSelect?.(item.id); }}><span>{checked && <Check size={12} />}</span></button>}
-        <ImagePreview imageId={item.coverImageId} alt={item.name} className="asset-list-thumb" />
-        <div className="asset-list-name"><strong>{item.name}</strong>{preferences?.cardFields.category !== false && <span>{item.categoryName || "未分类"}</span>}</div>
+        {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="asset-list-thumb" /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="asset-list-thumb" /> : <ImagePreview imageId={null} alt={item.name} className="asset-list-thumb" />}
+        <div className="asset-list-name"><strong><HighlightedText text={item.name} query={query} /></strong>{preferences?.cardFields.category !== false && <span>{item.categoryName || "未分类"}</span>}</div>
         {preferences?.cardFields.software !== false && <span className="asset-list-cell">{item.dccTools.join("、") || "—"}</span>}
         {preferences?.cardFields.version !== false && <span className="asset-list-cell">{item.versions.join("、") || "—"}</span>}
         {preferences?.cardFields.format !== false && <span className="asset-list-cell">{item.formats.join("、") || "—"}</span>}
         {preferences?.cardFields.tags !== false && <span className="asset-list-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join("  ") || "—"}</span>}
         {preferences?.cardFields.linkStatus !== false && <span className={`asset-list-status ${item.hasShareLink === false ? "missing" : item.linkCheckStatus}`}>{item.hasShareLink === false ? "无链接" : item.linkCheckStatus === "invalid" ? "失效" : item.linkCheckStatus === "valid" ? "有效" : "未检查"}</span>}
         <button className={`list-favorite ${item.favorite ? "active" : ""}`} onClick={event => { event.stopPropagation(); onFavorite(item); }}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /></button>
+        <span className="asset-rating"><Star size={13} fill={(item.rating || 0) > 0 ? "currentColor" : "none"} />{item.rating || "—"}</span>
         <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
       </article>;
       return <article key={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
         <div className="card-image">
-          <ImagePreview imageId={item.coverImageId} alt={item.name} className="card-image-content" style={{ objectFit: preferences?.coverFit || "cover" }} />
+          {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="card-image-content" style={{ objectFit: preferences?.coverFit || "cover" }} /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="card-image-content" hoverPlay /> : <ImagePreview imageId={null} alt={item.name} className="card-image-content" />}
           {preferences?.cardFields.linkStatus !== false && item.linkCheckStatus === "invalid" && <span className="link-invalid-badge">网盘失效</span>}
           {preferences?.cardFields.linkStatus !== false && item.hasShareLink === false && <span className="link-missing-badge">无网盘链接</span>}
           {selectionMode && <button className={`select-button ${checked ? "active" : ""}`} onClick={event => { event.stopPropagation(); lastSelected.current = itemIndex; onToggleSelect?.(item.id); }}><span>{checked && <Check size={13} />}</span></button>}
@@ -88,14 +91,22 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
           {preferences?.cardFields.category !== false && item.categoryName && <span className="category-badge">{item.categoryName}</span>}
         </div>
         <div className="card-body">
-          <h3 title={item.name}>{item.name}{item.languageFallback && <small className="language-fallback" title={item.contentLanguage === "en" ? "暂无中文，显示英文" : "No English version"}>{item.contentLanguage === "en" ? "EN" : "中"}</small>}</h3>
+          <h3 title={item.name}><HighlightedText text={item.name} query={query} />{item.languageFallback && <small className="language-fallback" title={item.contentLanguage === "en" ? "暂无中文，显示英文" : "No English version"}>{item.contentLanguage === "en" ? "EN" : "中"}</small>}</h3>
           <div className="card-meta">{preferences?.cardFields.software !== false && <span>{item.dccTools[0] || "DCC"}</span>}{preferences?.cardFields.version !== false && item.versions[0] && <span>{item.versions[0]}</span>}{preferences?.cardFields.format !== false && item.formats[0] && <span>{item.formats[0]}</span>}</div>
-          {preferences?.cardFields.tags !== false && <div className="card-tags">{item.tags.slice(0, 3).map(tag => <span key={tag}>#{tag}</span>)}</div>}
+          <div className="card-bottom-row">{preferences?.cardFields.tags !== false && <div className="card-tags">{item.tags.slice(0, 3).map(tag => <span key={tag}>#{tag}</span>)}</div>}<span className="asset-rating"><Star size={13} fill={(item.rating || 0) > 0 ? "currentColor" : "none"} />{item.rating || "—"}</span></div>
         </div>
       </article>; })}
     </div>;
-  }), [virtualRows, items, columns, onSelect, onFavorite, selectedId, selectionMode, selectedIds, onToggleSelect, onPointerDragStart, preferences, viewMode]);
+  }), [virtualRows, items, columns, onSelect, onFavorite, selectedId, selectionMode, selectedIds, onToggleSelect, onPointerDragStart, preferences, viewMode, query]);
 
   if (!loading && items.length === 0) return <div className="empty-state"><div className="empty-icon"><Box size={34} /></div><h2>还没有找到素材</h2><p>调整搜索条件，或者添加第一条素材。</p></div>;
   return <div className="virtual-grid" style={{ height: virtualizer.getTotalSize() }}>{content}{loading && <div className="grid-loading">正在读取素材…</div>}</div>;
+}
+
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const terms = query.match(/[\p{L}\p{N}_-]{2,}/gu)?.filter(term => !term.includes(":")) || [];
+  if (!terms.length) return <>{text}</>;
+  const escaped = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const regex = new RegExp(`(${escaped.join("|")})`, "ig");
+  return <>{text.split(regex).map((part,index) => terms.some(term => term.toLowerCase() === part.toLowerCase()) ? <mark key={index}>{part}</mark> : part)}</>;
 }

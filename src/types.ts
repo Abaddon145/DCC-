@@ -1,6 +1,6 @@
-export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
-export type ViewMode = "library" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
-export type ModuleId = "library" | "projects" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite" | "rating";
+export type ViewMode = "library" | "projects" | "collections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ModuleId = "library" | "projects" | "collections" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -47,6 +47,9 @@ export interface SearchRequest {
   smartCollectionId?: string | null;
   projectId?: string | null;
   projectAssetStatus?: ProjectAssetStatus | null;
+  manualCollectionId?: string | null;
+  includeChildCollections?: boolean;
+  ratings?: number[];
   sort: SortMode;
   offset: number;
   limit: number;
@@ -134,9 +137,12 @@ export interface AssetCard {
   versions: string[];
   formats: string[];
   favorite: boolean;
+  rating?: number;
   updatedAt: string;
   lastViewedAt: string | null;
   coverImageId: string | null;
+  coverMediaId?: string | null;
+  coverMediaKind?: AssetMediaKind | null;
   contentLanguage: ContentLanguage;
   languageFallback: boolean;
   linkCheckStatus: LinkCheckStatus;
@@ -159,6 +165,14 @@ export interface AssetImage {
   isCover: boolean;
 }
 
+export type AssetMediaKind = "video" | "audio" | "model";
+export type MediaProcessingStatus = "pending" | "processing" | "ready" | "error";
+export interface AssetMedia {
+  id: string; assetId: string; kind: AssetMediaKind; originalName: string; mimeType: string; fileSize: number;
+  durationMs: number | null; pixelWidth: number | null; pixelHeight: number | null; sortOrder: number; isCover: boolean;
+  processingStatus: MediaProcessingStatus; processingMessage: string; hasProxy: boolean; hasThumbnail: boolean;
+}
+
 export interface AssetDetail extends AssetCard {
   description: string;
   categoryId: string | null;
@@ -170,6 +184,7 @@ export interface AssetDetail extends AssetCard {
   shareUrl: string;
   extractionCode: string;
   images: AssetImage[];
+  media?: AssetMedia[];
   createdAt: string;
   localizations: Partial<Record<ContentLanguage, LocalizedAssetText>>;
 }
@@ -202,6 +217,7 @@ export interface AssetInput {
   shareUrl: string;
   extractionCode: string;
   favorite: boolean;
+  rating?: number;
   images: ImageInput[];
   localizations: Partial<Record<ContentLanguage, LocalizedAssetText>>;
   contentLanguage: ContentLanguage;
@@ -312,10 +328,15 @@ export interface BatchAssetUpdate {
   addTags: string[];
   removeTags: string[];
   favorite: boolean | null;
+  rating?: number | null;
   contentLanguage: ContentLanguage;
 }
 
 export interface BatchUpdateReport { requested: number; updated: number }
+export interface ManualCollectionInput { id?: string | null; parentId: string | null; name: string; description: string; coverAssetId: string | null }
+export interface ManualCollection extends ManualCollectionInput { id: string; coverImageId: string | null; sortOrder: number; directAssetCount: number; descendantAssetCount: number; createdAt: string; updatedAt: string }
+export interface CollectionMutationReport { affectedAssets: number }
+export interface AdvancedSearchError { message: string; position?: number }
 export interface MoveCategoryRequest { id: string; targetParentId: string | null; targetIndex: number }
 export interface MoveResult { moved: number; message: string; undoToken: string | null }
 export interface UndoMoveResult { restored: number; message: string }

@@ -4,9 +4,10 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const KNOWN_MODULES: [&str; 9] = [
+const KNOWN_MODULES: [&str; 10] = [
     "library",
     "projects",
+    "collections",
     "smartCollections",
     "favorites",
     "recent",
@@ -43,14 +44,22 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
 }
 
 pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
-    let mut order = vec!["library".to_string(), "projects".to_string()];
-    let mut seen = HashSet::from(["library".to_string(), "projects".to_string()]);
+    let mut order = vec![
+        "library".to_string(),
+        "projects".to_string(),
+        "collections".to_string(),
+    ];
+    let mut seen = HashSet::from([
+        "library".to_string(),
+        "projects".to_string(),
+        "collections".to_string(),
+    ]);
     for id in value.module_order.drain(..) {
         if seen.insert(id.clone()) {
             order.push(id);
         }
     }
-    for id in KNOWN_MODULES.iter().skip(2) {
+    for id in KNOWN_MODULES.iter().skip(3) {
         if seen.insert((*id).to_string()) {
             order.push((*id).to_string());
         }
@@ -75,7 +84,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     }
     if !matches!(
         value.default_sort.as_str(),
-        "updated" | "name" | "created" | "recent" | "favorite"
+        "updated" | "name" | "created" | "recent" | "favorite" | "rating"
     ) {
         value.default_sort = "updated".into();
     }
@@ -332,6 +341,9 @@ pub fn resolve_smart_collection(
         smart_collection_id: Some(id.into()),
         project_id: request.project_id.clone(),
         project_asset_status: request.project_asset_status.clone(),
+        manual_collection_id: request.manual_collection_id.clone(),
+        include_child_collections: request.include_child_collections,
+        ratings: request.ratings.clone(),
         sort: collection.rule.sort,
         offset: request.offset,
         limit: request.limit,

@@ -1,4 +1,4 @@
-use crate::{fab, images, models::*};
+use crate::{collections, fab, images, models::*, search_syntax};
 use chrono::Utc;
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Row, Transaction,
@@ -29,6 +29,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v7(&connection)?;
     migrate_to_v8(&connection)?;
     migrate_to_v9(&connection)?;
+    migrate_to_v10(&connection)?;
     Ok(connection)
 }
 
@@ -408,6 +409,47 @@ fn migrate_to_v9(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_to_v10(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 10 {
+        return Ok(());
+    }
+    let columns = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(assets)")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    if !columns.iter().any(|name| name == "rating") {
+        connection
+            .execute(
+                "ALTER TABLE assets ADD COLUMN rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5)",
+                [],
+            )
+            .map_err(|error| format!("升级数据库到 v10 失败：{error}"))?;
+    }
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_assets_rating ON assets(rating DESC,updated_at DESC);
+             INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','10');",
+        )
+        .map_err(|error| format!("升级数据库到 v10 失败：{error}"))?;
+    Ok(())
+}
+
 fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
@@ -601,7 +643,9 @@ pub fn search_assets(
     request: &SearchRequest,
 ) -> Result<Page<AssetCard>, String> {
     let query = request.query.trim();
-    let use_fts = query.chars().count() >= 3;
+    let parsed_query = search_syntax::parse(query)?;
+    let simple_query = search_syntax::simple_fts(&parsed_query);
+    let use_fts = simple_query.is_some_and(|value| value.chars().count() >= 3);
     let language = valid_language(&request.content_language);
     let fallback = other_language(language);
     let mut from_clause = format!(" FROM assets a LEFT JOIN categories c ON c.id=a.category_id LEFT JOIN asset_localizations lr ON lr.asset_id=a.id AND lr.locale='{language}' LEFT JOIN asset_localizations lf ON lf.asset_id=a.id AND lf.locale='{fallback}'");
@@ -613,16 +657,12 @@ pub fn search_assets(
     if !query.is_empty() {
         if use_fts {
             conditions.push("asset_search.text MATCH ?".into());
-            values.push(Value::Text(format!("\"{}\"", query.replace('"', "\"\""))));
-        } else {
-            conditions.push(
-                "(SELECT text FROM asset_search sx WHERE sx.asset_id=a.id) LIKE ? ESCAPE '\\'"
-                    .into(),
-            );
             values.push(Value::Text(format!(
-                "%{}%",
-                escape_like(&query.to_lowercase())
+                "\"{}\"",
+                simple_query.unwrap_or(query).replace('"', "\"\"")
             )));
+        } else if let Some(condition) = search_syntax::sql(&parsed_query, language, &mut values)? {
+            conditions.push(condition);
         }
     }
     let categories = category_descendants(connection, &request.category_ids)?;
@@ -672,6 +712,38 @@ pub fn search_assets(
     }
     if request.recent_only {
         conditions.push("a.last_viewed_at IS NOT NULL".into());
+    }
+    if !request.ratings.is_empty() {
+        let ratings = request
+            .ratings
+            .iter()
+            .copied()
+            .filter(|value| (0..=5).contains(value))
+            .map(Value::Integer)
+            .collect::<Vec<_>>();
+        if !ratings.is_empty() {
+            conditions.push(format!("a.rating IN ({})", placeholders(ratings.len())));
+            values.extend(ratings);
+        }
+    }
+    if let Some(collection_id) = request
+        .manual_collection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let collection_ids = if request.include_child_collections {
+            collections::descendant_ids(connection, collection_id)?
+        } else {
+            vec![collection_id.to_string()]
+        };
+        if collection_ids.is_empty() {
+            conditions.push("1=0".into());
+        } else {
+            let marks = placeholders(collection_ids.len());
+            conditions.push(format!("EXISTS (SELECT 1 FROM manual_collection_assets mc WHERE mc.asset_id=a.id AND mc.collection_id IN ({marks}))"));
+            values.extend(collection_ids.into_iter().map(Value::Text));
+        }
     }
     if let Some(project_id) = request
         .project_id
@@ -724,11 +796,14 @@ pub fn search_assets(
         "created" => "a.created_at DESC",
         "recent" => "a.last_viewed_at DESC NULLS LAST",
         "favorite" => "a.favorite DESC, a.updated_at DESC",
+        "rating" => "a.rating DESC, a.updated_at DESC",
         "relevance" if use_fts => "CASE WHEN lower(COALESCE(lr.name,'') || ' ' || COALESCE(lr.description,'') || ' ' || COALESCE(lr.license,'')) LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, bm25(asset_search), a.updated_at DESC",
         _ => "a.updated_at DESC",
     };
-    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.updated_at,a.last_viewed_at,
+    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.rating,a.updated_at,a.last_viewed_at,
       (SELECT i.id FROM images i WHERE i.asset_id=a.id ORDER BY i.is_cover DESC,i.sort_order LIMIT 1),
+      (SELECT m.id FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
+      (SELECT m.kind FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
       COALESCE((SELECT json_group_array(t.name) FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=a.id AND t.locale=CASE WHEN EXISTS(SELECT 1 FROM asset_localized_tags ax JOIN localized_tags tx ON tx.id=ax.tag_id WHERE ax.asset_id=a.id AND tx.locale='{language}') THEN '{language}' ELSE '{fallback}' END),'[]'),
       CASE WHEN COALESCE(lr.name,'')<>'' THEN '{language}' ELSE '{fallback}' END,
       CASE WHEN COALESCE(lr.name,'')<>'' THEN 0 ELSE 1 END,
@@ -811,16 +886,19 @@ fn card_from_row(row: &Row<'_>) -> rusqlite::Result<AssetCard> {
         versions: json_vec(row.get(4)?),
         formats: json_vec(row.get(5)?),
         favorite: row.get::<_, i64>(6)? != 0,
-        updated_at: row.get(7)?,
-        last_viewed_at: row.get(8)?,
-        cover_image_id: row.get(9)?,
-        tags: json_vec(row.get(10)?),
-        content_language: row.get(11)?,
-        language_fallback: row.get::<_, i64>(12)? != 0,
-        link_check_status: row.get(13)?,
-        link_checked_at: row.get(14)?,
-        link_check_message: row.get(15)?,
-        has_share_link: row.get::<_, i64>(16)? != 0,
+        rating: row.get(7)?,
+        updated_at: row.get(8)?,
+        last_viewed_at: row.get(9)?,
+        cover_image_id: row.get(10)?,
+        cover_media_id: row.get(11)?,
+        cover_media_kind: row.get(12)?,
+        tags: json_vec(row.get(13)?),
+        content_language: row.get(14)?,
+        language_fallback: row.get::<_, i64>(15)? != 0,
+        link_check_status: row.get(16)?,
+        link_checked_at: row.get(17)?,
+        link_check_message: row.get(18)?,
+        has_share_link: row.get::<_, i64>(19)? != 0,
     })
 }
 
@@ -840,8 +918,10 @@ pub fn get_asset(
     }
     let language = valid_language(content_language);
     let fallback = other_language(language);
-    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.updated_at,a.last_viewed_at,
+    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.rating,a.updated_at,a.last_viewed_at,
       (SELECT i.id FROM images i WHERE i.asset_id=a.id ORDER BY i.is_cover DESC,i.sort_order LIMIT 1),
+      (SELECT m.id FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
+      (SELECT m.kind FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
       COALESCE((SELECT json_group_array(t.name) FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=a.id AND t.locale=CASE WHEN EXISTS(SELECT 1 FROM asset_localized_tags ax JOIN localized_tags tx ON tx.id=ax.tag_id WHERE ax.asset_id=a.id AND tx.locale='{language}') THEN '{language}' ELSE '{fallback}' END),'[]'),
       CASE WHEN COALESCE(lr.name,'')<>'' THEN '{language}' ELSE '{fallback}' END,
       CASE WHEN COALESCE(lr.name,'')<>'' THEN 0 ELSE 1 END,
@@ -852,16 +932,16 @@ pub fn get_asset(
         .query_row(&sql, [id], |row| {
             Ok((
                 card_from_row(row)?,
-                row.get::<_, String>(17)?,
-                row.get::<_, Option<String>>(18)?,
-                row.get::<_, Option<i64>>(19)?,
                 row.get::<_, String>(20)?,
-                row.get::<_, String>(21)?,
-                row.get::<_, String>(22)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<i64>>(22)?,
                 row.get::<_, String>(23)?,
                 row.get::<_, String>(24)?,
                 row.get::<_, String>(25)?,
                 row.get::<_, String>(26)?,
+                row.get::<_, String>(27)?,
+                row.get::<_, String>(28)?,
+                row.get::<_, String>(29)?,
             ))
         })
         .optional()
@@ -880,6 +960,7 @@ pub fn get_asset(
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    let media = crate::media::list(connection, id)?;
     let mut localizations = HashMap::new();
     for locale in ["zh-CN", "en"] {
         let value = connection.query_row("SELECT name,description,license FROM asset_localizations WHERE asset_id=?1 AND locale=?2", params![id,locale], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).optional().map_err(|e| e.to_string())?;
@@ -917,6 +998,7 @@ pub fn get_asset(
         extraction_code: fields.8,
         created_at: fields.9,
         images,
+        media,
         localizations,
     })
 }
@@ -1059,10 +1141,10 @@ pub fn upsert_asset(
                 return Err("该分享链接已存在于素材库".into());
             }
         }
-        transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,fab_listing_id,license,share_url,normalized_share_url,extraction_code,favorite,created_at,updated_at)
-          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,fab_listing_id=excluded.fab_listing_id,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,updated_at=excluded.updated_at",
-           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),fab_listing_id,input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,created,timestamp]).map_err(map_constraint)?;
+        transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,fab_listing_id,license,share_url,normalized_share_url,extraction_code,favorite,rating,created_at,updated_at)
+          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,fab_listing_id=excluded.fab_listing_id,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,rating=excluded.rating,updated_at=excluded.updated_at",
+           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),fab_listing_id,input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,input.rating.clamp(0,5),created,timestamp]).map_err(map_constraint)?;
         transaction
             .execute("DELETE FROM asset_localized_tags WHERE asset_id=?1", [&id])
             .map_err(|e| e.to_string())?;
@@ -1142,6 +1224,11 @@ pub fn upsert_asset(
         for (sort_order, is_cover, stored) in &new_images {
             transaction.execute("INSERT INTO images(id,asset_id,original_name,original_rel_path,thumbnail_rel_path,sort_order,is_cover,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![stored.id,id,stored.original_name,stored.original_rel_path,stored.thumbnail_rel_path,sort_order,*is_cover as i64,timestamp]).map_err(|e| e.to_string())?;
         }
+        if input.images.iter().any(|image| image.is_cover) {
+            transaction
+                .execute("UPDATE asset_media SET is_cover=0 WHERE asset_id=?1", [&id])
+                .map_err(|e| e.to_string())?;
+        }
         normalize_cover(&transaction, &id)?;
         reindex_asset(&transaction, &id)?;
         Ok(removed)
@@ -1212,6 +1299,20 @@ fn map_constraint(error: rusqlite::Error) -> String {
 }
 
 fn normalize_cover(transaction: &Transaction<'_>, asset_id: &str) -> Result<(), String> {
+    let media_cover = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM asset_media WHERE asset_id=?1 AND is_cover=1)",
+            [asset_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?
+        != 0;
+    if media_cover {
+        transaction
+            .execute("UPDATE images SET is_cover=0 WHERE asset_id=?1", [asset_id])
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let cover = transaction
         .query_row(
             "SELECT id FROM images WHERE asset_id=?1 ORDER BY is_cover DESC,sort_order LIMIT 1",
@@ -1433,6 +1534,8 @@ pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), Stri
     )?;
     let localized = query_strings_with_param(connection, "SELECT name || ' ' || description || ' ' || license FROM asset_localizations WHERE asset_id=?1", asset_id)?;
     let localized_tags = query_strings_with_param(connection, "SELECT t.name FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=?1", asset_id)?;
+    let collection_names =
+        collections::asset_collection_names(connection, asset_id).unwrap_or_default();
     let text = [
         row.0,
         row.1,
@@ -1446,6 +1549,7 @@ pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), Stri
         tags.join(" "),
         localized.join(" "),
         localized_tags.join(" "),
+        collection_names.join(" "),
     ]
     .join(" ")
     .to_lowercase();
@@ -1775,6 +1879,19 @@ pub fn purge_trash_batch(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     drop(statement);
+    let mut media_statement = connection.prepare("SELECT m.original_rel_path,m.proxy_rel_path,m.thumbnail_rel_path FROM asset_media m JOIN assets a ON a.id=m.asset_id WHERE a.delete_batch_id=?1").map_err(|e| e.to_string())?;
+    let media_paths = media_statement
+        .query_map([batch_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(media_statement);
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
     transaction
@@ -1805,6 +1922,15 @@ pub fn purge_trash_batch(
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
         images::remove_managed_file(base_dir, &thumb);
+    }
+    for (original, proxy, thumb) in media_paths {
+        images::remove_managed_file(base_dir, &original);
+        if let Some(path) = proxy {
+            images::remove_managed_file(base_dir, &path);
+        }
+        if let Some(path) = thumb {
+            images::remove_managed_file(base_dir, &path);
+        }
     }
     Ok(())
 }
@@ -1928,6 +2054,9 @@ pub fn batch_update_assets(
     connection: &mut Connection,
     update: BatchAssetUpdate,
 ) -> Result<BatchUpdateReport, String> {
+    if update.rating.is_some_and(|value| !(0..=5).contains(&value)) {
+        return Err("评分必须在 0–5 之间".into());
+    }
     let ids = unique_values(&update.ids);
     if ids.is_empty() {
         return Err("请先选择素材".into());
@@ -1969,6 +2098,14 @@ pub fn batch_update_assets(
                 .execute(
                     "UPDATE assets SET favorite=?1 WHERE id=?2",
                     params![favorite as i64, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(rating) = update.rating {
+            transaction
+                .execute(
+                    "UPDATE assets SET rating=?1 WHERE id=?2",
+                    params![rating, id],
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -2027,6 +2164,26 @@ pub fn batch_update_assets(
         requested: ids.len(),
         updated,
     })
+}
+
+pub fn batch_set_rating(
+    connection: &mut Connection,
+    ids: Vec<String>,
+    rating: i64,
+) -> Result<BatchUpdateReport, String> {
+    batch_update_assets(
+        connection,
+        BatchAssetUpdate {
+            ids,
+            category_id: None,
+            clear_category: false,
+            add_tags: Vec::new(),
+            remove_tags: Vec::new(),
+            favorite: None,
+            rating: Some(rating),
+            content_language: "zh-CN".into(),
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2339,7 +2496,9 @@ fn health_issue_ids(
     issue: &str,
 ) -> Result<Vec<String>, String> {
     let sql = match issue {
-        "noPreview" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id)"),
+        "noPreview" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id) AND NOT EXISTS(SELECT 1 FROM asset_media m WHERE m.asset_id=a.id)"),
+        "noCover" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id AND i.is_cover=1) AND NOT EXISTS(SELECT 1 FROM asset_media m WHERE m.asset_id=a.id AND m.is_cover=1)"),
+        "mediaProcessingError" => Some("SELECT DISTINCT a.id FROM assets a JOIN asset_media m ON m.asset_id=a.id WHERE a.deleted_at IS NULL AND m.processing_status='error'"),
         "uncategorized" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND category_id IS NULL"),
         "noTags" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.asset_id=a.id)"),
         "missingVersion" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND versions_json='[]'"),
@@ -2351,11 +2510,35 @@ fn health_issue_ids(
         "missingEn" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
         "invalidLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='invalid'"),
         "linkCheckError" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='error'"),
-        "missingFiles" => None,
+        "missingFiles" | "missingMediaFiles" => None,
         _ => return Err("未知的素材库检查类型".into()),
     };
     if let Some(sql) = sql {
         return query_strings(connection, sql);
+    }
+    if issue == "missingMediaFiles" {
+        let mut statement = connection.prepare("SELECT m.asset_id,m.original_rel_path,m.proxy_rel_path,m.thumbnail_rel_path FROM asset_media m JOIN assets a ON a.id=m.asset_id WHERE a.deleted_at IS NULL").map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut ids = BTreeSet::new();
+        for row in rows {
+            let (asset_id, original, proxy, thumb) = row.map_err(|e| e.to_string())?;
+            if !base_dir.join(original).is_file()
+                || proxy.is_some_and(|path| !base_dir.join(path).is_file())
+                || thumb.is_some_and(|path| !base_dir.join(path).is_file())
+            {
+                ids.insert(asset_id);
+            }
+        }
+        return Ok(ids.into_iter().collect());
     }
     let mut statement = connection
         .prepare("SELECT i.asset_id,i.original_rel_path,i.thumbnail_rel_path FROM images i JOIN assets a ON a.id=i.asset_id WHERE a.deleted_at IS NULL")
@@ -2382,7 +2565,10 @@ fn health_issue_ids(
 pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<HealthSummary, String> {
     let specs = [
         ("noPreview", "无预览图"),
+        ("noCover", "无封面"),
         ("missingFiles", "图片文件缺失"),
+        ("missingMediaFiles", "预览原件或代理缺失"),
+        ("mediaProcessingError", "媒体处理失败"),
         ("uncategorized", "未分类"),
         ("noTags", "无标签"),
         ("missingVersion", "缺少版本"),
@@ -2435,6 +2621,9 @@ pub fn list_health_issues(
             smart_collection_id: None,
             project_id: None,
             project_asset_status: None,
+            manual_collection_id: None,
+            include_child_collections: true,
+            ratings: Vec::new(),
             sort: "updated".into(),
             offset: request.offset,
             limit: request.limit,
@@ -2732,7 +2921,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "9");
+        assert_eq!(version, "10");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
@@ -2782,6 +2971,7 @@ mod tests {
                 share_url: "https://pan.baidu.com/s/bilingual".into(),
                 extraction_code: String::new(),
                 favorite: false,
+                rating: 0,
                 images: Vec::new(),
                 localizations,
                 content_language: "zh-CN".into(),
@@ -2810,6 +3000,9 @@ mod tests {
                 smart_collection_id: None,
                 project_id: None,
                 project_asset_status: None,
+                manual_collection_id: None,
+                include_child_collections: true,
+                ratings: Vec::new(),
                 sort: "relevance".into(),
                 offset: 0,
                 limit: 10,
@@ -2841,6 +3034,7 @@ mod tests {
             share_url: "https://pan.baidu.com/s/first?pwd=1234".into(),
             extraction_code: "1234".into(),
             favorite: false,
+            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -2887,6 +3081,7 @@ mod tests {
             share_url: url.into(),
             extraction_code: String::new(),
             favorite: false,
+            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -2913,6 +3108,7 @@ mod tests {
                 add_tags: vec!["Nanite".into()],
                 remove_tags: Vec::new(),
                 favorite: Some(true),
+                rating: None,
                 content_language: "zh-CN".into(),
             },
         )
@@ -2954,6 +3150,7 @@ mod tests {
             share_url: String::new(),
             extraction_code: String::new(),
             favorite: false,
+            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -3001,6 +3198,7 @@ mod tests {
             share_url: String::new(),
             extraction_code: String::new(),
             favorite: false,
+            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),

@@ -1,4 +1,5 @@
 mod backup;
+mod collections;
 mod commands;
 mod db;
 mod fab;
@@ -6,10 +7,12 @@ mod glossary;
 mod images;
 mod importer;
 mod link_checker;
+mod media;
 mod models;
 mod organization;
 mod projects;
 mod reference_boards;
+mod search_syntax;
 mod state;
 mod translation;
 
@@ -24,6 +27,27 @@ pub fn run() {
     }
     let state = AppState::initialize().unwrap_or_else(|error| panic!("无法启动素材库：{error}"));
     tauri::Builder::default()
+        .register_uri_scheme_protocol("dcc-media", |context, request| {
+            let path = request.uri().path().trim_matches('/');
+            let mut parts = path.split('/');
+            let id = parts.next().unwrap_or_default();
+            let variant = parts.next().unwrap_or("stream");
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok());
+            let state = context.app_handle().state::<AppState>();
+            match state.with_library(|connection, base_dir| {
+                media::protocol_response(connection, base_dir, id, variant, range)
+            }) {
+                Ok(response) => response,
+                Err(error) => tauri::http::Response::builder()
+                    .status(404)
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(error.into_bytes())
+                    .unwrap(),
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .on_window_event(|window, event| {
@@ -49,6 +73,19 @@ pub fn run() {
             empty_trash,
             prepare_reference_cover_ids,
             get_image_data,
+            import_asset_media,
+            delete_asset_media,
+            retry_asset_media,
+            reorder_asset_media,
+            set_asset_cover_media,
+            list_manual_collections,
+            upsert_manual_collection,
+            move_manual_collection,
+            delete_manual_collection,
+            add_collection_assets,
+            remove_collection_assets,
+            reorder_collection_assets,
+            batch_set_asset_rating,
             copy_extraction_code,
             open_share_link,
             open_external_url,
