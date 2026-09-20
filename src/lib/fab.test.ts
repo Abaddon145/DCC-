@@ -10,6 +10,7 @@ const asset: AssetInput = {
 };
 const metadata: FabMetadata = {
   canonicalUrl: "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a", name: "Garden",
+  listingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", categoryPath: "environments/garden", listingType: "3d-model", suggestedCategoryPath: ["环境", "花园"],
   description: "Fab description", author: "Studio", category: "Environment", tags: ["environment", "Garden"],
   dccTools: ["Unreal Engine"], versions: ["5.4"], formats: ["uasset"], license: "Fab Standard License",
   previewImages: [{ sourcePath: "C:\\Temp\\fab.jpg", previewDataUrl: "data:image/jpeg;base64,AA==", originalName: "fab.jpg", remoteUrl: "https://media.fab.com/fab.jpg" }], imageWarning: null
@@ -24,6 +25,8 @@ describe("Fab metadata", () => {
     expect(result.tags).toEqual(["Environment", "Garden"]);
     expect(result.versions).toEqual(["5.4"]);
     expect(result.sourceUrl).toBe(metadata.canonicalUrl);
+    expect(result.fabListingId).toBe(metadata.listingId);
+    expect(result.autoCategoryPath).toEqual(["环境", "花园"]);
     expect(result.images).toHaveLength(1);
     expect(result.images[0].isCover).toBe(true);
   });

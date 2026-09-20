@@ -60,6 +60,10 @@ pub struct SearchRequest {
     pub health_issue: Option<String>,
     #[serde(default)]
     pub smart_collection_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_asset_status: Option<String>,
     pub sort: String,
     pub offset: i64,
     pub limit: i64,
@@ -70,6 +74,7 @@ pub struct SearchRequest {
 pub fn default_module_order() -> Vec<String> {
     [
         "library",
+        "projects",
         "smartCollections",
         "favorites",
         "recent",
@@ -349,6 +354,10 @@ pub struct ParsedShareText {
 #[serde(rename_all = "camelCase")]
 pub struct FabMetadata {
     pub canonical_url: String,
+    pub listing_id: String,
+    pub category_path: String,
+    pub listing_type: String,
+    pub suggested_category_path: Vec<String>,
     pub name: String,
     pub description: String,
     pub author: String,
@@ -377,6 +386,15 @@ pub struct DuplicateMatch {
     pub id: String,
     pub name: String,
     pub share_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FabDuplicateMatch {
+    pub asset_id: String,
+    pub asset_name: String,
+    pub category_path: String,
+    pub location: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +558,7 @@ pub struct AssetDetail {
     pub size_bytes: Option<i64>,
     pub author: String,
     pub source_url: String,
+    pub fab_listing_id: String,
     pub license: String,
     pub share_url: String,
     pub extraction_code: String,
@@ -573,6 +592,10 @@ pub struct AssetInput {
     pub size_bytes: Option<i64>,
     pub author: String,
     pub source_url: String,
+    #[serde(default)]
+    pub fab_listing_id: Option<String>,
+    #[serde(default)]
+    pub auto_category_path: Vec<String>,
     pub license: String,
     pub share_url: String,
     pub extraction_code: String,
@@ -601,6 +624,55 @@ pub struct TranslationRequest {
     pub fields: LocalizedAssetText,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationTermInput {
+    pub id: Option<String>,
+    pub source_language: String,
+    pub target_language: String,
+    pub source: String,
+    pub target: String,
+    pub mode: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_true_value")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationTerm {
+    pub id: String,
+    pub source_language: String,
+    pub target_language: String,
+    pub source: String,
+    pub target: String,
+    pub mode: String,
+    pub case_sensitive: bool,
+    pub enabled: bool,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationTermApplication {
+    pub field: String,
+    pub source: String,
+    pub target: String,
+    pub mode: String,
+    pub origin: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationTermImportReport {
+    pub imported: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationPreview {
@@ -608,6 +680,8 @@ pub struct TranslationPreview {
     pub character_count: usize,
     pub warnings: Vec<String>,
     pub failed_fields: Vec<String>,
+    pub applied_terms: Vec<TranslationTermApplication>,
+    pub protected_token_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -624,6 +698,14 @@ pub struct ImportRowResult {
     pub name: String,
     pub status: String,
     pub messages: Vec<String>,
+    #[serde(default)]
+    pub suggested_category_path: Option<String>,
+    #[serde(default)]
+    pub actual_category_path: Option<String>,
+    #[serde(default)]
+    pub duplicate_asset_id: Option<String>,
+    #[serde(default)]
+    pub duplicate_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,6 +717,7 @@ pub struct ImportPreview {
     pub valid_count: usize,
     pub warning_count: usize,
     pub error_count: usize,
+    pub duplicate_count: usize,
     pub rows: Vec<ImportRowResult>,
 }
 
@@ -692,15 +775,6 @@ pub struct TrashBatch {
     pub asset_count: i64,
     pub category_count: i64,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaiduSaveTask {
-    pub id: String,
-    pub name: String,
-    pub share_url: String,
-    pub extraction_code: String,
 }
 
 #[derive(Debug, Clone)]
@@ -800,4 +874,205 @@ pub struct ReferenceImageAddReport {
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceExportOptions {
     pub scale: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInput {
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub project_type: String,
+    pub status: String,
+    #[serde(default)]
+    pub target_tools: Vec<String>,
+    #[serde(default)]
+    pub versions: Vec<String>,
+    pub resolution_width: Option<i64>,
+    pub resolution_height: Option<i64>,
+    pub frame_rate: Option<f64>,
+    pub cover_asset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub project_type: String,
+    pub status: String,
+    pub target_tools: Vec<String>,
+    pub versions: Vec<String>,
+    pub resolution_width: Option<i64>,
+    pub resolution_height: Option<i64>,
+    pub frame_rate: Option<f64>,
+    pub cover_asset_id: Option<String>,
+    pub cover_image_id: Option<String>,
+    pub asset_count: i64,
+    pub unavailable_asset_count: i64,
+    pub task_count: i64,
+    pub completed_task_count: i64,
+    pub review_task_count: i64,
+    pub progress: i64,
+    pub main_board_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_opened_at: Option<String>,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUnitInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub start_frame: Option<i64>,
+    pub end_frame: Option<i64>,
+    pub resolution_width: Option<i64>,
+    pub resolution_height: Option<i64>,
+    pub frame_rate: Option<f64>,
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUnit {
+    pub id: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub start_frame: Option<i64>,
+    pub end_frame: Option<i64>,
+    pub resolution_width: Option<i64>,
+    pub resolution_height: Option<i64>,
+    pub frame_rate: Option<f64>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTaskInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub unit_id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub status: String,
+    pub priority: String,
+    pub due_date: Option<String>,
+    pub sort_order: Option<i64>,
+    #[serde(default)]
+    pub asset_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTask {
+    pub id: String,
+    pub project_id: String,
+    pub unit_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub priority: String,
+    pub due_date: Option<String>,
+    pub sort_order: i64,
+    pub asset_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAssetLink {
+    pub asset_id: String,
+    pub name: String,
+    pub cover_image_id: Option<String>,
+    pub category_name: Option<String>,
+    pub status: String,
+    pub purpose: String,
+    pub note: String,
+    pub unit_ids: Vec<String>,
+    pub unavailable: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAssetUpdate {
+    pub project_id: String,
+    pub asset_ids: Vec<String>,
+    pub status: Option<String>,
+    pub purpose: Option<String>,
+    pub note: Option<String>,
+    pub unit_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBoardLink {
+    pub board_id: String,
+    pub name: String,
+    pub is_main: bool,
+    pub sort_order: i64,
+    pub item_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub kind: String,
+    pub label: String,
+    pub path: String,
+    pub path_type: String,
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathShortcut {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub label: String,
+    pub path: String,
+    pub path_type: String,
+    pub sort_order: i64,
+    pub available: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathCheck {
+    pub id: String,
+    pub available: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreativeProject {
+    #[serde(flatten)]
+    pub summary: ProjectSummary,
+    pub units: Vec<ProjectUnit>,
+    pub tasks: Vec<ProjectTask>,
+    pub assets: Vec<ProjectAssetLink>,
+    pub boards: Vec<ProjectBoardLink>,
+    pub paths: Vec<ProjectPathShortcut>,
 }

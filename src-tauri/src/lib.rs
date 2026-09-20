@@ -2,11 +2,13 @@ mod backup;
 mod commands;
 mod db;
 mod fab;
+mod glossary;
 mod images;
 mod importer;
 mod link_checker;
 mod models;
 mod organization;
+mod projects;
 mod reference_boards;
 mod state;
 mod translation;
@@ -45,7 +47,6 @@ pub fn run() {
             restore_trash_batch,
             purge_trash_batch,
             empty_trash,
-            prepare_baidu_save_tasks,
             prepare_reference_cover_ids,
             get_image_data,
             copy_extraction_code,
@@ -62,6 +63,7 @@ pub fn run() {
             read_clipboard_text,
             parse_share_text,
             fetch_fab_metadata,
+            check_fab_url,
             check_share_url,
             batch_update_assets,
             move_assets_to_category,
@@ -79,6 +81,13 @@ pub fn run() {
             set_content_language,
             test_translation_service,
             translate_asset_fields,
+            list_translation_terms,
+            upsert_translation_term,
+            delete_translation_term,
+            set_translation_term_enabled,
+            reset_translation_term_overrides,
+            import_translation_terms,
+            export_translation_terms,
             list_reference_boards,
             create_reference_board,
             rename_reference_board,
@@ -112,7 +121,29 @@ pub fn run() {
             rename_tag,
             merge_tags,
             delete_tags,
-            delete_unused_tags
+            delete_unused_tags,
+            list_projects,
+            get_project,
+            upsert_project,
+            archive_project,
+            delete_project,
+            add_project_assets,
+            update_project_assets,
+            remove_project_assets,
+            upsert_project_unit,
+            delete_project_unit,
+            reorder_project_units,
+            upsert_project_task,
+            delete_project_task,
+            move_project_task,
+            set_project_task_assets,
+            link_project_board,
+            unlink_project_board,
+            set_main_project_board,
+            upsert_project_path,
+            delete_project_path,
+            check_project_path,
+            open_project_path
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");

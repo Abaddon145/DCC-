@@ -1,11 +1,204 @@
 use crate::{
-    backup, db, fab, images, importer, link_checker, models::*, organization, reference_boards,
-    state::AppState, translation,
+    backup, db, fab, images, importer, link_checker, models::*, organization, projects,
+    reference_boards, state::AppState, translation,
 };
 use arboard::Clipboard;
 use std::{collections::HashMap, path::PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 use url::Url;
+
+#[tauri::command]
+pub fn list_projects(
+    state: State<AppState>,
+    include_archived: Option<bool>,
+) -> Result<Vec<ProjectSummary>, String> {
+    state.with_library(|connection, _| {
+        projects::list_projects(connection, include_archived.unwrap_or(false))
+    })
+}
+
+#[tauri::command]
+pub fn get_project(
+    state: State<AppState>,
+    id: String,
+    content_language: Option<String>,
+    mark_opened: Option<bool>,
+) -> Result<CreativeProject, String> {
+    state.with_library(|connection, _| {
+        projects::get_project(
+            connection,
+            &id,
+            content_language.as_deref().unwrap_or("zh-CN"),
+            mark_opened.unwrap_or(true),
+        )
+    })
+}
+
+#[tauri::command]
+pub fn upsert_project(
+    state: State<AppState>,
+    input: ProjectInput,
+) -> Result<CreativeProject, String> {
+    state.with_library_mut(|connection, _| projects::upsert_project(connection, input))
+}
+
+#[tauri::command]
+pub fn archive_project(state: State<AppState>, id: String, archived: bool) -> Result<(), String> {
+    state.with_library(|connection, _| projects::archive_project(connection, &id, archived))
+}
+
+#[tauri::command]
+pub fn delete_project(state: State<AppState>, id: String) -> Result<(), String> {
+    state.with_library(|connection, _| projects::delete_project(connection, &id))
+}
+
+#[tauri::command]
+pub fn add_project_assets(
+    state: State<AppState>,
+    project_id: String,
+    asset_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library_mut(|connection, _| {
+        projects::add_project_assets(connection, &project_id, asset_ids)
+    })
+}
+
+#[tauri::command]
+pub fn update_project_assets(
+    state: State<AppState>,
+    update: ProjectAssetUpdate,
+) -> Result<usize, String> {
+    state.with_library_mut(|connection, _| projects::update_project_assets(connection, update))
+}
+
+#[tauri::command]
+pub fn remove_project_assets(
+    state: State<AppState>,
+    project_id: String,
+    asset_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library_mut(|connection, _| {
+        projects::remove_project_assets(connection, &project_id, asset_ids)
+    })
+}
+
+#[tauri::command]
+pub fn upsert_project_unit(
+    state: State<AppState>,
+    input: ProjectUnitInput,
+) -> Result<ProjectUnit, String> {
+    state.with_library(|connection, _| projects::upsert_project_unit(connection, input))
+}
+
+#[tauri::command]
+pub fn delete_project_unit(state: State<AppState>, id: String) -> Result<(i64, i64), String> {
+    state.with_library(|connection, _| projects::delete_project_unit(connection, &id))
+}
+
+#[tauri::command]
+pub fn reorder_project_units(
+    state: State<AppState>,
+    project_id: String,
+    parent_id: Option<String>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::reorder_project_units(connection, &project_id, parent_id, ids)
+    })
+}
+
+#[tauri::command]
+pub fn upsert_project_task(
+    state: State<AppState>,
+    input: ProjectTaskInput,
+) -> Result<ProjectTask, String> {
+    state.with_library_mut(|connection, _| projects::upsert_project_task(connection, input))
+}
+
+#[tauri::command]
+pub fn delete_project_task(state: State<AppState>, id: String) -> Result<(), String> {
+    state.with_library(|connection, _| projects::delete_project_task(connection, &id))
+}
+
+#[tauri::command]
+pub fn move_project_task(
+    state: State<AppState>,
+    id: String,
+    status: String,
+    target_index: i64,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::move_project_task(connection, &id, &status, target_index)
+    })
+}
+
+#[tauri::command]
+pub fn set_project_task_assets(
+    state: State<AppState>,
+    task_id: String,
+    asset_ids: Vec<String>,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::set_project_task_assets(connection, &task_id, asset_ids)
+    })
+}
+
+#[tauri::command]
+pub fn link_project_board(
+    state: State<AppState>,
+    project_id: String,
+    board_id: String,
+    main: Option<bool>,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::link_project_board(connection, &project_id, &board_id, main.unwrap_or(false))
+    })
+}
+
+#[tauri::command]
+pub fn unlink_project_board(
+    state: State<AppState>,
+    project_id: String,
+    board_id: String,
+) -> Result<(), String> {
+    state.with_library(|connection, _| {
+        projects::unlink_project_board(connection, &project_id, &board_id)
+    })
+}
+
+#[tauri::command]
+pub fn set_main_project_board(
+    state: State<AppState>,
+    project_id: String,
+    board_id: String,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::set_main_project_board(connection, &project_id, &board_id)
+    })
+}
+
+#[tauri::command]
+pub fn upsert_project_path(
+    state: State<AppState>,
+    input: ProjectPathInput,
+) -> Result<ProjectPathShortcut, String> {
+    state.with_library(|connection, _| projects::upsert_project_path(connection, input))
+}
+
+#[tauri::command]
+pub fn delete_project_path(state: State<AppState>, id: String) -> Result<(), String> {
+    state.with_library(|connection, _| projects::delete_project_path(connection, &id))
+}
+
+#[tauri::command]
+pub fn check_project_path(state: State<AppState>, id: String) -> Result<ProjectPathCheck, String> {
+    state.with_library(|connection, _| projects::check_project_path(connection, &id))
+}
+
+#[tauri::command]
+pub fn open_project_path(state: State<AppState>, id: String) -> Result<(), String> {
+    state.with_library(|connection, _| projects::open_project_path(connection, &id))
+}
 
 #[tauri::command]
 pub fn get_library_meta(
@@ -305,14 +498,6 @@ pub fn empty_trash(state: State<AppState>) -> Result<usize, String> {
 }
 
 #[tauri::command]
-pub fn prepare_baidu_save_tasks(
-    state: State<AppState>,
-    ids: Vec<String>,
-) -> Result<Vec<BaiduSaveTask>, String> {
-    state.with_library(|connection, _| db::prepare_baidu_save_tasks(connection, &ids))
-}
-
-#[tauri::command]
 pub fn prepare_reference_cover_ids(
     state: State<AppState>,
     ids: Vec<String>,
@@ -397,6 +582,7 @@ pub async fn import_assets(
 ) -> Result<ImportReport, String> {
     if importer::is_fab_import(&mapping) {
         let (_, fab_auto_translate) = state.preferences()?;
+        let glossary_terms = state.effective_translation_terms("en", "zh-CN")?;
         let rows = importer::fab_rows(&PathBuf::from(&path), mapping)?;
         let total = rows.len();
         let mut report = ImportReport {
@@ -421,17 +607,54 @@ pub async fn import_assets(
                     name: String::new(),
                     status: "error".into(),
                     messages: vec!["缺少 Fab URL".into()],
+                    suggested_category_path: None,
+                    actual_category_path: None,
+                    duplicate_asset_id: None,
+                    duplicate_source: None,
                 });
                 continue;
             }
-            let already_exists = state.with_library(|connection, _| connection.query_row("SELECT EXISTS(SELECT 1 FROM assets WHERE deleted_at IS NULL AND source_url=?1)", [&row.fab_url], |value| value.get::<_, bool>(0)).map_err(|error| error.to_string()))?;
-            if already_exists {
+            let listing_id = match fab::listing_id_from_url(&row.fab_url) {
+                Ok(value) => value.to_string(),
+                Err(error) => {
+                    report.failed += 1;
+                    report.rows.push(ImportRowResult {
+                        row: row.row,
+                        name: row.fab_url.clone(),
+                        status: "error".into(),
+                        messages: vec![error],
+                        suggested_category_path: None,
+                        actual_category_path: None,
+                        duplicate_asset_id: None,
+                        duplicate_source: None,
+                    });
+                    continue;
+                }
+            };
+            let duplicate = state.with_library(|connection, _| {
+                db::fab_duplicate_match(connection, &listing_id, None)
+            })?;
+            if let Some(duplicate) = duplicate {
                 report.skipped += 1;
                 report.rows.push(ImportRowResult {
                     row: row.row,
-                    name: row.fab_url.clone(),
-                    status: "skipped".into(),
-                    messages: vec!["Fab 素材已存在".into()],
+                    name: duplicate.asset_name.clone(),
+                    status: "duplicate".into(),
+                    messages: vec![if duplicate.location == "trash" {
+                        format!(
+                            "Fab 素材“{}”已在回收站，请先恢复或永久删除",
+                            duplicate.asset_name
+                        )
+                    } else {
+                        format!(
+                            "Fab 素材“{}”已存在于 {}",
+                            duplicate.asset_name, duplicate.category_path
+                        )
+                    }],
+                    suggested_category_path: None,
+                    actual_category_path: Some(duplicate.category_path),
+                    duplicate_asset_id: Some(duplicate.asset_id),
+                    duplicate_source: Some(duplicate.location),
                 });
                 continue;
             }
@@ -444,10 +667,18 @@ pub async fn import_assets(
                         name: row.fab_url.clone(),
                         status: "error".into(),
                         messages: vec![error],
+                        suggested_category_path: None,
+                        actual_category_path: None,
+                        duplicate_asset_id: None,
+                        duplicate_source: None,
                     });
                     continue;
                 }
             };
+            let suggested_category = metadata.suggested_category_path.join(" / ");
+            let category_existed = state.with_library(|connection, _| {
+                db::auto_category_path_exists(connection, &metadata.suggested_category_path)
+            })?;
             emit_import_progress(
                 &app,
                 index + 1,
@@ -494,7 +725,7 @@ pub async fn import_assets(
                         license: metadata.license.clone(),
                     },
                 };
-                match translation::translate(request).await {
+                match translation::translate(request, &glossary_terms).await {
                     Ok(preview) => {
                         apply_fab_translation(&mut localizations, &mut messages, preview)
                     }
@@ -529,6 +760,8 @@ pub async fn import_assets(
                 size_bytes: None,
                 author: metadata.author.clone(),
                 source_url: metadata.canonical_url.clone(),
+                fab_listing_id: Some(metadata.listing_id.clone()),
+                auto_category_path: metadata.suggested_category_path.clone(),
                 license: metadata.license.clone(),
                 share_url: parsed_share.share_url,
                 extraction_code: parsed_share.extraction_code,
@@ -542,18 +775,38 @@ pub async fn import_assets(
             }) {
                 Ok(_) => {
                     report.imported += 1;
+                    let mut has_warnings = !messages.is_empty();
+                    if suggested_category == "其他 / 待整理" {
+                        has_warnings = true;
+                        messages.push(if category_existed {
+                            "Fab 分类无法识别，已归入其他 / 待整理".into()
+                        } else {
+                            "Fab 分类无法识别，已新建并归入其他 / 待整理".into()
+                        });
+                    } else if !suggested_category.is_empty() {
+                        messages.push(if category_existed {
+                            format!("自动归类：{suggested_category}")
+                        } else {
+                            format!("新建分类并自动归类：{suggested_category}")
+                        });
+                    }
                     if let Some(warning) = metadata.image_warning {
+                        has_warnings = true;
                         messages.push(warning);
                     }
                     report.rows.push(ImportRowResult {
                         row: row.row,
                         name: metadata.name,
-                        status: if messages.is_empty() {
-                            "imported".into()
-                        } else {
+                        status: if has_warnings {
                             "warning".into()
+                        } else {
+                            "imported".into()
                         },
                         messages,
+                        suggested_category_path: Some(suggested_category.clone()),
+                        actual_category_path: Some(suggested_category),
+                        duplicate_asset_id: None,
+                        duplicate_source: None,
                     });
                 }
                 Err(error) => {
@@ -563,6 +816,10 @@ pub async fn import_assets(
                         name: metadata.name,
                         status: "error".into(),
                         messages: vec![error],
+                        suggested_category_path: Some(suggested_category),
+                        actual_category_path: None,
+                        duplicate_asset_id: None,
+                        duplicate_source: None,
                     });
                 }
             }
@@ -681,6 +938,18 @@ pub fn parse_share_text(text: String) -> Result<ParsedShareText, String> {
 #[tauri::command]
 pub async fn fetch_fab_metadata(url: String) -> Result<FabMetadata, String> {
     fab::fetch_metadata(&url).await
+}
+
+#[tauri::command]
+pub fn check_fab_url(
+    state: State<AppState>,
+    url: String,
+    exclude_asset_id: Option<String>,
+) -> Result<Option<FabDuplicateMatch>, String> {
+    let listing_id = fab::listing_id_from_url(&url)?.to_string();
+    state.with_library(|connection, _| {
+        db::fab_duplicate_match(connection, &listing_id, exclude_asset_id.as_deref())
+    })
 }
 
 pub fn parse_share_text_value(text: &str) -> Result<ParsedShareText, String> {
@@ -854,9 +1123,70 @@ pub async fn test_translation_service() -> Result<TranslationTestResult, String>
 
 #[tauri::command]
 pub async fn translate_asset_fields(
+    state: State<'_, AppState>,
     request: TranslationRequest,
 ) -> Result<TranslationPreview, String> {
-    translation::translate(request).await
+    let terms =
+        state.effective_translation_terms(&request.source_language, &request.target_language)?;
+    translation::translate(request, &terms).await
+}
+
+#[tauri::command]
+pub fn list_translation_terms(
+    state: State<AppState>,
+    query: Option<String>,
+    source_language: Option<String>,
+    target_language: Option<String>,
+    origin: Option<String>,
+    enabled: Option<bool>,
+) -> Result<Vec<TranslationTerm>, String> {
+    state.list_translation_terms(
+        query.as_deref(),
+        source_language.as_deref(),
+        target_language.as_deref(),
+        origin.as_deref(),
+        enabled,
+    )
+}
+
+#[tauri::command]
+pub fn upsert_translation_term(
+    state: State<AppState>,
+    input: TranslationTermInput,
+) -> Result<TranslationTerm, String> {
+    state.upsert_translation_term(input)
+}
+
+#[tauri::command]
+pub fn delete_translation_term(state: State<AppState>, id: String) -> Result<(), String> {
+    state.delete_translation_term(&id)
+}
+
+#[tauri::command]
+pub fn set_translation_term_enabled(
+    state: State<AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    state.set_translation_term_enabled(&id, enabled)
+}
+
+#[tauri::command]
+pub fn reset_translation_term_overrides(state: State<AppState>) -> Result<(), String> {
+    state.reset_translation_terms()
+}
+
+#[tauri::command]
+pub fn import_translation_terms(
+    state: State<AppState>,
+    path: String,
+) -> Result<TranslationTermImportReport, String> {
+    state.import_translation_terms(&PathBuf::from(path))
+}
+
+#[tauri::command]
+pub fn export_translation_terms(state: State<AppState>, path: String) -> Result<(), String> {
+    state.export_translation_terms(&PathBuf::from(path))
 }
 
 #[tauri::command]
@@ -1116,6 +1446,7 @@ mod tests {
                 warnings: vec!["description：请求超时".into()],
                 failed_fields: vec!["description".into()],
                 character_count: 12,
+                ..Default::default()
             },
         );
         assert_eq!(localizations["zh-CN"].name, "未来城市");

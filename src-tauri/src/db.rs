@@ -1,4 +1,4 @@
-use crate::{images, models::*};
+use crate::{fab, images, models::*};
 use chrono::Utc;
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Row, Transaction,
@@ -27,6 +27,8 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v5(&connection)?;
     migrate_to_v6(&connection)?;
     migrate_to_v7(&connection)?;
+    migrate_to_v8(&connection)?;
+    migrate_to_v9(&connection)?;
     Ok(connection)
 }
 
@@ -316,6 +318,96 @@ fn migrate_to_v7(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_to_v8(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 8 {
+        return Ok(());
+    }
+    let columns = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(assets)")
+            .map_err(|error| error.to_string())?;
+        let values = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        values
+    };
+    if !columns.iter().any(|name| name == "fab_listing_id") {
+        connection
+            .execute(
+                "ALTER TABLE assets ADD COLUMN fab_listing_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| format!("升级数据库到 v8 失败：{error}"))?;
+    }
+    let assets = {
+        let mut statement = connection
+            .prepare("SELECT id,source_url FROM assets WHERE fab_listing_id='' AND source_url<>''")
+            .map_err(|error| error.to_string())?;
+        let values = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        values
+    };
+    for (id, source_url) in assets {
+        if let Ok(listing_id) = fab::listing_id_from_url(&source_url) {
+            connection
+                .execute(
+                    "UPDATE assets SET fab_listing_id=?1 WHERE id=?2",
+                    params![listing_id.to_string(), id],
+                )
+                .map_err(|error| format!("回填 Fab 商品 ID 失败：{error}"))?;
+        }
+    }
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_assets_fab_listing_id ON assets(fab_listing_id);
+             INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','8');",
+        )
+        .map_err(|error| format!("升级数据库到 v8 失败：{error}"))?;
+    Ok(())
+}
+
+fn migrate_to_v9(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 9 {
+        return Ok(());
+    }
+    // Tables are created by schema.sql before migrations. Keeping the version
+    // step explicit makes restored v8 backups upgrade predictably.
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','9')",
+            [],
+        )
+        .map_err(|error| format!("升级数据库到 v9 失败：{error}"))?;
+    Ok(())
+}
+
 fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
@@ -581,6 +673,28 @@ pub fn search_assets(
     if request.recent_only {
         conditions.push("a.last_viewed_at IS NOT NULL".into());
     }
+    if let Some(project_id) = request
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut clause =
+            "EXISTS (SELECT 1 FROM project_assets pa WHERE pa.project_id=? AND pa.asset_id=a.id"
+                .to_string();
+        values.push(Value::Text(project_id.to_string()));
+        if let Some(status) = request
+            .project_asset_status
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            clause.push_str(" AND pa.status=?");
+            values.push(Value::Text(status.to_string()));
+        }
+        clause.push(')');
+        conditions.push(clause);
+    }
     if let Some(issue) = request
         .health_issue
         .as_deref()
@@ -732,7 +846,7 @@ pub fn get_asset(
       CASE WHEN COALESCE(lr.name,'')<>'' THEN '{language}' ELSE '{fallback}' END,
       CASE WHEN COALESCE(lr.name,'')<>'' THEN 0 ELSE 1 END,
       a.link_check_status,a.link_checked_at,a.link_check_message,CASE WHEN trim(a.share_url)<>'' THEN 1 ELSE 0 END,
-      COALESCE(NULLIF(lr.description,''),NULLIF(lf.description,''),a.description),a.category_id,a.size_bytes,a.author,a.source_url,COALESCE(NULLIF(lr.license,''),NULLIF(lf.license,''),a.license),a.share_url,a.extraction_code,a.created_at
+      COALESCE(NULLIF(lr.description,''),NULLIF(lf.description,''),a.description),a.category_id,a.size_bytes,a.author,a.source_url,COALESCE(NULLIF(lr.license,''),NULLIF(lf.license,''),a.license),a.share_url,a.extraction_code,a.created_at,a.fab_listing_id
       FROM assets a LEFT JOIN categories c ON c.id=a.category_id LEFT JOIN asset_localizations lr ON lr.asset_id=a.id AND lr.locale='{language}' LEFT JOIN asset_localizations lf ON lf.asset_id=a.id AND lf.locale='{fallback}' WHERE a.id=?1 AND a.deleted_at IS NULL");
     let fields = connection
         .query_row(&sql, [id], |row| {
@@ -747,6 +861,7 @@ pub fn get_asset(
                 row.get::<_, String>(23)?,
                 row.get::<_, String>(24)?,
                 row.get::<_, String>(25)?,
+                row.get::<_, String>(26)?,
             ))
         })
         .optional()
@@ -796,6 +911,7 @@ pub fn get_asset(
         size_bytes: fields.3,
         author: fields.4,
         source_url: fields.5,
+        fab_listing_id: fields.10,
         license: fields.6,
         share_url: fields.7,
         extraction_code: fields.8,
@@ -849,6 +965,43 @@ pub fn upsert_asset(
         .id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let source_listing_id = fab::listing_id_from_url(&input.source_url)
+        .ok()
+        .map(|value| value.to_string());
+    let supplied_listing_id = input
+        .fab_listing_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map(|value| value.to_string())
+                .map_err(|_| "Fab 商品 ID 格式无效".to_string())
+        })
+        .transpose()?;
+    let existing_listing_id = connection
+        .query_row(
+            "SELECT fab_listing_id FROM assets WHERE id=?1",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.is_empty());
+    let fab_listing_id = source_listing_id
+        .or(supplied_listing_id)
+        .or(existing_listing_id)
+        .unwrap_or_default();
+    if !fab_listing_id.is_empty() {
+        if let Some(duplicate) = fab_duplicate_match(connection, &fab_listing_id, Some(&id))? {
+            return Err(if duplicate.location == "trash" {
+                format!("该 Fab 素材已在回收站：{}", duplicate.asset_name)
+            } else {
+                format!("该 Fab 素材已存在：{}", duplicate.asset_name)
+            });
+        }
+    }
+    input.fab_listing_id = (!fab_listing_id.is_empty()).then(|| fab_listing_id.clone());
     let timestamp = now();
     let mut new_images = Vec::new();
     for image in input.images.iter().filter(|image| image.id.is_none()) {
@@ -878,6 +1031,9 @@ pub fn upsert_asset(
     }
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     let result = (|| -> Result<Vec<(String, String)>, String> {
+        if input.category_id.is_none() && !input.auto_category_path.is_empty() {
+            input.category_id = ensure_auto_category_path(&transaction, &input.auto_category_path)?;
+        }
         let created = transaction
             .query_row("SELECT created_at FROM assets WHERE id=?1", [&id], |row| {
                 row.get::<_, String>(0)
@@ -903,10 +1059,10 @@ pub fn upsert_asset(
                 return Err("该分享链接已存在于素材库".into());
             }
         }
-        transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,license,share_url,normalized_share_url,extraction_code,favorite,created_at,updated_at)
-          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
-          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,updated_at=excluded.updated_at",
-           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,created,timestamp]).map_err(map_constraint)?;
+        transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,fab_listing_id,license,share_url,normalized_share_url,extraction_code,favorite,created_at,updated_at)
+          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,fab_listing_id=excluded.fab_listing_id,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,updated_at=excluded.updated_at",
+           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),fab_listing_id,input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,created,timestamp]).map_err(map_constraint)?;
         transaction
             .execute("DELETE FROM asset_localized_tags WHERE asset_id=?1", [&id])
             .map_err(|e| e.to_string())?;
@@ -1104,6 +1260,141 @@ fn category_path(connection: &Connection, category_id: Option<&str>) -> Result<S
     }
     names.reverse();
     Ok(names.join(" / "))
+}
+
+pub fn fab_duplicate_match(
+    connection: &Connection,
+    listing_id: &str,
+    exclude_asset_id: Option<&str>,
+) -> Result<Option<FabDuplicateMatch>, String> {
+    let listing_id = Uuid::parse_str(listing_id.trim())
+        .map_err(|_| "Fab 商品 ID 格式无效")?
+        .to_string();
+    let value = connection
+        .query_row(
+            "SELECT id,name,category_id,deleted_at FROM assets WHERE fab_listing_id=?1 AND id<>COALESCE(?2,'') ORDER BY CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END,updated_at DESC LIMIT 1",
+            params![listing_id, exclude_asset_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((asset_id, asset_name, category_id, deleted_at)) = value else {
+        return Ok(None);
+    };
+    Ok(Some(FabDuplicateMatch {
+        asset_id,
+        asset_name,
+        category_path: category_path(connection, category_id.as_deref())?,
+        location: if deleted_at.is_some() {
+            "trash"
+        } else {
+            "library"
+        }
+        .into(),
+    }))
+}
+
+pub fn auto_category_path_exists(connection: &Connection, path: &[String]) -> Result<bool, String> {
+    if path.is_empty() || path.len() > 2 {
+        return Ok(false);
+    }
+    let mut parent: Option<String> = None;
+    for name in path {
+        let id = connection
+            .query_row(
+                "SELECT id FROM categories WHERE name=?1 COLLATE NOCASE AND parent_id IS ?2 AND deleted_at IS NULL LIMIT 1",
+                params![name.trim(), parent],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        parent = Some(id);
+    }
+    Ok(true)
+}
+
+fn ensure_auto_category_path(
+    transaction: &Transaction<'_>,
+    path: &[String],
+) -> Result<Option<String>, String> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    if path.len() > 2 {
+        return Err("自动分类最多支持两层".into());
+    }
+    let mut parent: Option<String> = None;
+    for raw_name in path {
+        let name = raw_name.trim();
+        if name.is_empty()
+            || name.chars().count() > 60
+            || name
+                .chars()
+                .any(|value| value.is_control() || matches!(value, '/' | '\\'))
+        {
+            return Err("自动分类名称不安全".into());
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT id,deleted_at,delete_batch_id FROM categories WHERE name=?1 COLLATE NOCASE AND parent_id IS ?2 LIMIT 1",
+                params![name, parent],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let id = if let Some((id, deleted_at, batch_id)) = existing {
+            if deleted_at.is_some() {
+                transaction
+                    .execute(
+                        "UPDATE categories SET deleted_at=NULL,delete_batch_id=NULL WHERE id=?1",
+                        [&id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                if let Some(batch_id) = batch_id {
+                    transaction
+                        .execute(
+                            "UPDATE deletion_batches SET category_count=MAX(category_count-1,0) WHERE id=?1",
+                            [&batch_id],
+                        )
+                        .map_err(|error| error.to_string())?;
+                    transaction
+                        .execute(
+                            "DELETE FROM deletion_batches WHERE id=?1 AND asset_count=0 AND category_count=0",
+                            [&batch_id],
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            id
+        } else {
+            let id = Uuid::new_v4().to_string();
+            transaction
+                .execute(
+                    "INSERT INTO categories(id,name,parent_id,sort_order,created_at) VALUES(?1,?2,?3,COALESCE((SELECT MAX(sort_order)+1 FROM categories WHERE parent_id IS ?3 AND deleted_at IS NULL),0),?4)",
+                    params![id, name, parent, now()],
+                )
+                .map_err(map_constraint)?;
+            id
+        };
+        parent = Some(id);
+    }
+    Ok(parent)
 }
 
 pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), String> {
@@ -1420,6 +1711,28 @@ pub fn restore_trash_batch(
         "SELECT id FROM assets WHERE delete_batch_id=?1",
         batch_id,
     )?;
+    for id in &ids {
+        let listing_id = connection
+            .query_row(
+                "SELECT fab_listing_id FROM assets WHERE id=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !listing_id.is_empty() {
+            let conflict: Option<String> = connection
+                .query_row(
+                    "SELECT name FROM assets WHERE fab_listing_id=?1 AND deleted_at IS NULL AND id<>?2 LIMIT 1",
+                    params![listing_id, id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if let Some(name) = conflict {
+                return Err(format!("无法恢复：相同 Fab 素材已存在于素材库（{name}）"));
+            }
+        }
+    }
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction
         .execute(
@@ -1506,17 +1819,6 @@ pub fn empty_trash(connection: &mut Connection, base_dir: &Path) -> Result<usize
         purge_trash_batch(connection, base_dir, &id)?;
     }
     Ok(count)
-}
-
-pub fn prepare_baidu_save_tasks(
-    connection: &Connection,
-    ids: &[String],
-) -> Result<Vec<BaiduSaveTask>, String> {
-    let mut tasks = Vec::new();
-    for id in unique_values(ids) {
-        if let Some(task) = connection.query_row("SELECT id,name,share_url,extraction_code FROM assets WHERE id=?1 AND deleted_at IS NULL AND (normalized_share_url LIKE 'https://pan.baidu.com/%' OR normalized_share_url LIKE 'https://%.pan.baidu.com/%')", [&id], |row| Ok(BaiduSaveTask { id: row.get(0)?, name: row.get(1)?, share_url: row.get(2)?, extraction_code: row.get(3)? })).optional().map_err(|e| e.to_string())? { tasks.push(task); }
-    }
-    Ok(tasks)
 }
 
 pub fn prepare_reference_cover_ids(
@@ -2044,6 +2346,7 @@ fn health_issue_ids(
         "missingFormat" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND formats_json='[]'"),
         "nonBaidu" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND normalized_share_url NOT LIKE 'https://pan.baidu.com/%' AND normalized_share_url NOT LIKE 'https://%.pan.baidu.com/%'"),
         "duplicateLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND normalized_share_url IN (SELECT normalized_share_url FROM assets WHERE deleted_at IS NULL GROUP BY normalized_share_url HAVING COUNT(*)>1)"),
+        "duplicateFab" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' AND fab_listing_id IN (SELECT fab_listing_id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' GROUP BY fab_listing_id HAVING COUNT(*)>1)"),
         "missingZh" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='zh-CN' AND trim(l.name)<>'')"),
         "missingEn" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
         "invalidLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='invalid'"),
@@ -2086,6 +2389,7 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
         ("missingFormat", "缺少格式"),
         ("nonBaidu", "非百度网盘链接"),
         ("duplicateLink", "重复分享链接"),
+        ("duplicateFab", "重复 Fab 素材"),
         ("missingZh", "缺少中文版本"),
         ("missingEn", "缺少英文版本"),
         ("invalidLink", "网盘链接已失效"),
@@ -2129,6 +2433,8 @@ pub fn list_health_issues(
             recent_only: false,
             health_issue: Some(request.issue),
             smart_collection_id: None,
+            project_id: None,
+            project_asset_status: None,
             sort: "updated".into(),
             offset: request.offset,
             limit: request.limit,
@@ -2387,7 +2693,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("legacy.db");
         let legacy = Connection::open(&path).unwrap();
-        legacy.execute_batch("CREATE TABLE assets(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',category_id TEXT,dcc_tools_json TEXT NOT NULL DEFAULT '[]',versions_json TEXT NOT NULL DEFAULT '[]',formats_json TEXT NOT NULL DEFAULT '[]',size_bytes INTEGER,author TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',license TEXT NOT NULL DEFAULT '',share_url TEXT NOT NULL,extraction_code TEXT NOT NULL DEFAULT '',favorite INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,last_viewed_at TEXT); INSERT INTO assets(id,name,share_url,created_at,updated_at) VALUES('1','旧素材','http://pan.baidu.com/s/old?pwd=1234','now','now');").unwrap();
+        legacy.execute_batch("CREATE TABLE assets(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',category_id TEXT,dcc_tools_json TEXT NOT NULL DEFAULT '[]',versions_json TEXT NOT NULL DEFAULT '[]',formats_json TEXT NOT NULL DEFAULT '[]',size_bytes INTEGER,author TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',license TEXT NOT NULL DEFAULT '',share_url TEXT NOT NULL,extraction_code TEXT NOT NULL DEFAULT '',favorite INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,last_viewed_at TEXT); INSERT INTO assets(id,name,source_url,share_url,created_at,updated_at) VALUES('1','旧素材','https://www.fab.com/zh-cn/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a?lang=zh-CN','http://pan.baidu.com/s/old?pwd=1234','now','now');").unwrap();
         drop(legacy);
         let migrated = open_database(&path).unwrap();
         let value: String = migrated
@@ -2419,7 +2725,15 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "7");
+        let fab_listing_id: String = migrated
+            .query_row(
+                "SELECT fab_listing_id FROM assets WHERE id='1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "9");
+        assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
     }
@@ -2462,6 +2776,8 @@ mod tests {
                 size_bytes: None,
                 author: String::new(),
                 source_url: String::new(),
+                fab_listing_id: None,
+                auto_category_path: Vec::new(),
                 license: String::new(),
                 share_url: "https://pan.baidu.com/s/bilingual".into(),
                 extraction_code: String::new(),
@@ -2492,6 +2808,8 @@ mod tests {
                 recent_only: false,
                 health_issue: None,
                 smart_collection_id: None,
+                project_id: None,
+                project_asset_status: None,
                 sort: "relevance".into(),
                 offset: 0,
                 limit: 10,
@@ -2517,6 +2835,8 @@ mod tests {
             size_bytes: None,
             author: String::new(),
             source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
             license: String::new(),
             share_url: "https://pan.baidu.com/s/first?pwd=1234".into(),
             extraction_code: "1234".into(),
@@ -2561,6 +2881,8 @@ mod tests {
             size_bytes: None,
             author: String::new(),
             source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
             license: String::new(),
             share_url: url.into(),
             extraction_code: String::new(),
@@ -2626,6 +2948,8 @@ mod tests {
             size_bytes: None,
             author: String::new(),
             source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
             license: String::new(),
             share_url: String::new(),
             extraction_code: String::new(),
@@ -2653,6 +2977,94 @@ mod tests {
                 .card
                 .name,
             "无链接 A"
+        );
+    }
+
+    #[test]
+    fn auto_creates_categories_and_rejects_fab_url_variants() {
+        let (dir, mut connection) = setup();
+        let make_input = |name: &str, source_url: &str| AssetInput {
+            id: None,
+            name: name.into(),
+            description: String::new(),
+            category_id: None,
+            tags: Vec::new(),
+            dcc_tools: vec!["Unreal Engine".into()],
+            versions: vec!["5.5".into()],
+            formats: vec!["uasset".into()],
+            size_bytes: None,
+            author: String::new(),
+            source_url: source_url.into(),
+            fab_listing_id: None,
+            auto_category_path: vec!["环境".into(), "沙漠".into()],
+            license: String::new(),
+            share_url: String::new(),
+            extraction_code: String::new(),
+            favorite: false,
+            images: Vec::new(),
+            localizations: HashMap::new(),
+            content_language: "zh-CN".into(),
+        };
+        let id = "06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+        let saved = upsert_asset(
+            &mut connection,
+            dir.path(),
+            make_input(
+                "沙漠",
+                &format!("https://www.fab.com/listings/{id}?lang=zh-CN"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(saved.card.category_name.as_deref(), Some("沙漠"));
+        assert_eq!(
+            category_path(&connection, saved.category_id.as_deref()).unwrap(),
+            "环境 / 沙漠"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM categories", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let duplicate = upsert_asset(
+            &mut connection,
+            dir.path(),
+            make_input(
+                "重复",
+                &format!("http://fab.com/zh-cn/listings/{id}/#details"),
+            ),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("已存在"));
+        assert_eq!(
+            fab_duplicate_match(&connection, id, None)
+                .unwrap()
+                .unwrap()
+                .asset_id,
+            saved.card.id
+        );
+        let manual_id = upsert_category(
+            &connection,
+            Some("manual".into()),
+            "我的分类".into(),
+            None,
+            false,
+        )
+        .unwrap();
+        let mut manual = make_input(
+            "手动分类",
+            "https://www.fab.com/listings/916aa5ba-df73-47d7-be11-dc8a01e12a43",
+        );
+        manual.category_id = Some(manual_id.clone());
+        let manually_saved = upsert_asset(&mut connection, dir.path(), manual).unwrap();
+        assert_eq!(
+            manually_saved.category_id.as_deref(),
+            Some(manual_id.as_str())
+        );
+        assert_eq!(
+            manually_saved.card.category_name.as_deref(),
+            Some("我的分类")
         );
     }
 }

@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({ api: {
   getTranslationSettings: vi.fn().mockResolvedValue({ provider: "baidu", configured: false, fabAutoTranslate: true, contentLanguage: "zh-CN" }),
   saveTranslationCredentials: vi.fn().mockResolvedValue(undefined),
   testTranslationService: vi.fn().mockResolvedValue({ success: true, message: "连接成功" }),
+  listTranslationTerms: vi.fn().mockResolvedValue([]),
   setFabAutoTranslate: vi.fn(), deleteTranslationCredentials: vi.fn(), changeLibrary: vi.fn(), forgetRecentLibrary: vi.fn()
 } }));
 

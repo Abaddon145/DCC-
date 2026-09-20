@@ -1,6 +1,6 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
-export type ViewMode = "library" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
-export type ModuleId = "library" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ModuleId = "library" | "projects" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -45,6 +45,8 @@ export interface SearchRequest {
   recentOnly: boolean;
   healthIssue?: string | null;
   smartCollectionId?: string | null;
+  projectId?: string | null;
+  projectAssetStatus?: ProjectAssetStatus | null;
   sort: SortMode;
   offset: number;
   limit: number;
@@ -77,6 +79,41 @@ export interface LibraryPreferences {
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }
+
+export type ProjectType = "still" | "scene" | "animation";
+export type ProjectStatus = "planning" | "active" | "paused" | "completed" | "archived";
+export type ProjectAssetStatus = "candidate" | "selected" | "used" | "rejected";
+export type ProjectTaskStatus = "todo" | "in_progress" | "review" | "done";
+export type ProjectTaskPriority = "low" | "normal" | "high" | "urgent";
+
+export interface ProjectInput {
+  id?: string | null; name: string; description: string; projectType: ProjectType; status: ProjectStatus;
+  targetTools: string[]; versions: string[]; resolutionWidth: number | null; resolutionHeight: number | null;
+  frameRate: number | null; coverAssetId: string | null;
+}
+export interface ProjectSummary extends Omit<ProjectInput, "id"> {
+  id: string; coverImageId: string | null; assetCount: number; unavailableAssetCount: number; taskCount: number;
+  completedTaskCount: number; reviewTaskCount: number; progress: number; mainBoardId: string | null;
+  createdAt: string; updatedAt: string; lastOpenedAt: string | null; archivedAt: string | null;
+}
+export interface ProjectUnitInput {
+  id?: string | null; projectId: string; parentId: string | null; kind: "scene" | "shot"; name: string; description: string;
+  startFrame: number | null; endFrame: number | null; resolutionWidth: number | null; resolutionHeight: number | null;
+  frameRate: number | null; sortOrder?: number | null;
+}
+export interface ProjectUnit extends Omit<ProjectUnitInput, "id" | "sortOrder"> { id: string; sortOrder: number; createdAt: string; updatedAt: string }
+export interface ProjectTaskInput {
+  id?: string | null; projectId: string; unitId: string | null; title: string; description: string; status: ProjectTaskStatus;
+  priority: ProjectTaskPriority; dueDate: string | null; sortOrder?: number | null; assetIds: string[];
+}
+export interface ProjectTask extends Omit<ProjectTaskInput, "id" | "sortOrder"> { id: string; sortOrder: number; createdAt: string; updatedAt: string }
+export interface ProjectAssetLink { assetId: string; name: string; coverImageId: string | null; categoryName: string | null; status: ProjectAssetStatus; purpose: string; note: string; unitIds: string[]; unavailable: boolean; updatedAt: string }
+export interface ProjectAssetUpdate { projectId: string; assetIds: string[]; status?: ProjectAssetStatus | null; purpose?: string | null; note?: string | null; unitIds?: string[] | null }
+export interface ProjectBoardLink { boardId: string; name: string; isMain: boolean; sortOrder: number; itemCount: number }
+export interface ProjectPathInput { id?: string | null; projectId: string; kind: "root" | "project_file" | "output" | "custom"; label: string; path: string; pathType: "file" | "directory"; sortOrder?: number | null }
+export interface ProjectPathShortcut extends Omit<ProjectPathInput, "id" | "sortOrder"> { id: string; sortOrder: number; available: boolean; createdAt: string; updatedAt: string }
+export interface ProjectPathCheck { id: string; available: boolean; message: string }
+export interface CreativeProject extends ProjectSummary { units: ProjectUnit[]; tasks: ProjectTask[]; assets: ProjectAssetLink[]; boards: ProjectBoardLink[]; paths: ProjectPathShortcut[] }
 
 export interface SmartCollectionRule {
   query: string; categoryIds: string[]; tagIds: string[]; dccTools: string[]; versions: string[];
@@ -128,6 +165,7 @@ export interface AssetDetail extends AssetCard {
   sizeBytes: number | null;
   author: string;
   sourceUrl: string;
+  fabListingId: string;
   license: string;
   shareUrl: string;
   extractionCode: string;
@@ -158,6 +196,8 @@ export interface AssetInput {
   sizeBytes: number | null;
   author: string;
   sourceUrl: string;
+  fabListingId?: string | null;
+  autoCategoryPath?: string[];
   license: string;
   shareUrl: string;
   extractionCode: string;
@@ -174,8 +214,12 @@ export interface ImportMapping {
 export interface ImportRowResult {
   row: number;
   name: string;
-  status: "valid" | "warning" | "error" | "skipped" | "imported";
+  status: "valid" | "warning" | "error" | "duplicate" | "skipped" | "imported";
   messages: string[];
+  suggestedCategoryPath?: string | null;
+  actualCategoryPath?: string | null;
+  duplicateAssetId?: string | null;
+  duplicateSource?: "file" | "library" | "trash" | null;
 }
 
 export interface ImportPreview {
@@ -185,6 +229,7 @@ export interface ImportPreview {
   validCount: number;
   warningCount: number;
   errorCount: number;
+  duplicateCount: number;
   rows: ImportRowResult[];
 }
 
@@ -200,7 +245,6 @@ export interface AssetSelection { ids: string[]; total: number }
 export interface DeleteRequest { assetIds: string[]; categoryId: string | null }
 export interface DeleteResult { batchId: string; label: string; assetCount: number; categoryCount: number }
 export interface TrashBatch { id: string; kind: "assets" | "category"; label: string; assetCount: number; categoryCount: number; createdAt: string }
-export interface BaiduSaveTask { id: string; name: string; shareUrl: string; extractionCode: string }
 
 export interface LibraryLocation {
   path: string;
@@ -230,6 +274,10 @@ export interface DuplicateMatch { id: string; name: string; shareUrl: string }
 
 export interface FabMetadata {
   canonicalUrl: string;
+  listingId: string;
+  categoryPath: string;
+  listingType: string;
+  suggestedCategoryPath: string[];
   name: string;
   description: string;
   author: string;
@@ -241,6 +289,13 @@ export interface FabMetadata {
   license: string;
   previewImages: FabPreviewImage[];
   imageWarning: string | null;
+}
+
+export interface FabDuplicateMatch {
+  assetId: string;
+  assetName: string;
+  categoryPath: string;
+  location: "library" | "trash";
 }
 
 export interface FabPreviewImage {
@@ -274,7 +329,12 @@ export interface LinkCheckReport { totalAssets: number; uniqueLinks: number; che
 
 export interface TranslationSettings { provider: "baidu"; configured: boolean; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }
-export interface TranslationPreview { fields: LocalizedAssetText; characterCount: number; warnings: string[]; failedFields: string[] }
+export type TranslationTermMode = "translate" | "preserve";
+export interface TranslationTermInput { id?: string | null; sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; source: string; target: string; mode: TranslationTermMode; caseSensitive: boolean; enabled: boolean }
+export interface TranslationTerm extends TranslationTermInput { id: string; origin: "builtin" | "custom" }
+export interface TranslationTermApplication { field: string; source: string; target: string; mode: TranslationTermMode; origin: "builtin" | "custom"; count: number }
+export interface TranslationTermImportReport { imported: number; updated: number; skipped: number; warnings: string[] }
+export interface TranslationPreview { fields: LocalizedAssetText; characterCount: number; warnings: string[]; failedFields: string[]; appliedTerms: TranslationTermApplication[]; protectedTokenCount: number }
 export interface TranslationTestResult { success: boolean; message: string }
 
 export interface ReferenceBoardSummary {

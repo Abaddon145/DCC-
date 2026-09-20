@@ -1,4 +1,4 @@
-use crate::{db, models::*};
+use crate::{db, fab, models::*};
 use calamine::{open_workbook_auto, Reader};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
@@ -60,10 +60,39 @@ pub fn preview(
     let mut valid_count = 0;
     let mut warning_count = 0;
     let mut error_count = 0;
+    let mut duplicate_count = 0;
+    let mut seen_fab = HashMap::<String, usize>::new();
     for row in &rows {
-        let result = validate_row(connection, row)?;
+        let mut result = validate_row(connection, row)?;
+        if row.values.contains_key("fab_url") && result.status != "error" {
+            let raw_url = value(row, "fab_url");
+            if let Ok(listing_id) = fab::listing_id_from_url(raw_url) {
+                let listing_id = listing_id.to_string();
+                if let Some(first_row) = seen_fab.get(&listing_id) {
+                    result.status = "duplicate".into();
+                    result.duplicate_source = Some("file".into());
+                    result
+                        .messages
+                        .push(format!("与第 {first_row} 行是同一 Fab 商品，导入时将跳过"));
+                } else {
+                    seen_fab.insert(listing_id.clone(), row.row);
+                    if let Some(duplicate) = db::fab_duplicate_match(connection, &listing_id, None)?
+                    {
+                        result.status = "duplicate".into();
+                        result.duplicate_asset_id = Some(duplicate.asset_id);
+                        result.duplicate_source = Some(duplicate.location.clone());
+                        result.messages.push(if duplicate.location == "trash" {
+                            format!("Fab 素材“{}”已在回收站，导入时将跳过", duplicate.asset_name)
+                        } else {
+                            format!("Fab 素材“{}”已存在，导入时将跳过", duplicate.asset_name)
+                        });
+                    }
+                }
+            }
+        }
         match result.status.as_str() {
             "error" => error_count += 1,
+            "duplicate" => duplicate_count += 1,
             "warning" => {
                 warning_count += 1;
                 valid_count += 1;
@@ -79,6 +108,7 @@ pub fn preview(
         valid_count,
         warning_count,
         error_count,
+        duplicate_count,
         rows: results,
     })
 }
@@ -200,6 +230,8 @@ pub fn commit(
             size_bytes: parse_size(value(&row, "size")),
             author: value(&row, "author").into(),
             source_url: value(&row, "source_url").into(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
             license: value(&row, "license").into(),
             share_url: share_url.into(),
             extraction_code: value(&row, "extraction_code").into(),
@@ -584,10 +616,7 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
     if row.values.contains_key("fab_url") {
         let fab_url = value(row, "fab_url");
         let mut messages = Vec::new();
-        let valid = Url::parse(fab_url).ok().is_some_and(|url| {
-            matches!(url.host_str(), Some("fab.com" | "www.fab.com"))
-                && url.path().contains("/listings/")
-        });
+        let valid = fab::listing_id_from_url(fab_url).is_ok();
         if !valid {
             messages.push("Fab URL 无效或缺失".into());
         }
@@ -600,6 +629,10 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
                 "error".into()
             },
             messages,
+            suggested_category_path: None,
+            actual_category_path: None,
+            duplicate_asset_id: None,
+            duplicate_source: None,
         });
     }
     let name = [
@@ -659,6 +692,10 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
         name: name.into(),
         status: status.into(),
         messages,
+        suggested_category_path: None,
+        actual_category_path: None,
+        duplicate_asset_id: None,
+        duplicate_source: None,
     })
 }
 
@@ -806,5 +843,22 @@ mod tests {
             "https://www.fab.com/listings/6b1e9d82-2d94-45d0-993e-d5e730eac7de"
         );
         assert!(rows[1].baidu_text.contains("提取码: 6666"));
+    }
+
+    #[test]
+    fn preview_marks_fab_url_variants_in_the_same_file_as_duplicates() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("duplicates.csv");
+        std::fs::write(
+            &path,
+            "fab_url\nhttps://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a\nhttp://fab.com/zh-cn/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a/?lang=zh-CN#details\n",
+        )
+        .unwrap();
+        let connection = db::open_database(&directory.path().join("library.db")).unwrap();
+        let result = preview(&connection, &path, HashMap::new()).unwrap();
+        assert_eq!(result.valid_count, 1);
+        assert_eq!(result.duplicate_count, 1);
+        assert_eq!(result.rows[1].status, "duplicate");
+        assert_eq!(result.rows[1].duplicate_source.as_deref(), Some("file"));
     }
 }

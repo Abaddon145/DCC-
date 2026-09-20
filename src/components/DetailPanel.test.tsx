@@ -10,7 +10,7 @@ const asset: AssetDetail = {
   id: "1", name: "中文素材", categoryName: null, tags: ["环境"], dccTools: ["Unreal Engine"], versions: ["5.5"], formats: ["uasset"], favorite: false,
   updatedAt: "2026-01-01T00:00:00Z", lastViewedAt: null, coverImageId: null, contentLanguage: "zh-CN", languageFallback: false,
   linkCheckStatus: "unknown", linkCheckedAt: null, linkCheckMessage: "",
-  description: "中文描述", categoryId: null, sizeBytes: null, author: "Studio", sourceUrl: "", license: "中文许可", shareUrl: "https://pan.baidu.com/s/demo", extractionCode: "", images: [], createdAt: "2026-01-01T00:00:00Z",
+  description: "中文描述", categoryId: null, sizeBytes: null, author: "Studio", sourceUrl: "", fabListingId: "", license: "中文许可", shareUrl: "https://pan.baidu.com/s/demo", extractionCode: "", images: [], createdAt: "2026-01-01T00:00:00Z",
   localizations: {
     "zh-CN": { name: "中文素材", description: "中文描述", tags: ["环境"], license: "中文许可" },
     en: { name: "English Asset", description: "English description", tags: ["Environment"], license: "English license" }

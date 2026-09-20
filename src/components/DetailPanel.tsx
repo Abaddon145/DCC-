@@ -1,4 +1,4 @@
-import { Calendar, Copy, Edit3, ExternalLink, FileBox, Heart, Images, Link2, RefreshCw, Trash2, UserRound, X } from "lucide-react";
+import { BriefcaseBusiness, Calendar, Copy, Edit3, ExternalLink, FileBox, Heart, Images, Link2, RefreshCw, Trash2, UserRound, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AssetDetail, ContentLanguage } from "../types";
@@ -21,9 +21,10 @@ interface Props {
   onCheckLink: () => void;
   checkingLink: boolean;
   onAddReference?: (imageIds: string[]) => void;
+  onAddProject?: (assetId: string) => void;
 }
 
-export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference }: Props) {
+export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject }: Props) {
   const [selectedImage, setSelectedImage] = useState(0);
   const [lightbox, setLightbox] = useState(false);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
@@ -70,6 +71,7 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
       <div className="detail-actions">
         <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
         {asset.extractionCode && <button className="secondary-button" onClick={onCopy} title="复制提取码"><Copy size={17} /></button>}
+        {onAddProject && <button className="secondary-button" onClick={() => onAddProject(asset.id)} title="加入创作项目"><BriefcaseBusiness size={17} /></button>}
         {!!asset.images.length && onAddReference && <button ref={referenceButton} className="secondary-button" title="加入参考板" onClick={() => { const rect = referenceButton.current?.getBoundingClientRect(); if (!rect) return; const height = 82; setReferenceMenu(current => current ? null : { left: Math.max(8, Math.min(window.innerWidth - 180, rect.right - 172)), top: rect.top > height + 8 ? rect.top - height - 6 : rect.bottom + 6 }); }}><Images size={17} /></button>}
         <button className="secondary-button" onClick={onEdit} title="编辑"><Edit3 size={17} /></button>
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>

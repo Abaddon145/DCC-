@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS assets (
   size_bytes INTEGER,
   author TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
+  fab_listing_id TEXT NOT NULL DEFAULT '',
   license TEXT NOT NULL DEFAULT '',
   share_url TEXT NOT NULL,
   normalized_share_url TEXT NOT NULL DEFAULT '',
@@ -158,3 +159,110 @@ CREATE TABLE IF NOT EXISTS library_preferences (
   settings_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  project_type TEXT NOT NULL CHECK(project_type IN ('still','scene','animation')),
+  status TEXT NOT NULL CHECK(status IN ('planning','active','paused','completed','archived')),
+  target_tools_json TEXT NOT NULL DEFAULT '[]',
+  versions_json TEXT NOT NULL DEFAULT '[]',
+  resolution_width INTEGER,
+  resolution_height INTEGER,
+  frame_rate REAL,
+  cover_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_opened_at TEXT,
+  archived_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_units (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES project_units(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('scene','shot')),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  start_frame INTEGER,
+  end_frame INTEGER,
+  resolution_width INTEGER,
+  resolution_height INTEGER,
+  frame_rate REAL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_units_parent ON project_units(project_id, parent_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS project_tasks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  unit_id TEXT REFERENCES project_units(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK(status IN ('todo','in_progress','review','done')),
+  priority TEXT NOT NULL CHECK(priority IN ('low','normal','high','urgent')),
+  due_date TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_tasks_column ON project_tasks(project_id, status, sort_order);
+
+CREATE TABLE IF NOT EXISTS project_assets (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate','selected','used','rejected')),
+  purpose TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_assets_status ON project_assets(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_asset_units (
+  project_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  unit_id TEXT NOT NULL REFERENCES project_units(id) ON DELETE CASCADE,
+  PRIMARY KEY(project_id, asset_id, unit_id),
+  FOREIGN KEY(project_id, asset_id) REFERENCES project_assets(project_id, asset_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_task_assets (
+  task_id TEXT NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  PRIMARY KEY(task_id, asset_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_reference_boards (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  board_id TEXT NOT NULL REFERENCES reference_boards(id) ON DELETE CASCADE,
+  is_main INTEGER NOT NULL DEFAULT 0,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, board_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_main_board ON project_reference_boards(project_id) WHERE is_main=1;
+
+CREATE TABLE IF NOT EXISTS project_paths (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('root','project_file','output','custom')),
+  label TEXT NOT NULL,
+  path TEXT NOT NULL,
+  path_type TEXT NOT NULL CHECK(path_type IN ('file','directory')),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_paths_sort ON project_paths(project_id, sort_order);

@@ -36,6 +36,8 @@ export function applyFabMetadata(input: AssetInput, metadata: FabMetadata): Asse
     description: input.description.trim() ? input.description : metadata.description,
     author: input.author.trim() ? input.author : metadata.author,
     sourceUrl: input.sourceUrl.trim() ? input.sourceUrl : metadata.canonicalUrl,
+    fabListingId: metadata.listingId,
+    autoCategoryPath: input.categoryId ? [] : metadata.suggestedCategoryPath,
     license: input.license.trim() ? input.license : metadata.license,
     tags: mergeUnique(input.tags, metadata.tags),
     dccTools: mergeUnique(input.dccTools, metadata.dccTools),

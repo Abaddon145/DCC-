@@ -4,8 +4,9 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const KNOWN_MODULES: [&str; 8] = [
+const KNOWN_MODULES: [&str; 9] = [
     "library",
+    "projects",
     "smartCollections",
     "favorites",
     "recent",
@@ -42,14 +43,14 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
 }
 
 pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
-    let mut order = vec!["library".to_string()];
-    let mut seen = HashSet::from(["library".to_string()]);
+    let mut order = vec!["library".to_string(), "projects".to_string()];
+    let mut seen = HashSet::from(["library".to_string(), "projects".to_string()]);
     for id in value.module_order.drain(..) {
         if seen.insert(id.clone()) {
             order.push(id);
         }
     }
-    for id in KNOWN_MODULES.iter().skip(1) {
+    for id in KNOWN_MODULES.iter().skip(2) {
         if seen.insert((*id).to_string()) {
             order.push((*id).to_string());
         }
@@ -329,6 +330,8 @@ pub fn resolve_smart_collection(
         recent_only: collection.rule.recent_only,
         health_issue: collection.rule.health_issue,
         smart_collection_id: Some(id.into()),
+        project_id: request.project_id.clone(),
+        project_asset_status: request.project_asset_status.clone(),
         sort: collection.rule.sort,
         offset: request.offset,
         limit: request.limit,

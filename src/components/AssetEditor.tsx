@@ -2,19 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowDown, ArrowUp, ClipboardPaste, ImagePlus, Languages, Save, Sparkles, Star, Trash2, X } from "lucide-react";
-import type { AssetDetail, AssetInput, Category, ContentLanguage, ImageInput, LocalizedAssetText, ParsedShareText, TranslationPreview } from "../types";
+import type { AssetDetail, AssetInput, Category, ContentLanguage, FabDuplicateMatch, ImageInput, LocalizedAssetText, ParsedShareText, TranslationPreview } from "../types";
 import { formatBytes, parseSize, splitValues, validateAsset } from "../lib/validation";
 import { ImagePreview } from "./ImagePreview";
 import { api } from "../lib/api";
 import { applyFabMetadata, isFabUrl } from "../lib/fab";
 
-interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<void> }
+interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<void>; onOpenExisting?: (id: string) => void }
 
 const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", tags: [], license: "" });
 
 const empty: AssetInput = {
   name: "", description: "", categoryId: null, tags: [], dccTools: ["Unreal Engine"], versions: [], formats: [],
-  sizeBytes: null, author: "", sourceUrl: "", license: "", shareUrl: "", extractionCode: "", favorite: false, images: [],
+  sizeBytes: null, author: "", sourceUrl: "", fabListingId: null, autoCategoryPath: [], license: "", shareUrl: "", extractionCode: "", favorite: false, images: [],
   localizations: { "zh-CN": blankLocalized(), en: blankLocalized() }, contentLanguage: "zh-CN"
 };
 
@@ -24,6 +24,7 @@ function toInput(asset: AssetDetail | null, contentLanguage: ContentLanguage, in
     id: asset.id, name: asset.name, description: asset.description, categoryId: asset.categoryId, tags: asset.tags,
     dccTools: asset.dccTools, versions: asset.versions, formats: asset.formats, sizeBytes: asset.sizeBytes,
     author: asset.author, sourceUrl: asset.sourceUrl, license: asset.license, shareUrl: asset.shareUrl,
+    fabListingId: asset.fabListingId, autoCategoryPath: [],
     extractionCode: asset.extractionCode, favorite: asset.favorite,
     images: asset.images.map(image => ({ id: image.id, originalName: image.originalName, isCover: image.isCover, sortOrder: image.sortOrder })),
     localizations: { "zh-CN": asset.localizations["zh-CN"] || blankLocalized(), en: asset.localizations.en || blankLocalized() }, contentLanguage
@@ -40,7 +41,7 @@ function flattenCategories(categories: Category[]) {
   walk(null, 0); return result;
 }
 
-export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave }: Props) {
+export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onOpenExisting }: Props) {
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
   const [editLanguage, setEditLanguage] = useState<ContentLanguage>(contentLanguage);
   const [sizeText, setSizeText] = useState(asset?.sizeBytes ? formatBytes(asset.sizeBytes) : "");
@@ -50,6 +51,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const [fabUrl, setFabUrl] = useState(() => isFabUrl(asset?.sourceUrl || "") ? asset!.sourceUrl : "");
   const [fetchingFab, setFetchingFab] = useState(false);
   const [fabStatus, setFabStatus] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [fabDuplicate, setFabDuplicate] = useState<FabDuplicateMatch | null>(null);
   const [translating, setTranslating] = useState(false);
   const [translation, setTranslation] = useState<{ target: ContentLanguage; preview: TranslationPreview; selected: Set<keyof LocalizedAssetText>; characterCount?: number } | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -134,8 +136,14 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
 
   const fetchFab = async () => {
     if (!fabUrl.trim() || fetchingFab) return;
-    setFetchingFab(true); setFabStatus(null);
+    setFetchingFab(true); setFabStatus(null); setFabDuplicate(null);
     try {
+      const duplicate = await api.checkFabUrl(fabUrl.trim(), asset?.id);
+      if (duplicate) {
+        setFabDuplicate(duplicate);
+        setFabStatus({ kind: "error", message: duplicate.location === "trash" ? `“${duplicate.assetName}”已在回收站，请先恢复或永久删除后再录入。` : `“${duplicate.assetName}”已存在于${duplicate.categoryPath ? `“${duplicate.categoryPath}”` : "素材库"}，不会重复录入。` });
+        return;
+      }
       const metadata = await api.fetchFabMetadata(fabUrl.trim());
       let next = applyFabMetadata(form, metadata);
       setForm(next);
@@ -154,7 +162,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
       setForm(next);
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
-      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${translationNote}` });
+      const categoryNote = !form.categoryId && metadata.suggestedCategoryPath.length ? ` 保存时将自动归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
+      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${translationNote}` });
     } catch (error) {
       setFabStatus({ kind: "error", message: String(error) });
     } finally { setFetchingFab(false); }
@@ -189,14 +198,14 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
       <div className="form-section"><h3>基本信息</h3>
         <div className="fab-import-panel">
           <div className="fab-import-copy"><Sparkles size={17} /><div><strong>从 Fab 自动填充</strong><span>读取名称、描述、作者、标签、许可、格式和 UE 版本</span></div></div>
-          <div className="fab-import-controls"><input value={fabUrl} onChange={event => setFabUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
-          {fabStatus && <div className={`fab-import-status ${fabStatus.kind}`}>{fabStatus.message}</div>}
+          <div className="fab-import-controls"><input value={fabUrl} onChange={event => { setFabUrl(event.target.value); setFabDuplicate(null); setFabStatus(null); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
+          {fabStatus && <div className={`fab-import-status ${fabStatus.kind}`}>{fabStatus.message}{fabDuplicate?.location === "library" && onOpenExisting && <button type="button" className="secondary-button" onClick={() => onOpenExisting(fabDuplicate.assetId)}>打开现有素材</button>}</div>}
         </div>
         <div className="language-editor-bar"><div className="language-tabs"><button type="button" className={editLanguage === "zh-CN" ? "active" : ""} onClick={() => setEditLanguage("zh-CN")}>中文</button><button type="button" className={editLanguage === "en" ? "active" : ""} onClick={() => setEditLanguage("en")}>English</button></div><button type="button" className="secondary-button" disabled={translating} onClick={() => void requestTranslation(editLanguage)}><Languages size={15} />{translating ? "正在翻译…" : editLanguage === "en" ? "翻译到中文" : "Translate to English"}</button></div>
-        {translation && <div className="translation-preview"><div><strong>翻译预览 · {translation.characterCount ?? translation.preview.characterCount} 字符</strong><span>勾选需要写入 {translation.target === "zh-CN" ? "中文" : "English"} 版本的字段；已有内容默认不覆盖。</span></div>{(["name", "description", "tags", "license"] as const).map(key => <label key={key}><input type="checkbox" checked={translation.selected.has(key)} onChange={event => setTranslation(current => { if (!current) return current; const selected = new Set(current.selected); event.target.checked ? selected.add(key) : selected.delete(key); return { ...current, selected }; })} /><span>{({ name: "名称", description: "描述", tags: "标签", license: "许可" } as const)[key]}</span><em>{Array.isArray(translation.preview.fields[key]) ? (translation.preview.fields[key] as string[]).join("；") : translation.preview.fields[key] as string || "—"}</em></label>)}{translation.preview.warnings.map(item => <small key={item}>{item}</small>)}<div className="translation-actions"><button type="button" className="secondary-button" onClick={() => setTranslation(null)}>取消</button><button type="button" className="primary-button" disabled={!translation.selected.size} onClick={applyTranslation}>应用所选译文</button></div></div>}
+        {translation && <div className="translation-preview"><div><strong>翻译预览 · {translation.characterCount ?? translation.preview.characterCount} 字符</strong><span>勾选需要写入 {translation.target === "zh-CN" ? "中文" : "English"} 版本的字段；已有内容默认不覆盖。</span></div>{translation.preview.appliedTerms.length > 0 && <div className="translation-term-summary"><strong>术语库已校正 {translation.preview.appliedTerms.reduce((sum, item) => sum + item.count, 0)} 处</strong><span>{translation.preview.appliedTerms.map(item => `${item.source} → ${item.target}${item.count > 1 ? ` ×${item.count}` : ""}`).join("；")}</span></div>}{(["name", "description", "tags", "license"] as const).map(key => <label key={key}><input type="checkbox" checked={translation.selected.has(key)} onChange={event => setTranslation(current => { if (!current) return current; const selected = new Set(current.selected); event.target.checked ? selected.add(key) : selected.delete(key); return { ...current, selected }; })} /><span>{({ name: "名称", description: "描述", tags: "标签", license: "许可" } as const)[key]}</span><em>{Array.isArray(translation.preview.fields[key]) ? (translation.preview.fields[key] as string[]).join("；") : translation.preview.fields[key] as string || "—"}</em></label>)}{translation.preview.warnings.map(item => <small key={item}>{item}</small>)}<div className="translation-actions"><button type="button" className="secondary-button" onClick={() => setTranslation(null)}>取消</button><button type="button" className="primary-button" disabled={!translation.selected.size} onClick={applyTranslation}>应用所选译文</button></div></div>}
         <div className="form-grid">
         <label className="wide"><span>{editLanguage === "zh-CN" ? "中文名称" : "English name"} *</span><input autoFocus value={localized.name} onChange={e => updateLocalized("name", e.target.value)} placeholder={editLanguage === "zh-CN" ? "例如：中世纪古堡环境包" : "e.g. Medieval Castle Environment"} />{errors.name && <small className="field-error">{errors.name}</small>}</label>
-        <label><span>分类</span><select value={form.categoryId || ""} onChange={e => update("categoryId", e.target.value || null)}><option value="">未分类</option>{categoryOptions.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+        <label><span>分类</span><select value={form.categoryId || ""} onChange={e => setForm(previous => ({ ...previous, categoryId: e.target.value || null, autoCategoryPath: e.target.value ? [] : previous.autoCategoryPath }))}><option value="">未分类</option>{categoryOptions.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select>{!form.categoryId && Boolean(form.autoCategoryPath?.length) && <small className="field-hint">保存时自动归类：{form.autoCategoryPath?.join(" / ")}</small>}</label>
         <label><span>作者 / 工作室</span><input value={form.author} onChange={e => update("author", e.target.value)} /></label>
         <label className="wide"><span>{editLanguage === "zh-CN" ? "中文描述" : "English description"}</span><textarea rows={4} value={localized.description} onChange={e => updateLocalized("description", e.target.value)} placeholder="适用场景、内容构成、注意事项…" /></label>
         <label><span>{editLanguage === "zh-CN" ? "中文标签" : "English tags"}（分号分隔）</span><input value={localized.tags.join("; ")} onChange={e => updateLocalized("tags", splitValues(e.target.value))} placeholder="写实; 建筑; Nanite" /></label>

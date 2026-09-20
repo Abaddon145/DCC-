@@ -61,7 +61,7 @@ pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     Ok(metadata)
 }
 
-fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
+pub fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
     let parsed = Url::parse(raw_url.trim()).map_err(|_| "请输入完整的 Fab 商品网址")?;
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return Err("Fab 网址必须使用 http 或 https".into());
@@ -123,6 +123,10 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
         return Err("Fab 商品数据中缺少名称".into());
     }
     let category = string_at(value, "/category/name");
+    let category_path = string_at(value, "/category/path");
+    let listing_type = string_at(value, "/listingType");
+    let suggested_category_path = classify_category(&category_path, &category, &listing_type);
+    let listing_id = listing_id_from_url(canonical_url)?.to_string();
     let mut tags = names_from_array(value.get("tags"));
     if !category.is_empty() {
         tags.push(category.clone());
@@ -145,6 +149,10 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
 
     Ok(FabMetadata {
         canonical_url: canonical_url.to_string(),
+        listing_id,
+        category_path,
+        listing_type,
+        suggested_category_path,
         name,
         description: html_to_text(&string_at(value, "/description")),
         author: string_at(value, "/user/sellerName"),
@@ -157,6 +165,77 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
         preview_images: Vec::new(),
         image_warning: None,
     })
+}
+
+pub fn classify_category(
+    category_path: &str,
+    category_name: &str,
+    listing_type: &str,
+) -> Vec<String> {
+    let first = category_path
+        .split('/')
+        .map(str::trim)
+        .find(|part| !part.is_empty())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let listing_type = listing_type.trim().to_ascii_lowercase();
+    let root = match first.as_str() {
+        "environments" | "buildings-architecture" | "nature-plants" | "landscapes" => Some("环境"),
+        "characters-creatures" | "clothing-accessories" | "metahuman" | "characters" => {
+            Some("角色与生物")
+        }
+        "tools-objects-decor"
+        | "electronics-technology"
+        | "food-drink"
+        | "furniture-fixtures"
+        | "props" => Some("道具"),
+        "vehicles-transportation" | "vehicles" => Some("载具"),
+        "weapons-combat" | "weapons" => Some("武器"),
+        "material" | "materials" | "materials-textures" | "textures" | "decal" | "decals" => {
+            Some("材质与纹理")
+        }
+        "animation" | "animations" => Some("动画"),
+        "audio" | "music" | "sound-effects" => Some("音频"),
+        "vfx" | "visual-effects" => Some("特效"),
+        "ui" | "2d" | "2d-assets" | "sprites-flipbooks" | "brushes" => Some("UI与2D"),
+        "hdri" | "hdris" => Some("HDRI与灯光"),
+        "game-systems" | "game-templates" => Some("游戏系统与模板"),
+        "tools-plugins" | "tools-and-plugins" | "plugins" => Some("工具与插件"),
+        "tutorials-examples" | "education-tutorials" | "tutorials" => Some("教程与示例"),
+        _ => match listing_type.as_str() {
+            "material" | "texture" | "decal" => Some("材质与纹理"),
+            "animation" => Some("动画"),
+            "audio" => Some("音频"),
+            "vfx" => Some("特效"),
+            "ui" | "2d-asset" | "sprite" | "brush" => Some("UI与2D"),
+            "hdri" => Some("HDRI与灯光"),
+            "game-system" | "game-template" => Some("游戏系统与模板"),
+            "tool" | "plugin" => Some("工具与插件"),
+            "tutorial" => Some("教程与示例"),
+            "metahuman" => Some("角色与生物"),
+            _ => None,
+        },
+    };
+    let Some(root) = root else {
+        return vec!["其他".into(), "待整理".into()];
+    };
+    let mut result = vec![root.to_string()];
+    let has_detail = category_path
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .count()
+        > 1;
+    let detail = category_name.trim();
+    let safe_detail = !detail.is_empty()
+        && detail.chars().count() <= 60
+        && !detail
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+        && !detail.eq_ignore_ascii_case(root);
+    if has_detail && safe_detail {
+        result.push(detail.to_string());
+    }
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,7 +512,8 @@ mod tests {
         let listing = serde_json::json!({
             "title": "Garden Environment",
             "description": "<p>84 HQ meshes</p><p><strong>Nanite ready</strong></p>",
-            "category": {"name": "Environment"},
+            "category": {"name": "沙漠", "path": "environments/desert"},
+            "listingType": "3d-model",
             "user": {"sellerName": "Dragon Motion"},
             "tags": [{"name": "Garden"}, {"name": "garden"}],
             "assetFormats": [{"assetFormatType": {
@@ -442,14 +522,39 @@ mod tests {
             }}],
             "licenses": [{"group": "standard", "name": "Personal"}]
         });
-        let metadata = metadata_from_listing(&listing, "https://www.fab.com/listings/id").unwrap();
+        let metadata = metadata_from_listing(
+            &listing,
+            "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a",
+        )
+        .unwrap();
         assert_eq!(metadata.name, "Garden Environment");
         assert_eq!(metadata.author, "Dragon Motion");
-        assert_eq!(metadata.tags, vec!["Garden", "Environment"]);
+        assert_eq!(metadata.tags, vec!["Garden", "沙漠"]);
+        assert_eq!(metadata.suggested_category_path, vec!["环境", "沙漠"]);
         assert_eq!(metadata.dcc_tools, vec!["Unreal Engine"]);
         assert_eq!(metadata.formats, vec!["uasset", "uproject"]);
         assert_eq!(metadata.license, "Fab Standard License");
         assert_eq!(metadata.description, "84 HQ meshes\nNanite ready");
+    }
+
+    #[test]
+    fn normalizes_url_variants_and_maps_fixed_categories() {
+        let expected = "06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+        for url in [
+            "http://FAB.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a/",
+            "https://www.fab.com/zh-cn/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a?lang=zh-CN#detail",
+        ] {
+            assert_eq!(listing_id_from_url(url).unwrap().to_string(), expected);
+        }
+        assert_eq!(
+            classify_category("environments/desert", "沙漠", "3d-model"),
+            vec!["环境", "沙漠"]
+        );
+        assert_eq!(
+            classify_category("future-new-type", "未知", "unknown"),
+            vec!["其他", "待整理"]
+        );
+        assert_eq!(classify_category("", "", "material"), vec!["材质与纹理"]);
     }
 
     #[test]

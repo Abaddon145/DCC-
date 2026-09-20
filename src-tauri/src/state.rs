@@ -1,4 +1,4 @@
-use crate::{db, models::*};
+use crate::{db, glossary::GlossaryStore, models::*};
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,7 @@ pub struct AppState {
     link_check_job: Mutex<Option<Arc<AtomicBool>>>,
     pending_move_undo: Mutex<Option<PendingMoveUndo>>,
     reference_window_board: Mutex<Option<String>>,
+    glossary: Mutex<GlossaryStore>,
 }
 
 #[derive(Clone)]
@@ -134,7 +135,85 @@ impl AppState {
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
+            glossary: Mutex::new(GlossaryStore::load(
+                config_dir.join("translation-glossary.json"),
+            )),
         })
+    }
+
+    pub fn list_translation_terms(
+        &self,
+        query: Option<&str>,
+        source_language: Option<&str>,
+        target_language: Option<&str>,
+        origin: Option<&str>,
+        enabled: Option<bool>,
+    ) -> Result<Vec<TranslationTerm>, String> {
+        Ok(self
+            .glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .list(query, source_language, target_language, origin, enabled))
+    }
+
+    pub fn effective_translation_terms(
+        &self,
+        source_language: &str,
+        target_language: &str,
+    ) -> Result<Vec<TranslationTerm>, String> {
+        Ok(self
+            .glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .effective(source_language, target_language))
+    }
+
+    pub fn upsert_translation_term(
+        &self,
+        input: TranslationTermInput,
+    ) -> Result<TranslationTerm, String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .upsert(input)
+    }
+
+    pub fn delete_translation_term(&self, id: &str) -> Result<(), String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .delete(id)
+    }
+
+    pub fn set_translation_term_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .set_enabled(id, enabled)
+    }
+
+    pub fn reset_translation_terms(&self) -> Result<(), String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .reset()
+    }
+
+    pub fn import_translation_terms(
+        &self,
+        path: &Path,
+    ) -> Result<TranslationTermImportReport, String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .import_xlsx(path)
+    }
+
+    pub fn export_translation_terms(&self, path: &Path) -> Result<(), String> {
+        self.glossary
+            .lock()
+            .map_err(|_| "术语库状态锁已损坏".to_string())?
+            .export_xlsx(path)
     }
 
     pub fn set_reference_window_board(&self, board_id: Option<String>) -> Result<(), String> {
@@ -848,6 +927,7 @@ mod tests {
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
+            glossary: Mutex::new(GlossaryStore::load(path.join("translation-glossary.json"))),
         }
     }
     #[test]

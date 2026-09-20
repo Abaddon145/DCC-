@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { ArchiveRestore, Clock3, DatabaseBackup, Download, Grid3X3, Heart, Library, ListChecks, Plus, Search, Settings, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from "lucide-react";
+import { ArchiveRestore, BriefcaseBusiness, Clock3, DatabaseBackup, Download, Grid3X3, Heart, Library, ListChecks, Plus, Search, Settings, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from "lucide-react";
 import { api } from "./lib/api";
-import type { AssetCard, AssetDetail, AssetInput, BaiduSaveTask, BatchAssetUpdate, ContentLanguage, DeleteRequest, HealthSummary, LibraryDragPayload, LibraryMeta, LinkCheckProgress, ModuleId, MoveCategoryRequest, MoveResult, ParsedShareText, PersonalizationState, SearchRequest, SmartCollection, SmartCollectionInput, SmartCollectionRule, ViewMode } from "./types";
+import type { AssetCard, AssetDetail, AssetInput, BatchAssetUpdate, ContentLanguage, DeleteRequest, HealthSummary, LibraryDragPayload, LibraryMeta, LinkCheckProgress, ModuleId, MoveCategoryRequest, MoveResult, ParsedShareText, PersonalizationState, SearchRequest, SmartCollection, SmartCollectionInput, SmartCollectionRule, ViewMode } from "./types";
 import { CategoryTree, categoryDropZone, categoryMoveRequest } from "./components/CategoryTree";
 import { FilterBar } from "./components/FilterBar";
 import { AssetGrid } from "./components/AssetGrid";
@@ -21,13 +21,14 @@ import { TagManager } from "./components/TagManager";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { SmartCollections } from "./components/SmartCollections";
 import { TrashPanel } from "./components/TrashPanel";
-import { BaiduSaveAssistant } from "./components/BaiduSaveAssistant";
+import { ProjectHub } from "./components/ProjectHub";
+import { ProjectPicker } from "./components/ProjectPicker";
 import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, shortcutMatches } from "./lib/personalization";
 
 const emptyMeta: LibraryMeta = { categories: [], filters: { tags: [], dccTools: [], versions: [], formats: [], licenses: [] }, totalAssets: 0 };
 const initialRequest: SearchRequest = {
   query: "", categoryIds: [], tags: [], tagIds: [], dccTools: [], versions: [], formats: [], licenses: [],
-  favoriteOnly: false, recentOnly: false, healthIssue: null, smartCollectionId: null, sort: "updated", offset: 0, limit: 80, contentLanguage: "zh-CN"
+  favoriteOnly: false, recentOnly: false, healthIssue: null, smartCollectionId: null, projectId: null, projectAssetStatus: null, sort: "updated", offset: 0, limit: 80, contentLanguage: "zh-CN"
 };
 
 interface Toast { id: number; message: string; error: boolean; kind?: "move" | "delete"; actionLabel?: string; action?: () => Promise<void> }
@@ -60,6 +61,9 @@ export default function App() {
   const [activeDrag, setActiveDrag] = useState<LibraryDragPayload | null>(null);
   const [detachedBoardId, setDetachedBoardId] = useState<string | null>(null);
   const [referencePicker, setReferencePicker] = useState<{ imageIds: string[]; title: string } | null>(null);
+  const [projectPicker, setProjectPicker] = useState<string[] | null>(null);
+  const [projectRefreshKey, setProjectRefreshKey] = useState(0);
+  const [referenceInitialBoardId, setReferenceInitialBoardId] = useState<string | null>(null);
   const [dragPoint, setDragPoint] = useState<LibraryDragPoint | null>(null);
   const [personalization, setPersonalization] = useState<PersonalizationState>({ global: defaultGlobalPreferences, library: defaultLibraryPreferences });
   const [smartCollections, setSmartCollections] = useState<SmartCollection[]>([]);
@@ -67,7 +71,6 @@ export default function App() {
   const [sourceSmartId, setSourceSmartId] = useState<string | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [selectingAll, setSelectingAll] = useState(false);
-  const [baiduAssistant, setBaiduAssistant] = useState<{ tasks: BaiduSaveTask[]; selectedCount: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestVersion = useRef(0);
@@ -98,7 +101,7 @@ export default function App() {
 
   useEffect(() => {
     void api.getTranslationSettings().then(settings => { setContentLanguageState(settings.contentLanguage); setRequest(previous => ({ ...previous, contentLanguage: settings.contentLanguage, offset: 0 })); }).catch(() => undefined);
-    void api.getPersonalization().then(value => { setPersonalization(value); applyGlobalPreferences(value.global); const savedContext = value.library.lastContext; const startup = value.library.rememberLastContext && savedContext ? savedContext.view : value.library.startupModule; const startupView = ["favorites","recent","tagManager","health","reference","trash"].includes(startup) ? startup as ViewMode : "library"; setView(startupView); if (value.library.rememberSearch && savedContext) { setQueryInput(savedContext.request.query); setRequest(previous => ({ ...savedContext.request, contentLanguage: previous.contentLanguage, offset: 0 })); } else setRequest(previous => ({ ...previous, sort: startupView === "recent" ? "recent" : value.library.defaultSort, favoriteOnly: startupView === "favorites", recentOnly: startupView === "recent" })); }).catch(() => undefined);
+    void api.getPersonalization().then(value => { setPersonalization(value); applyGlobalPreferences(value.global); const savedContext = value.library.lastContext; const startup = value.library.rememberLastContext && savedContext ? savedContext.view : value.library.startupModule; const startupView = ["projects","favorites","recent","tagManager","health","reference","trash"].includes(startup) ? startup as ViewMode : "library"; setView(startupView); if (value.library.rememberSearch && savedContext) { setQueryInput(savedContext.request.query); setRequest(previous => ({ ...initialRequest, ...savedContext.request, contentLanguage: previous.contentLanguage, offset: 0 })); } else setRequest(previous => ({ ...previous, sort: startupView === "recent" ? "recent" : value.library.defaultSort, favoriteOnly: startupView === "favorites", recentOnly: startupView === "recent" })); }).catch(() => undefined);
     void refreshSmartCollections();
   }, [refreshSmartCollections]);
   useEffect(() => {
@@ -150,7 +153,7 @@ export default function App() {
     setView(next);
     setActiveSmartId(null); setSourceSmartId(null);
     setSelectionMode(false); setSelectedIds(new Set());
-    if (next === "reference" || next === "tagManager" || next === "trash") { setSelectedId(null); setDetail(null); return; }
+    if (next === "projects" || next === "reference" || next === "tagManager" || next === "trash") { setSelectedId(null); setDetail(null); return; }
     patchRequest({ favoriteOnly: next === "favorites", recentOnly: next === "recent", healthIssue: next === "health" ? request.healthIssue || null : null, sort: next === "recent" ? "recent" : request.query ? "relevance" : personalization.library.defaultSort });
     if (next === "health") refreshHealth();
   };
@@ -351,15 +354,6 @@ export default function App() {
       notify(`已更新 ${report.updated} 项素材`); setSelectedIds(new Set()); await refreshAll(); if (view === "health") refreshHealth();
     } catch (error) { notify(String(error), true); throw error; }
   };
-  const openBaiduAssistant = async () => {
-    if (!selectedIds.size) return;
-    try {
-      const tasks = await api.prepareBaiduSaveTasks([...selectedIds]);
-      if (!tasks.length) { notify("选中的素材都没有可用的百度网盘链接", true); return; }
-      if (tasks.length < selectedIds.size) notify(`已跳过 ${selectedIds.size - tasks.length} 项无可用百度链接素材`);
-      setBaiduAssistant({ tasks, selectedCount: selectedIds.size });
-    } catch (error) { notify(`准备网盘保存队列失败：${String(error)}`, true); }
-  };
   const addSelectionToReference = async () => {
     if (!selectedIds.size) return;
     try {
@@ -412,7 +406,7 @@ export default function App() {
     const nextPersonalization = await api.getPersonalization(); setPersonalization(nextPersonalization); applyGlobalPreferences(nextPersonalization.global);
     const context = nextPersonalization.library.lastContext;
     const startup = nextPersonalization.library.rememberLastContext && context ? context.view : nextPersonalization.library.startupModule;
-    const startupView = ["favorites","recent","tagManager","health","reference","trash"].includes(startup) ? startup as ViewMode : "library";
+    const startupView = ["projects","favorites","recent","tagManager","health","reference","trash"].includes(startup) ? startup as ViewMode : "library";
     setView(startupView);
     const nextRequest = nextPersonalization.library.rememberSearch && context ? { ...context.request, contentLanguage, offset: 0 } : { ...initialRequest, contentLanguage, sort: startupView === "recent" ? "recent" as const : nextPersonalization.library.defaultSort, favoriteOnly: startupView === "favorites", recentOnly: startupView === "recent" };
     setQueryInput(nextRequest.query);
@@ -489,6 +483,7 @@ export default function App() {
       { id: "backup", label: "导出素材库备份", run: () => void exportBackup() },
     ];
     if (enabled.has("favorites")) commands.push({ id: "favorites", label: "前往我的收藏", run: () => changeView("favorites") });
+    if (enabled.has("projects")) commands.push({ id: "projects", label: "打开创作项目", detail: "项目素材、镜头任务与工程入口", run: () => changeView("projects") });
     if (enabled.has("health")) commands.push({ id: "health", label: "素材库检查", detail: "缺失信息与链接检查", run: () => changeView("health") });
     if (enabled.has("tagManager")) commands.push({ id: "tags", label: "标签管理", run: () => changeView("tagManager") });
     if (enabled.has("reference")) commands.push({ id: "reference", label: "打开参考板", run: () => changeView("reference") });
@@ -507,6 +502,7 @@ export default function App() {
         {enabledModules(personalization.library).map(id => {
           if (id === "smartCollections") return <SmartCollections key={id} items={smartCollections} activeId={activeSmartId} onOpen={openSmartCollection} onCreate={() => void saveSmartCollection()} onRename={item => void renameSmartCollection(item)} onDuplicate={item => void duplicateSmartCollection(item)} onDelete={item => void deleteSmartCollection(item)} onReorder={ids => void reorderSmartCollections(ids)} />;
           if (id === "library") return <button key={id} className={view === "library" && !activeSmartId ? "active" : ""} onClick={() => changeView("library")}><Library size={17} />素材库</button>;
+          if (id === "projects") return <button key={id} className={view === "projects" ? "active" : ""} onClick={() => changeView("projects")}><BriefcaseBusiness size={17} />创作项目</button>;
           if (id === "favorites") return <button key={id} className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={17} />我的收藏</button>;
           if (id === "recent") return <button key={id} className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={17} />最近查看</button>;
           if (id === "tagManager") return <button key={id} className={view === "tagManager" ? "active" : ""} onClick={() => changeView("tagManager")}><Tags size={17} />标签管理</button>;
@@ -522,23 +518,23 @@ export default function App() {
     </aside>
 
     <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}>
-      {view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <>
+      {view === "projects" ? <ProjectHub contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <>
       <header className="topbar"><div className="search-box"><Search size={18} /><input ref={searchRef} value={queryInput} onChange={e => setQueryInput(e.target.value)} placeholder="搜索名称、标签、版本、作者…" />{queryInput && <button onClick={() => setQueryInput("")}><X size={15} /></button>}<kbd>Ctrl K</kbd></div><div className="content-language-toggle" aria-label="素材内容语言"><button className={contentLanguage === "zh-CN" ? "active" : ""} onClick={() => void changeContentLanguage("zh-CN")}>中文</button><button className={contentLanguage === "en" ? "active" : ""} onClick={() => void changeContentLanguage("en")}>English</button></div><button className={`secondary-button ${selectionMode ? "active" : ""}`} onClick={() => { setSelectionMode(value => !value); setSelectedIds(new Set()); }}><ListChecks size={16} />多选</button><button className="secondary-button" onClick={() => setShowImport(true)}><Upload size={16} />批量导入</button><button className="primary-button" onClick={() => { setInitialShare(null); setEditor("new"); }}><Plus size={17} />添加素材</button></header>
       <section className="library-header"><div><span className="eyebrow">{activeSmartId ? "SMART COLLECTION" : "ASSET COLLECTION"}</span><h1>{heading}</h1><p>{loading ? "正在检索…" : `${total.toLocaleString("zh-CN")} 项素材`}{activeFilterText.length ? ` · ${activeFilterText.join(" / ")}` : ""}</p></div>{sourceSmartId && !activeSmartId && <button className="secondary-button" onClick={() => { const collection = smartCollections.find(item => item.id === sourceSmartId); if (collection) void saveSmartCollection(collection); }}><Sparkles size={15} />更新原集合</button>}<button className="secondary-button" onClick={() => void saveSmartCollection()}><Plus size={15} />另存为智能集合</button></section>
       {view === "health" && <HealthPanel summary={health} activeIssue={request.healthIssue || null} loading={healthLoading} linkCheckRunning={linkCheckRunning} linkProgress={linkProgress} onSelect={issue => patchRequest({ healthIssue: issue })} onRefresh={refreshHealth} onCheckLinks={() => void checkAllLinks()} onCancelLinkCheck={() => void cancelLinkCheck()} />}
       <FilterBar request={request} options={meta.filters} onChange={patchRequest} />
-      {selectionMode && <BatchToolbar count={selectedIds.size} totalCount={total} selectingAll={selectingAll} categories={meta.categories} onSelectAll={() => void selectAllResults()} onClear={() => setSelectedIds(new Set())} onExit={() => { setSelectionMode(false); setSelectedIds(new Set()); }} onAddToReference={() => void addSelectionToReference()} onSaveToBaidu={() => void openBaiduAssistant()} onApply={applyBatch} />}
+      {selectionMode && <BatchToolbar count={selectedIds.size} totalCount={total} selectingAll={selectingAll} categories={meta.categories} onSelectAll={() => void selectAllResults()} onClear={() => setSelectedIds(new Set())} onExit={() => { setSelectionMode(false); setSelectedIds(new Set()); }} onAddToReference={() => void addSelectionToReference()} onAddToProject={() => selectedIds.size && setProjectPicker([...selectedIds])} onApply={applyBatch} />}
       <div className="grid-scroll" ref={scrollRef}><AssetGrid items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} /></div>
       </>}
     </main>
 
-    {view !== "reference" && view !== "tagManager" && view !== "trash" && <DetailPanel asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={() => { setSelectedId(null); setDetail(null); }} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} />}
-    {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} />}
+    {view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <DetailPanel asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={() => { setSelectedId(null); setDetail(null); }} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} />}
+    {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
     {showImport && <ImportDialog onClose={() => setShowImport(false)} onImported={refreshAll} notify={notify} />}
     {showQuickAdd && <QuickAddDialog onClose={() => setShowQuickAdd(false)} notify={notify} onParsed={parsed => { setInitialShare(parsed); setShowQuickAdd(false); setEditor("new"); }} onOpenExisting={id => { setShowQuickAdd(false); selectAsset(id); }} />}
     {showSettings && <StorageSettings initialTab="appearance" onClose={() => setShowSettings(false)} onLibraryChanged={libraryChanged} notify={notify} libraryLocked={Boolean(detachedBoardId)} onPersonalizationChanged={personalizationChanged} />}
     {referencePicker && <ReferenceBoardPicker imageIds={referencePicker.imageIds} title={referencePicker.title} lockedBoardId={detachedBoardId} onClose={() => setReferencePicker(null)} notify={notify} />}
-    {baiduAssistant && <BaiduSaveAssistant tasks={baiduAssistant.tasks} selectedCount={baiduAssistant.selectedCount} onClose={() => setBaiduAssistant(null)} notify={notify} />}
+    {projectPicker && <ProjectPicker assetIds={projectPicker} onClose={() => setProjectPicker(null)} onAdded={() => setProjectRefreshKey(value => value + 1)} notify={notify} />}
     {activeDrag && dragPoint && <div className="library-drag-preview active" style={{ left: dragPoint.x + 14, top: dragPoint.y + 14 }}>{dragPreviewText(activeDrag)}</div>}
     {showCommandPalette && <CommandPalette commands={paletteCommands} onClose={() => setShowCommandPalette(false)} />}
     <div className="toast-stack">{toasts.map(toast => <div key={toast.id} className={`toast ${toast.error ? "error" : ""}`}><span>{toast.message}</span>{toast.action && <button onClick={() => { setToasts(previous => previous.filter(item => item.id !== toast.id)); void toast.action?.(); }}>{toast.actionLabel}</button>}</div>)}</div>

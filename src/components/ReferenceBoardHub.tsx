@@ -9,14 +9,16 @@ interface Props {
   detachedBoardId: string | null;
   onDetached: (boardId: string) => void;
   notify: (message: string, error?: boolean) => void;
+  initialBoardId?: string | null;
 }
 
-export function ReferenceBoardHub({ detachedBoardId, onDetached, notify }: Props) {
+export function ReferenceBoardHub({ detachedBoardId, onDetached, notify, initialBoardId = null }: Props) {
   const [boards, setBoards] = useState<ReferenceBoardSummary[]>([]);
   const [active, setActive] = useState<ReferenceBoardDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const loadBoards = async () => { try { setBoards(await api.listReferenceBoards()); } catch (error) { notify(`读取参考板失败：${String(error)}`, true); } finally { setLoading(false); } };
   useEffect(() => { void loadBoards(); }, []);
+  useEffect(() => { if (initialBoardId) void openBoard(initialBoardId); }, [initialBoardId]);
   useEffect(() => {
     if (!active || detachedBoardId === active.id) return;
     void api.getReferenceBoard(active.id).then(setActive).catch(() => setActive(null));
