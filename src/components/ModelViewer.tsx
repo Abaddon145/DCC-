@@ -8,7 +8,7 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { assetMediaUrl } from "../lib/api";
 import type { AssetMedia } from "../types";
 
-export function ModelViewer({ media }: { media: AssetMedia }) {
+export function ModelViewer({ media, sourceUrl, sourceName }: { media?: AssetMedia; sourceUrl?: string; sourceName?: string }) {
   const host = useRef<HTMLDivElement>(null);
   const [wireframe, setWireframe] = useState(false);
   const [grid, setGrid] = useState(true);
@@ -43,8 +43,8 @@ export function ModelViewer({ media }: { media: AssetMedia }) {
       const radius = Math.max(sphere.radius, .5); controls.target.copy(sphere.center); camera.near = radius / 100; camera.far = radius * 100; camera.position.copy(sphere.center).add(new THREE.Vector3(radius * 1.8, radius * 1.3, radius * 1.8)); camera.updateProjectionMatrix(); controls.update();
     };
     resetRef.current = () => modelRef.current && fit(modelRef.current);
-    const url = assetMediaUrl(media.id, "original");
-    const ext = media.originalName.split(".").pop()?.toLowerCase();
+    const url = sourceUrl || (media ? assetMediaUrl(media.id, "original") : "");
+    const ext = (sourceName || media?.originalName || "").split(".").pop()?.toLowerCase();
     const loaded = (object: THREE.Object3D) => { modelRef.current = object; scene.add(object); fit(object); };
     const failed = (reason: unknown) => setError(`无法加载 3D 预览：${String(reason)}`);
     if (ext === "glb" || ext === "gltf") new GLTFLoader().load(url, value => loaded(value.scene), undefined, failed);
@@ -53,7 +53,7 @@ export function ModelViewer({ media }: { media: AssetMedia }) {
     else if (ext === "stl") new STLLoader().load(url, geometry => { const material = new THREE.MeshStandardMaterial({ color: 0xc5ccd6, roughness: .7 }); loaded(new THREE.Mesh(geometry, material)); }, undefined, failed);
     else setError("不支持的 3D 格式");
     return () => { cancelAnimationFrame(frame); observer.disconnect(); controls.dispose(); renderer.dispose(); renderer.domElement.remove(); scene.traverse(object => { if (object instanceof THREE.Mesh) { object.geometry?.dispose(); const materials = Array.isArray(object.material) ? object.material : [object.material]; materials.forEach(material => material.dispose()); } }); };
-  }, [media.id, media.originalName]);
+  }, [media?.id, media?.originalName, sourceUrl, sourceName]);
 
   useEffect(() => { modelRef.current?.traverse(object => { if (object instanceof THREE.Mesh) { const materials = Array.isArray(object.material) ? object.material : [object.material]; materials.forEach(material => { if ("wireframe" in material) (material as THREE.MeshStandardMaterial).wireframe = wireframe; }); } }); }, [wireframe]);
   useEffect(() => { if (gridRef.current) gridRef.current.visible = grid; }, [grid]);

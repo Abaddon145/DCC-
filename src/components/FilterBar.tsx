@@ -18,11 +18,11 @@ const groups: { key: MultiKey; label: string }[] = [
 const sortOptions: { value: SortMode; label: string }[] = [
   { value: "relevance", label: "相关度" }, { value: "updated", label: "最近更新" },
   { value: "name", label: "名称" }, { value: "created", label: "创建时间" },
-  { value: "recent", label: "最近查看" }, { value: "favorite", label: "收藏优先" }, { value: "rating", label: "评分最高" }
+  { value: "recent", label: "最近查看" }, { value: "favorite", label: "收藏优先" }
 ];
 
 export function FilterBar({ request, options, onChange }: Props) {
-  const active = groups.reduce((n, group) => n + request[group.key].length, 0) + (request.ratings?.length || 0);
+  const active = groups.reduce((n, group) => n + request[group.key].length, 0);
   const currentSort = sortOptions.find(option => option.value === request.sort)?.label || "最近更新";
   const toggle = (key: MultiKey, value: string) => {
     const values = request[key];
@@ -40,8 +40,7 @@ export function FilterBar({ request, options, onChange }: Props) {
         </button>)}
       </div>
     </HoverDismissDetails>)}
-    <HoverDismissDetails className="filter-menu"><summary className={request.ratings?.length ? "active" : ""}>评分{request.ratings?.length ? ` ${request.ratings.length}` : ""}<ChevronDown size={13} /></summary><div className="filter-popover">{[5,4,3,2,1,0].map(value => <button key={value} onClick={() => { const values=request.ratings || []; onChange({ratings:values.includes(value)?values.filter(item=>item!==value):[...values,value]}); }}><span className={`check-box ${request.ratings?.includes(value) ? "checked" : ""}`}>{request.ratings?.includes(value) && <Check size={12} />}</span>{value === 0 ? "未评分" : `${value} 星`}</button>)}</div></HoverDismissDetails>
-    {active > 0 && <button className="clear-filters" onClick={() => onChange({ tags: [], dccTools: [], versions: [], formats: [], licenses: [], ratings: [] })}><X size={13} />清除 {active}</button>}
+    {active > 0 && <button className="clear-filters" onClick={() => onChange({ tags: [], dccTools: [], versions: [], formats: [], licenses: [] })}><X size={13} />清除 {active}</button>}
     <div className="sort-select"><span>排序</span><HoverDismissDetails className="sort-menu">
       <summary>{currentSort}<ChevronDown size={13} /></summary>
       <div className="sort-popover">

@@ -64,12 +64,6 @@ pub struct SearchRequest {
     pub project_id: Option<String>,
     #[serde(default)]
     pub project_asset_status: Option<String>,
-    #[serde(default)]
-    pub manual_collection_id: Option<String>,
-    #[serde(default = "default_true_value")]
-    pub include_child_collections: bool,
-    #[serde(default)]
-    pub ratings: Vec<i64>,
     pub sort: String,
     pub offset: i64,
     pub limit: i64,
@@ -80,8 +74,11 @@ pub struct SearchRequest {
 pub fn default_module_order() -> Vec<String> {
     [
         "library",
+        "imageLibrary",
+        "modelLibrary",
+        "audioLibrary",
+        "videoLibrary",
         "projects",
-        "collections",
         "smartCollections",
         "favorites",
         "recent",
@@ -93,6 +90,172 @@ pub fn default_module_order() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Model,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Model => "model",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaFolder {
+    pub id: String,
+    pub kind: MediaKind,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub sort_order: i64,
+    pub entry_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaFile {
+    pub id: String,
+    pub entry_id: String,
+    pub role: String,
+    pub logical_path: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub file_size: i64,
+    pub checksum: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaEntry {
+    pub id: String,
+    pub kind: MediaKind,
+    pub folder_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub author: String,
+    pub source_url: String,
+    pub license: String,
+    pub favorite: bool,
+    pub processing_status: String,
+    pub processing_message: String,
+    pub format: String,
+    pub file_size: i64,
+    pub tags: Vec<String>,
+    pub thumbnail_file_id: Option<String>,
+    pub primary_file_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaEntryDetail {
+    #[serde(flatten)]
+    pub entry: MediaEntry,
+    pub files: Vec<MediaFile>,
+    pub asset_ids: Vec<String>,
+    pub project_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedMediaPreview {
+    pub id: String,
+    pub kind: MediaKind,
+    pub name: String,
+    pub original_name: String,
+    pub logical_path: String,
+    pub primary_file_id: String,
+    pub stream_file_id: String,
+    pub thumbnail_file_id: Option<String>,
+    pub processing_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSearchRequest {
+    pub kind: MediaKind,
+    #[serde(default)]
+    pub query: String,
+    pub folder_id: Option<String>,
+    #[serde(default = "default_true_value")]
+    pub include_child_folders: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    #[serde(default)]
+    pub favorite_only: bool,
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_media_limit")]
+    pub limit: i64,
+}
+
+fn default_media_limit() -> i64 {
+    80
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaImportRequest {
+    pub kind: MediaKind,
+    pub paths: Vec<String>,
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaImportRow {
+    pub path: String,
+    pub status: String,
+    pub message: String,
+    pub entry_id: Option<String>,
+    pub duplicate_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaImportReport {
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub rows: Vec<MediaImportRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaBatchUpdate {
+    pub ids: Vec<String>,
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub clear_folder: bool,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+    pub favorite: Option<bool>,
 }
 
 fn default_theme() -> String {
@@ -306,39 +469,6 @@ pub struct SmartCollection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ManualCollectionInput {
-    pub id: Option<String>,
-    pub parent_id: Option<String>,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub cover_asset_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManualCollection {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub name: String,
-    pub description: String,
-    pub cover_asset_id: Option<String>,
-    pub cover_image_id: Option<String>,
-    pub sort_order: i64,
-    pub direct_asset_count: i64,
-    pub descendant_asset_count: i64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CollectionMutationReport {
-    pub affected_assets: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TagUsage {
     pub id: String,
     pub locale: String,
@@ -449,8 +579,6 @@ pub struct BatchAssetUpdate {
     #[serde(default)]
     pub remove_tags: Vec<String>,
     pub favorite: Option<bool>,
-    #[serde(default)]
-    pub rating: Option<i64>,
     #[serde(default = "default_content_language")]
     pub content_language: String,
 }
@@ -561,7 +689,6 @@ pub struct AssetCard {
     pub versions: Vec<String>,
     pub formats: Vec<String>,
     pub favorite: bool,
-    pub rating: i64,
     pub updated_at: String,
     pub last_viewed_at: Option<String>,
     pub cover_image_id: Option<String>,
@@ -629,6 +756,7 @@ pub struct AssetDetail {
     pub extraction_code: String,
     pub images: Vec<AssetImage>,
     pub media: Vec<AssetMedia>,
+    pub media_library: Vec<LinkedMediaPreview>,
     pub created_at: String,
     pub localizations: HashMap<String, LocalizedAssetText>,
 }
@@ -666,8 +794,6 @@ pub struct AssetInput {
     pub share_url: String,
     pub extraction_code: String,
     pub favorite: bool,
-    #[serde(default)]
-    pub rating: i64,
     pub images: Vec<ImageInput>,
     #[serde(default)]
     pub localizations: HashMap<String, LocalizedAssetText>,
@@ -832,6 +958,10 @@ pub struct DeleteResult {
     pub label: String,
     pub asset_count: usize,
     pub category_count: usize,
+    #[serde(default)]
+    pub media_count: usize,
+    #[serde(default)]
+    pub media_folder_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -842,6 +972,8 @@ pub struct TrashBatch {
     pub label: String,
     pub asset_count: i64,
     pub category_count: i64,
+    pub media_count: i64,
+    pub media_folder_count: i64,
     pub created_at: String,
 }
 

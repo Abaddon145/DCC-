@@ -17,7 +17,7 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn media_kind(path: &Path) -> Result<(&'static str, &'static str), String> {
+pub(crate) fn media_kind(path: &Path) -> Result<(&'static str, &'static str), String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -60,7 +60,7 @@ fn media_kind(path: &Path) -> Result<(&'static str, &'static str), String> {
     }
 }
 
-fn safe_relative(base_dir: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_relative(base_dir: &Path, relative: &str) -> Result<PathBuf, String> {
     let relative = Path::new(relative);
     if relative.is_absolute()
         || relative.components().any(|part| {
@@ -77,7 +77,7 @@ fn safe_relative(base_dir: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(base_dir.join(relative))
 }
 
-fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
     let parent = target.parent().ok_or("媒体目标目录无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("创建媒体目录失败：{error}"))?;
     let temp = target.with_extension(format!(
@@ -155,7 +155,10 @@ fn run(command: &mut Command) -> Result<(), String> {
     }
 }
 
-fn probe(ffprobe: Option<&Path>, input: &Path) -> (Option<i64>, Option<i64>, Option<i64>) {
+pub(crate) fn probe(
+    ffprobe: Option<&Path>,
+    input: &Path,
+) -> (Option<i64>, Option<i64>, Option<i64>) {
     let Some(ffprobe) = ffprobe else {
         return (None, None, None);
     };
@@ -196,7 +199,7 @@ fn probe(ffprobe: Option<&Path>, input: &Path) -> (Option<i64>, Option<i64>, Opt
     (duration, width, height)
 }
 
-fn process(
+pub(crate) fn process(
     ffmpeg: Option<&Path>,
     kind: &str,
     extension: &str,
@@ -638,6 +641,48 @@ pub fn protocol_response(
         builder = builder.header("Content-Range", format!("bytes {start}-{end}/{length}"));
     }
     builder.body(body).map_err(|error| error.to_string())
+}
+
+pub(crate) fn file_response(
+    path: &Path,
+    content_type: &str,
+    range: Option<&str>,
+) -> Result<tauri::http::Response<Vec<u8>>, String> {
+    let length = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let parsed = range
+        .and_then(|raw| raw.strip_prefix("bytes="))
+        .and_then(|value| {
+            let (start, end) = value.split_once('-')?;
+            let start = start.parse::<u64>().ok()?;
+            let end = if end.is_empty() {
+                length.saturating_sub(1)
+            } else {
+                end.parse::<u64>().ok()?.min(length.saturating_sub(1))
+            };
+            (start <= end && start < length).then_some((start, end))
+        });
+    let (start, end, status) =
+        parsed
+            .map(|(s, e)| (s, e, 206))
+            .unwrap_or((0, length.saturating_sub(1), 200));
+    let count = if length == 0 { 0 } else { end - start + 1 };
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    let mut body = Vec::with_capacity(count.min(16 * 1024 * 1024) as usize);
+    file.take(count)
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    let mut builder = tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", body.len().to_string())
+        .header("Access-Control-Allow-Origin", "*");
+    if status == 206 {
+        builder = builder.header("Content-Range", format!("bytes {start}-{end}/{length}"));
+    }
+    builder.body(body).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ pub fn export_library(
         .execute("VACUUM INTO ?1", [snapshot_text])
         .map_err(|e| format!("创建数据库快照失败：{e}"))?;
     let mut sources: Vec<(PathBuf, String)> = vec![(snapshot, "library.db".into())];
-    for managed_dir in ["images", "reference-boards"] {
+    for managed_dir in ["images", "reference-boards", "media-library"] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
@@ -132,9 +132,11 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     let rollback_db = active.base_dir.join("library.pre-restore.db");
     let rollback_images = active.base_dir.join("images.pre-restore");
     let rollback_boards = active.base_dir.join("reference-boards.pre-restore");
+    let rollback_media = active.base_dir.join("media-library.pre-restore");
     remove_file_if_exists(&rollback_db)?;
     remove_dir_if_exists(&rollback_images)?;
     remove_dir_if_exists(&rollback_boards)?;
+    remove_dir_if_exists(&rollback_media)?;
     for suffix in ["-wal", "-shm"] {
         remove_file_if_exists(Path::new(&format!(
             "{}{}",
@@ -156,6 +158,11 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         fs::rename(&current_boards, &rollback_boards)
             .map_err(|e| format!("准备恢复参考板图片失败：{e}"))?;
     }
+    let current_media = active.base_dir.join("media-library");
+    if current_media.exists() {
+        fs::rename(&current_media, &rollback_media)
+            .map_err(|e| format!("准备恢复媒体库失败：{e}"))?;
+    }
     let install = (|| -> Result<(), String> {
         fs::copy(&staged_db, &active.db_path).map_err(|e| format!("恢复数据库失败：{e}"))?;
         let staged_images = stage.path().join("images");
@@ -171,6 +178,12 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         } else {
             fs::create_dir_all(&current_boards).map_err(|e| e.to_string())?;
         }
+        let staged_media = stage.path().join("media-library");
+        if staged_media.exists() {
+            copy_tree(&staged_media, &current_media)?;
+        } else {
+            fs::create_dir_all(&current_media).map_err(|e| e.to_string())?;
+        }
         let reopened = db::open_database(&active.db_path)?;
         active.connection = Some(reopened);
         Ok(())
@@ -179,6 +192,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         remove_file_if_exists(&active.db_path)?;
         remove_dir_if_exists(&current_images)?;
         remove_dir_if_exists(&current_boards)?;
+        remove_dir_if_exists(&current_media)?;
         if rollback_db.exists() {
             fs::rename(&rollback_db, &active.db_path).map_err(|e| e.to_string())?;
         }
@@ -188,12 +202,16 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         if rollback_boards.exists() {
             fs::rename(&rollback_boards, &current_boards).map_err(|e| e.to_string())?;
         }
+        if rollback_media.exists() {
+            fs::rename(&rollback_media, &current_media).map_err(|e| e.to_string())?;
+        }
         active.connection = Some(db::open_database(&active.db_path)?);
         return Err(error);
     }
     remove_file_if_exists(&rollback_db)?;
     remove_dir_if_exists(&rollback_images)?;
     remove_dir_if_exists(&rollback_boards)?;
+    remove_dir_if_exists(&rollback_media)?;
     Ok(())
 }
 
@@ -278,11 +296,32 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     #[test]
     fn digest_is_stable() {
         assert_eq!(
             hex_digest(b"asset"),
             "d59386e0ae435e292fbe0ebcdb954b75ed5fb3922091277cb19f798fc5d50718"
         );
+    }
+
+    #[test]
+    fn export_includes_independent_media_library() {
+        let directory = tempdir().unwrap();
+        let base = directory.path().join("library");
+        fs::create_dir_all(base.join("media-library/image/demo")).unwrap();
+        fs::write(
+            base.join("media-library/image/demo/original.png"),
+            b"preview",
+        )
+        .unwrap();
+        let connection = db::open_database(&base.join("library.db")).unwrap();
+        let output = directory.path().join("backup.dccassetlib");
+        export_library(&connection, &base, &output).unwrap();
+        let file = fs::File::open(output).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert!(archive
+            .by_name("media-library/image/demo/original.png")
+            .is_ok());
     }
 }

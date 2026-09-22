@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "dcc-asset-library"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -718,6 +718,7 @@ dependencies = [
  "keyring",
  "md5",
  "open",
+ "percent-encoding",
  "pretty_assertions",
  "regex",
  "reqwest",

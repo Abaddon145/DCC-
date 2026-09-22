@@ -4,10 +4,13 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const KNOWN_MODULES: [&str; 10] = [
+const KNOWN_MODULES: [&str; 13] = [
     "library",
+    "imageLibrary",
+    "modelLibrary",
+    "audioLibrary",
+    "videoLibrary",
     "projects",
-    "collections",
     "smartCollections",
     "favorites",
     "recent",
@@ -44,22 +47,21 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
 }
 
 pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
-    let mut order = vec![
-        "library".to_string(),
-        "projects".to_string(),
-        "collections".to_string(),
-    ];
-    let mut seen = HashSet::from([
-        "library".to_string(),
-        "projects".to_string(),
-        "collections".to_string(),
-    ]);
+    let mut order = KNOWN_MODULES
+        .iter()
+        .take(6)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let mut seen = order.iter().cloned().collect::<HashSet<_>>();
     for id in value.module_order.drain(..) {
+        if id == "collections" {
+            continue;
+        }
         if seen.insert(id.clone()) {
             order.push(id);
         }
     }
-    for id in KNOWN_MODULES.iter().skip(3) {
+    for id in KNOWN_MODULES.iter().skip(6) {
         if seen.insert((*id).to_string()) {
             order.push((*id).to_string());
         }
@@ -68,7 +70,9 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     value.disabled_modules.retain(|id| id != "library");
     value.disabled_modules.sort();
     value.disabled_modules.dedup();
-    if value.disabled_modules.contains(&value.startup_module)
+    value.disabled_modules.retain(|id| id != "collections");
+    if value.startup_module == "collections"
+        || value.disabled_modules.contains(&value.startup_module)
         || !value.module_order.contains(&value.startup_module)
     {
         value.startup_module = "library".into();
@@ -84,7 +88,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     }
     if !matches!(
         value.default_sort.as_str(),
-        "updated" | "name" | "created" | "recent" | "favorite" | "rating"
+        "updated" | "name" | "created" | "recent" | "favorite"
     ) {
         value.default_sort = "updated".into();
     }
@@ -127,6 +131,27 @@ pub fn save_library_preferences(
 
 fn collection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartCollection> {
     let raw: String = row.get(4)?;
+    let legacy: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let mut invalid_conditions = Vec::new();
+    let has_collection = legacy
+        .get("manualCollectionId")
+        .is_some_and(|value| !value.is_null() && value.as_str().is_some_and(|v| !v.is_empty()));
+    let has_rating = legacy
+        .get("ratings")
+        .and_then(|value| value.as_array())
+        .is_some_and(|values| !values.is_empty())
+        || legacy.get("sort").and_then(|value| value.as_str()) == Some("rating");
+    let query = legacy
+        .get("query")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if has_collection || query.contains("collection:") {
+        invalid_conditions.push("手动合集条件已在 v0.13 取消".into());
+    }
+    if has_rating || query.contains("rating:") {
+        invalid_conditions.push("评分条件已在 v0.13 取消".into());
+    }
     Ok(SmartCollection {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -134,7 +159,7 @@ fn collection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartCollect
         color: row.get(3)?,
         rule: serde_json::from_str(&raw).unwrap_or_default(),
         sort_order: row.get(5)?,
-        invalid_conditions: vec![],
+        invalid_conditions,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
@@ -178,7 +203,9 @@ pub fn list_smart_collections(connection: &Connection) -> Result<Vec<SmartCollec
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     for value in &mut values {
-        value.invalid_conditions = validate_rule_refs(connection, &value.rule)?;
+        value
+            .invalid_conditions
+            .extend(validate_rule_refs(connection, &value.rule)?);
     }
     Ok(values)
 }
@@ -229,7 +256,9 @@ pub fn upsert_smart_collection(
 
 pub fn get_smart_collection(connection: &Connection, id: &str) -> Result<SmartCollection, String> {
     let mut value = connection.query_row("SELECT id,name,icon,color,rule_json,sort_order,created_at,updated_at FROM smart_collections WHERE id=?1", [id], collection_from_row).optional().map_err(|e| e.to_string())?.ok_or("智能集合不存在")?;
-    value.invalid_conditions = validate_rule_refs(connection, &value.rule)?;
+    value
+        .invalid_conditions
+        .extend(validate_rule_refs(connection, &value.rule)?);
     Ok(value)
 }
 
@@ -341,9 +370,6 @@ pub fn resolve_smart_collection(
         smart_collection_id: Some(id.into()),
         project_id: request.project_id.clone(),
         project_asset_status: request.project_asset_status.clone(),
-        manual_collection_id: request.manual_collection_id.clone(),
-        include_child_collections: request.include_child_collections,
-        ratings: request.ratings.clone(),
         sort: collection.rule.sort,
         offset: request.offset,
         limit: request.limit,

@@ -47,10 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_assets_updated ON assets(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(favorite, updated_at DESC);
 CREATE TABLE IF NOT EXISTS deletion_batches (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK(kind IN ('assets','category')),
+  kind TEXT NOT NULL CHECK(kind IN ('assets','category','media','mediaFolder')),
   label TEXT NOT NULL,
   asset_count INTEGER NOT NULL DEFAULT 0,
   category_count INTEGER NOT NULL DEFAULT 0,
+  media_count INTEGER NOT NULL DEFAULT 0,
+  media_folder_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -177,29 +179,6 @@ CREATE TABLE IF NOT EXISTS smart_collections (
 
 CREATE INDEX IF NOT EXISTS idx_smart_collections_sort ON smart_collections(sort_order, name);
 
-CREATE TABLE IF NOT EXISTS manual_collections (
-  id TEXT PRIMARY KEY,
-  parent_id TEXT REFERENCES manual_collections(id) ON DELETE RESTRICT,
-  name TEXT NOT NULL COLLATE NOCASE,
-  description TEXT NOT NULL DEFAULT '',
-  cover_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(parent_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS manual_collection_assets (
-  collection_id TEXT NOT NULL REFERENCES manual_collections(id) ON DELETE CASCADE,
-  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  added_at TEXT NOT NULL,
-  PRIMARY KEY(collection_id, asset_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_manual_collections_parent ON manual_collections(parent_id, sort_order, name);
-CREATE INDEX IF NOT EXISTS idx_manual_collection_assets_order ON manual_collection_assets(collection_id, sort_order);
-
 CREATE TABLE IF NOT EXISTS library_preferences (
   id INTEGER PRIMARY KEY CHECK(id=1),
   settings_json TEXT NOT NULL,
@@ -312,3 +291,77 @@ CREATE TABLE IF NOT EXISTS project_paths (
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_paths_sort ON project_paths(project_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS media_folders (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('image','model','audio','video')),
+  parent_id TEXT REFERENCES media_folders(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL COLLATE NOCASE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
+  delete_batch_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(kind,parent_id,name)
+);
+CREATE INDEX IF NOT EXISTS idx_media_folders_tree ON media_folders(kind,parent_id,sort_order,name);
+
+CREATE TABLE IF NOT EXISTS media_entries (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('image','model','audio','video')),
+  folder_id TEXT REFERENCES media_folders(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  favorite INTEGER NOT NULL DEFAULT 0,
+  processing_status TEXT NOT NULL DEFAULT 'ready',
+  processing_message TEXT NOT NULL DEFAULT '',
+  primary_file_id TEXT NOT NULL,
+  deleted_at TEXT,
+  delete_batch_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_entries_kind ON media_entries(kind,deleted_at,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_entries_folder ON media_entries(folder_id,deleted_at,updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS media_files (
+  id TEXT PRIMARY KEY,
+  entry_id TEXT NOT NULL REFERENCES media_entries(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK(role IN ('main','dependency','proxy','thumbnail','waveform')),
+  logical_path TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  rel_path TEXT NOT NULL UNIQUE,
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  width INTEGER,
+  height INTEGER,
+  duration_ms INTEGER,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE(entry_id,logical_path)
+);
+CREATE INDEX IF NOT EXISTS idx_media_files_entry ON media_files(entry_id,role,sort_order);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_files_main_checksum ON media_files(checksum) WHERE role='main' AND checksum<>'';
+
+CREATE TABLE IF NOT EXISTS media_entry_tags (
+  entry_id TEXT NOT NULL REFERENCES media_entries(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES localized_tags(id) ON DELETE CASCADE,
+  PRIMARY KEY(entry_id,tag_id)
+);
+CREATE TABLE IF NOT EXISTS media_entry_assets (
+  entry_id TEXT NOT NULL REFERENCES media_entries(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  PRIMARY KEY(entry_id,asset_id)
+);
+CREATE TABLE IF NOT EXISTS project_media_entries (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  entry_id TEXT NOT NULL REFERENCES media_entries(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id,entry_id)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS media_search USING fts5(entry_id UNINDEXED,text,tokenize='trigram');

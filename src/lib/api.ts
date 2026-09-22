@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectUnit, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, ManualCollection, ManualCollectionInput, CollectionMutationReport } from "../types";
+import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectUnit, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate } from "../types";
 
 export const assetMediaUrl = (id: string, variant: "stream" | "thumbnail" | "original" = "stream") => `http://dcc-media.localhost/${encodeURIComponent(id)}/${variant}`;
+export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localhost/library/file/${encodeURIComponent(fileId)}`;
+export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
   getMeta: (contentLanguage: ContentLanguage) => invoke<LibraryMeta>("get_library_meta", { contentLanguage }),
@@ -27,14 +29,22 @@ export const api = {
   retryAssetMedia: (id: string) => invoke<AssetMedia>("retry_asset_media", { id }),
   reorderAssetMedia: (assetId: string, ids: string[]) => invoke<void>("reorder_asset_media", { assetId, ids }),
   setAssetCoverMedia: (assetId: string, mediaId: string | null, imageId: string | null) => invoke<void>("set_asset_cover_media", { assetId, mediaId, imageId }),
-  listManualCollections: () => invoke<ManualCollection[]>("list_manual_collections"),
-  saveManualCollection: (input: ManualCollectionInput) => invoke<ManualCollection>("upsert_manual_collection", { input }),
-  moveManualCollection: (id: string, targetParentId: string | null, targetIndex: number) => invoke<void>("move_manual_collection", { id, targetParentId, targetIndex }),
-  deleteManualCollection: (id: string) => invoke<void>("delete_manual_collection", { id }),
-  addCollectionAssets: (collectionId: string, assetIds: string[]) => invoke<CollectionMutationReport>("add_collection_assets", { collectionId, assetIds }),
-  removeCollectionAssets: (collectionId: string, assetIds: string[]) => invoke<CollectionMutationReport>("remove_collection_assets", { collectionId, assetIds }),
-  reorderCollectionAssets: (collectionId: string, ids: string[]) => invoke<void>("reorder_collection_assets", { collectionId, ids }),
-  batchSetAssetRating: (ids: string[], rating: number) => invoke<BatchUpdateReport>("batch_set_asset_rating", { ids, rating }),
+  searchMediaEntries: (request: MediaSearchRequest) => invoke<Page<MediaEntry>>("search_media_entries", { request }),
+  getMediaEntry: (id: string) => invoke<MediaEntryDetail>("get_media_entry", { id }),
+  importMediaEntries: (request: MediaImportRequest) => invoke<MediaImportReport>("import_media_entries", { request }),
+  updateMediaEntry: (id: string, input: Pick<MediaEntry, "name" | "description" | "author" | "sourceUrl" | "license" | "tags">) => invoke<void>("update_media_entry", { id, ...input }),
+  deleteMediaEntries: (ids: string[]) => invoke<number>("delete_media_entries", { ids }),
+  batchUpdateMediaEntries: (update: MediaBatchUpdate) => invoke<BatchUpdateReport>("batch_update_media_entries", { update }),
+  listMediaFolders: (kind: MediaKind) => invoke<MediaFolder[]>("list_media_folders", { kind }),
+  saveMediaFolder: (kind: MediaKind, id: string | null, parentId: string | null, name: string) => invoke<MediaFolder>("upsert_media_folder", { kind, id, parentId, name }),
+  moveMediaFolder: (id: string, targetParentId: string | null, targetIndex: number) => invoke<void>("move_media_folder", { id, targetParentId, targetIndex }),
+  deleteMediaFolder: (id: string) => invoke<void>("delete_media_folder", { id }),
+  linkMediaAssets: (entryIds: string[], assetIds: string[]) => invoke<number>("link_media_assets", { entryIds, assetIds }),
+  unlinkMediaAssets: (entryIds: string[], assetIds: string[]) => invoke<number>("unlink_media_assets", { entryIds, assetIds }),
+  linkProjectMedia: (entryIds: string[], projectIds: string[]) => invoke<number>("link_project_media", { entryIds, projectIds }),
+  unlinkProjectMedia: (entryIds: string[], projectIds: string[]) => invoke<number>("unlink_project_media", { entryIds, projectIds }),
+  collectAssetPreviewsToMedia: (assetId: string) => invoke<MediaImportReport>("collect_asset_previews_to_media", { assetId }),
+  addMediaImagesToBoard: (boardId: string, entryIds: string[], placement: ReferencePlacement) => invoke<ReferenceImageAddReport>("add_media_images_to_board", { boardId, entryIds, placement }),
   openShare: (id: string) => invoke<void>("open_share_link", { id }),
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
   copyCode: (id: string) => invoke<void>("copy_extraction_code", { id }),

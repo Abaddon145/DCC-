@@ -13,18 +13,8 @@ pub struct ParsedQuery {
 }
 
 const FIELDS: &[&str] = &[
-    "name",
-    "tag",
-    "desc",
-    "category",
-    "collection",
-    "author",
-    "software",
-    "version",
-    "format",
-    "license",
+    "name", "tag", "desc", "category", "author", "software", "version", "format", "license",
     "source",
-    "rating",
 ];
 
 pub fn parse(raw: &str) -> Result<ParsedQuery, String> {
@@ -113,22 +103,6 @@ fn escape_like(value: &str) -> String {
 }
 
 fn term_sql(term: &QueryTerm, _language: &str, values: &mut Vec<Value>) -> Result<String, String> {
-    if term.field.as_deref() == Some("rating") {
-        let rating = term
-            .value
-            .parse::<i64>()
-            .map_err(|_| "rating: 必须为 0–5 的整数".to_string())?;
-        if !(0..=5).contains(&rating) {
-            return Err("rating: 必须为 0–5 的整数".into());
-        }
-        let value = if term.excluded {
-            "a.rating<>?"
-        } else {
-            "a.rating=?"
-        };
-        values.push(Value::Integer(rating));
-        return Ok(value.into());
-    }
     let needle = format!("%{}%", escape_like(&term.value.to_lowercase()));
     let marker = format!("?{}", values.len() + 1);
     let sql=match term.field.as_deref() {
@@ -140,7 +114,6 @@ fn term_sql(term: &QueryTerm, _language: &str, values: &mut Vec<Value>) -> Resul
         Some("source") => "lower(a.source_url || ' ' || a.share_url) LIKE ? ESCAPE '\\'".into(),
         Some("license") => format!("(lower(a.license) LIKE {marker} ESCAPE '\\' OR EXISTS(SELECT 1 FROM asset_localizations al WHERE al.asset_id=a.id AND lower(al.license) LIKE {marker} ESCAPE '\\'))"),
         Some("tag") => "EXISTS(SELECT 1 FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=a.id AND lower(t.name) LIKE ? ESCAPE '\\')".into(),
-        Some("collection") => "EXISTS(SELECT 1 FROM manual_collection_assets ma JOIN manual_collections mc ON mc.id=ma.collection_id WHERE ma.asset_id=a.id AND lower(mc.name) LIKE ? ESCAPE '\\')".into(),
         Some("software") => "EXISTS(SELECT 1 FROM json_each(a.dcc_tools_json) j WHERE lower(j.value) LIKE ? ESCAPE '\\')".into(),
         Some("version") => "EXISTS(SELECT 1 FROM json_each(a.versions_json) j WHERE lower(j.value) LIKE ? ESCAPE '\\')".into(),
         Some("format") => "EXISTS(SELECT 1 FROM json_each(a.formats_json) j WHERE lower(j.value) LIKE ? ESCAPE '\\')".into(),
@@ -178,7 +151,7 @@ mod tests {
     use super::*;
     #[test]
     fn parses_fields_phrases_or_and_exclusions() {
-        let value = parse("name:\"desert dune\" tag:rock | -rating:0").unwrap();
+        let value = parse("name:\"desert dune\" tag:rock | -format:fbx").unwrap();
         assert_eq!(value.groups.len(), 2);
         assert_eq!(value.groups[0][0].value, "desert dune");
         assert!(value.groups[1][0].excluded);

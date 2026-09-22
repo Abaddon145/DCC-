@@ -669,6 +669,7 @@ fn ensure_library(path: &Path, name: &str, allow_legacy: bool) -> Result<(), Str
     fs::create_dir_all(path.join("images/originals")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("images/thumbnails")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("reference-boards")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(path.join("media-library")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("safety-backups")).map_err(|e| e.to_string())?;
     let marker_path = path.join(MARKER_FILE);
     if !marker_path.exists() {
@@ -739,6 +740,10 @@ fn migrate_library(
         copy_tree_verified(
             &active.base_dir.join("reference-boards"),
             &stage.join("reference-boards"),
+        )?;
+        copy_tree_verified(
+            &active.base_dir.join("media-library"),
+            &stage.join("media-library"),
         )?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {
@@ -945,6 +950,12 @@ mod tests {
         let source = dir.path().join("source");
         let target = dir.path().join("target");
         ensure_library(&source, "源库", false).unwrap();
+        fs::create_dir_all(source.join("media-library/image/demo")).unwrap();
+        fs::write(
+            source.join("media-library/image/demo/original.png"),
+            b"media",
+        )
+        .unwrap();
         let mut active = open_library(&source).unwrap();
         active
             .connection
@@ -963,6 +974,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM categories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+        assert_eq!(
+            fs::read(target.join("media-library/image/demo/original.png")).unwrap(),
+            b"media"
+        );
     }
 
     #[test]

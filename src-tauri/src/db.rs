@@ -1,4 +1,4 @@
-use crate::{collections, fab, images, models::*, search_syntax};
+use crate::{fab, images, models::*, search_syntax};
 use chrono::Utc;
 use rusqlite::{
     params, params_from_iter, types::Value, Connection, OptionalExtension, Row, Transaction,
@@ -30,6 +30,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v8(&connection)?;
     migrate_to_v9(&connection)?;
     migrate_to_v10(&connection)?;
+    migrate_to_v11(&connection)?;
     Ok(connection)
 }
 
@@ -450,6 +451,46 @@ fn migrate_to_v10(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_to_v11(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 11 {
+        return Ok(());
+    }
+    let batch_columns = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(deletion_batches)")
+            .map_err(|e| e.to_string())?;
+        let values = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        values
+    };
+    if !batch_columns.iter().any(|name| name == "media_count") {
+        connection.execute_batch("ALTER TABLE deletion_batches RENAME TO deletion_batches_v10;
+          CREATE TABLE deletion_batches(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('assets','category','media','mediaFolder')),label TEXT NOT NULL,asset_count INTEGER NOT NULL DEFAULT 0,category_count INTEGER NOT NULL DEFAULT 0,media_count INTEGER NOT NULL DEFAULT 0,media_folder_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
+          INSERT INTO deletion_batches(id,kind,label,asset_count,category_count,created_at) SELECT id,kind,label,asset_count,category_count,created_at FROM deletion_batches_v10;
+          DROP TABLE deletion_batches_v10;").map_err(|e|format!("升级回收站到 v11 失败：{e}"))?;
+    }
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS idx_assets_rating;
+         INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','11');",
+        )
+        .map_err(|e| format!("升级数据库到 v11 失败：{e}"))?;
+    Ok(())
+}
+
 fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
@@ -713,38 +754,6 @@ pub fn search_assets(
     if request.recent_only {
         conditions.push("a.last_viewed_at IS NOT NULL".into());
     }
-    if !request.ratings.is_empty() {
-        let ratings = request
-            .ratings
-            .iter()
-            .copied()
-            .filter(|value| (0..=5).contains(value))
-            .map(Value::Integer)
-            .collect::<Vec<_>>();
-        if !ratings.is_empty() {
-            conditions.push(format!("a.rating IN ({})", placeholders(ratings.len())));
-            values.extend(ratings);
-        }
-    }
-    if let Some(collection_id) = request
-        .manual_collection_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let collection_ids = if request.include_child_collections {
-            collections::descendant_ids(connection, collection_id)?
-        } else {
-            vec![collection_id.to_string()]
-        };
-        if collection_ids.is_empty() {
-            conditions.push("1=0".into());
-        } else {
-            let marks = placeholders(collection_ids.len());
-            conditions.push(format!("EXISTS (SELECT 1 FROM manual_collection_assets mc WHERE mc.asset_id=a.id AND mc.collection_id IN ({marks}))"));
-            values.extend(collection_ids.into_iter().map(Value::Text));
-        }
-    }
     if let Some(project_id) = request
         .project_id
         .as_deref()
@@ -796,11 +805,10 @@ pub fn search_assets(
         "created" => "a.created_at DESC",
         "recent" => "a.last_viewed_at DESC NULLS LAST",
         "favorite" => "a.favorite DESC, a.updated_at DESC",
-        "rating" => "a.rating DESC, a.updated_at DESC",
         "relevance" if use_fts => "CASE WHEN lower(COALESCE(lr.name,'') || ' ' || COALESCE(lr.description,'') || ' ' || COALESCE(lr.license,'')) LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, bm25(asset_search), a.updated_at DESC",
         _ => "a.updated_at DESC",
     };
-    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.rating,a.updated_at,a.last_viewed_at,
+    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.updated_at,a.last_viewed_at,
       (SELECT i.id FROM images i WHERE i.asset_id=a.id ORDER BY i.is_cover DESC,i.sort_order LIMIT 1),
       (SELECT m.id FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
       (SELECT m.kind FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
@@ -886,19 +894,18 @@ fn card_from_row(row: &Row<'_>) -> rusqlite::Result<AssetCard> {
         versions: json_vec(row.get(4)?),
         formats: json_vec(row.get(5)?),
         favorite: row.get::<_, i64>(6)? != 0,
-        rating: row.get(7)?,
-        updated_at: row.get(8)?,
-        last_viewed_at: row.get(9)?,
-        cover_image_id: row.get(10)?,
-        cover_media_id: row.get(11)?,
-        cover_media_kind: row.get(12)?,
-        tags: json_vec(row.get(13)?),
-        content_language: row.get(14)?,
-        language_fallback: row.get::<_, i64>(15)? != 0,
-        link_check_status: row.get(16)?,
-        link_checked_at: row.get(17)?,
-        link_check_message: row.get(18)?,
-        has_share_link: row.get::<_, i64>(19)? != 0,
+        updated_at: row.get(7)?,
+        last_viewed_at: row.get(8)?,
+        cover_image_id: row.get(9)?,
+        cover_media_id: row.get(10)?,
+        cover_media_kind: row.get(11)?,
+        tags: json_vec(row.get(12)?),
+        content_language: row.get(13)?,
+        language_fallback: row.get::<_, i64>(14)? != 0,
+        link_check_status: row.get(15)?,
+        link_checked_at: row.get(16)?,
+        link_check_message: row.get(17)?,
+        has_share_link: row.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -918,7 +925,7 @@ pub fn get_asset(
     }
     let language = valid_language(content_language);
     let fallback = other_language(language);
-    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.rating,a.updated_at,a.last_viewed_at,
+    let sql = format!("SELECT a.id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),c.name,a.dcc_tools_json,a.versions_json,a.formats_json,a.favorite,a.updated_at,a.last_viewed_at,
       (SELECT i.id FROM images i WHERE i.asset_id=a.id ORDER BY i.is_cover DESC,i.sort_order LIMIT 1),
       (SELECT m.id FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
       (SELECT m.kind FROM asset_media m WHERE m.asset_id=a.id ORDER BY m.is_cover DESC,m.sort_order LIMIT 1),
@@ -932,16 +939,16 @@ pub fn get_asset(
         .query_row(&sql, [id], |row| {
             Ok((
                 card_from_row(row)?,
-                row.get::<_, String>(20)?,
-                row.get::<_, Option<String>>(21)?,
-                row.get::<_, Option<i64>>(22)?,
+                row.get::<_, String>(19)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<i64>>(21)?,
+                row.get::<_, String>(22)?,
                 row.get::<_, String>(23)?,
                 row.get::<_, String>(24)?,
                 row.get::<_, String>(25)?,
                 row.get::<_, String>(26)?,
                 row.get::<_, String>(27)?,
                 row.get::<_, String>(28)?,
-                row.get::<_, String>(29)?,
             ))
         })
         .optional()
@@ -961,6 +968,43 @@ pub fn get_asset(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let media = crate::media::list(connection, id)?;
+    let media_library = {
+        let mut statement = connection.prepare(
+            "SELECT e.id,e.kind,e.name,m.original_name,m.logical_path,e.primary_file_id,
+                    COALESCE((SELECT id FROM media_files WHERE entry_id=e.id AND role='proxy' ORDER BY sort_order LIMIT 1),e.primary_file_id),
+                    (SELECT id FROM media_files WHERE entry_id=e.id AND role IN ('thumbnail','waveform') ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END LIMIT 1),
+                    e.processing_status
+             FROM media_entry_assets x
+             JOIN media_entries e ON e.id=x.entry_id AND e.deleted_at IS NULL
+             JOIN media_files m ON m.id=e.primary_file_id
+             WHERE x.asset_id=?1 ORDER BY e.updated_at DESC",
+        ).map_err(|error| error.to_string())?;
+        let values = statement
+            .query_map([id], |row| {
+                let kind = match row.get::<_, String>(1)?.as_str() {
+                    "image" => MediaKind::Image,
+                    "model" => MediaKind::Model,
+                    "audio" => MediaKind::Audio,
+                    "video" => MediaKind::Video,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok(LinkedMediaPreview {
+                    id: row.get(0)?,
+                    kind,
+                    name: row.get(2)?,
+                    original_name: row.get(3)?,
+                    logical_path: row.get(4)?,
+                    primary_file_id: row.get(5)?,
+                    stream_file_id: row.get(6)?,
+                    thumbnail_file_id: row.get(7)?,
+                    processing_status: row.get(8)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        values
+    };
     let mut localizations = HashMap::new();
     for locale in ["zh-CN", "en"] {
         let value = connection.query_row("SELECT name,description,license FROM asset_localizations WHERE asset_id=?1 AND locale=?2", params![id,locale], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).optional().map_err(|e| e.to_string())?;
@@ -999,6 +1043,7 @@ pub fn get_asset(
         created_at: fields.9,
         images,
         media,
+        media_library,
         localizations,
     })
 }
@@ -1142,9 +1187,9 @@ pub fn upsert_asset(
             }
         }
         transaction.execute("INSERT INTO assets(id,name,description,category_id,dcc_tools_json,versions_json,formats_json,size_bytes,author,source_url,fab_listing_id,license,share_url,normalized_share_url,extraction_code,favorite,rating,created_at,updated_at)
-          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
-          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,fab_listing_id=excluded.fab_listing_id,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,rating=excluded.rating,updated_at=excluded.updated_at",
-           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),fab_listing_id,input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,input.rating.clamp(0,5),created,timestamp]).map_err(map_constraint)?;
+          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,category_id=excluded.category_id,dcc_tools_json=excluded.dcc_tools_json,versions_json=excluded.versions_json,formats_json=excluded.formats_json,size_bytes=excluded.size_bytes,author=excluded.author,source_url=excluded.source_url,fab_listing_id=excluded.fab_listing_id,license=excluded.license,share_url=excluded.share_url,normalized_share_url=excluded.normalized_share_url,link_check_status=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_status ELSE 'unknown' END,link_checked_at=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_checked_at ELSE NULL END,link_check_message=CASE WHEN assets.normalized_share_url=excluded.normalized_share_url THEN assets.link_check_message ELSE '' END,extraction_code=excluded.extraction_code,favorite=excluded.favorite,updated_at=excluded.updated_at",
+           params![id,input.name.trim(),input.description.trim(),input.category_id,json(&input.dcc_tools)?,json(&input.versions)?,json(&input.formats)?,input.size_bytes,input.author.trim(),input.source_url.trim(),fab_listing_id,input.license.trim(),input.share_url.trim(),normalized_share_url,input.extraction_code.trim(),input.favorite as i64,created,timestamp]).map_err(map_constraint)?;
         transaction
             .execute("DELETE FROM asset_localized_tags WHERE asset_id=?1", [&id])
             .map_err(|e| e.to_string())?;
@@ -1534,8 +1579,6 @@ pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), Stri
     )?;
     let localized = query_strings_with_param(connection, "SELECT name || ' ' || description || ' ' || license FROM asset_localizations WHERE asset_id=?1", asset_id)?;
     let localized_tags = query_strings_with_param(connection, "SELECT t.name FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=?1", asset_id)?;
-    let collection_names =
-        collections::asset_collection_names(connection, asset_id).unwrap_or_default();
     let text = [
         row.0,
         row.1,
@@ -1549,7 +1592,6 @@ pub fn reindex_asset(connection: &Connection, asset_id: &str) -> Result<(), Stri
         tags.join(" "),
         localized.join(" "),
         localized_tags.join(" "),
-        collection_names.join(" "),
     ]
     .join(" ")
     .to_lowercase();
@@ -1720,6 +1762,8 @@ pub fn delete_impact(
         label,
         asset_count: assets.len(),
         category_count: categories.len(),
+        media_count: 0,
+        media_folder_count: 0,
     })
 }
 
@@ -1752,6 +1796,8 @@ pub fn delete_library_items(
         label,
         asset_count: assets.len(),
         category_count: categories.len(),
+        media_count: 0,
+        media_folder_count: 0,
     })
 }
 
@@ -1767,7 +1813,7 @@ pub fn list_trash(
             row.get(0)
         })
         .map_err(|e| e.to_string())?;
-    let mut statement = connection.prepare("SELECT id,kind,label,asset_count,category_count,created_at FROM deletion_batches ORDER BY created_at DESC LIMIT ?1 OFFSET ?2").map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT id,kind,label,asset_count,category_count,media_count,media_folder_count,created_at FROM deletion_batches ORDER BY created_at DESC LIMIT ?1 OFFSET ?2").map_err(|e| e.to_string())?;
     let items = statement
         .query_map(params![limit, offset], |row| {
             Ok(TrashBatch {
@@ -1776,7 +1822,9 @@ pub fn list_trash(
                 label: row.get(2)?,
                 asset_count: row.get(3)?,
                 category_count: row.get(4)?,
-                created_at: row.get(5)?,
+                media_count: row.get(5)?,
+                media_folder_count: row.get(6)?,
+                created_at: row.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1796,7 +1844,7 @@ pub fn restore_trash_batch(
 ) -> Result<DeleteResult, String> {
     let batch = connection
         .query_row(
-            "SELECT kind,label,asset_count,category_count FROM deletion_batches WHERE id=?1",
+            "SELECT kind,label,asset_count,category_count,media_count,media_folder_count FROM deletion_batches WHERE id=?1",
             [batch_id],
             |row| {
                 Ok((
@@ -1804,6 +1852,8 @@ pub fn restore_trash_batch(
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
@@ -1850,6 +1900,8 @@ pub fn restore_trash_batch(
             [batch_id],
         )
         .map_err(|e| e.to_string())?;
+    transaction.execute("UPDATE media_folders SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
+    transaction.execute("UPDATE media_entries SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction
         .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
         .map_err(|e| e.to_string())?;
@@ -1862,6 +1914,8 @@ pub fn restore_trash_batch(
         label: batch.1,
         asset_count: batch.2 as usize,
         category_count: batch.3 as usize,
+        media_count: batch.4 as usize,
+        media_folder_count: batch.5 as usize,
     })
 }
 
@@ -1892,6 +1946,15 @@ pub fn purge_trash_batch(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     drop(media_statement);
+    let independent_media_paths = {
+        let mut statement=connection.prepare("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.delete_batch_id=?1").map_err(|e|e.to_string())?;
+        let values = statement
+            .query_map([batch_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        values
+    };
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
     transaction
@@ -1906,6 +1969,25 @@ pub fn purge_trash_batch(
     transaction
         .execute(
             "DELETE FROM categories WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM media_search WHERE entry_id IN (SELECT id FROM media_entries WHERE delete_batch_id=?1)",[batch_id]).map_err(|e|e.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM media_entries WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "UPDATE media_folders SET parent_id=NULL WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM media_folders WHERE delete_batch_id=?1",
             [batch_id],
         )
         .map_err(|e| e.to_string())?;
@@ -1931,6 +2013,9 @@ pub fn purge_trash_batch(
         if let Some(path) = thumb {
             images::remove_managed_file(base_dir, &path);
         }
+    }
+    for path in independent_media_paths {
+        images::remove_managed_file(base_dir, &path);
     }
     Ok(())
 }
@@ -2054,9 +2139,6 @@ pub fn batch_update_assets(
     connection: &mut Connection,
     update: BatchAssetUpdate,
 ) -> Result<BatchUpdateReport, String> {
-    if update.rating.is_some_and(|value| !(0..=5).contains(&value)) {
-        return Err("评分必须在 0–5 之间".into());
-    }
     let ids = unique_values(&update.ids);
     if ids.is_empty() {
         return Err("请先选择素材".into());
@@ -2098,14 +2180,6 @@ pub fn batch_update_assets(
                 .execute(
                     "UPDATE assets SET favorite=?1 WHERE id=?2",
                     params![favorite as i64, id],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        if let Some(rating) = update.rating {
-            transaction
-                .execute(
-                    "UPDATE assets SET rating=?1 WHERE id=?2",
-                    params![rating, id],
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -2164,26 +2238,6 @@ pub fn batch_update_assets(
         requested: ids.len(),
         updated,
     })
-}
-
-pub fn batch_set_rating(
-    connection: &mut Connection,
-    ids: Vec<String>,
-    rating: i64,
-) -> Result<BatchUpdateReport, String> {
-    batch_update_assets(
-        connection,
-        BatchAssetUpdate {
-            ids,
-            category_id: None,
-            clear_category: false,
-            add_tags: Vec::new(),
-            remove_tags: Vec::new(),
-            favorite: None,
-            rating: Some(rating),
-            content_language: "zh-CN".into(),
-        },
-    )
 }
 
 #[derive(Debug, Clone)]
@@ -2495,6 +2549,9 @@ fn health_issue_ids(
     base_dir: &Path,
     issue: &str,
 ) -> Result<Vec<String>, String> {
+    if issue.starts_with("mediaLibrary") {
+        return Ok(Vec::new());
+    }
     let sql = match issue {
         "noPreview" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id) AND NOT EXISTS(SELECT 1 FROM asset_media m WHERE m.asset_id=a.id)"),
         "noCover" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM images i WHERE i.asset_id=a.id AND i.is_cover=1) AND NOT EXISTS(SELECT 1 FROM asset_media m WHERE m.asset_id=a.id AND m.is_cover=1)"),
@@ -2592,6 +2649,41 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
             count,
         });
     }
+    let mut missing_original = 0;
+    let mut missing_dependency = 0;
+    {
+        let mut statement=connection.prepare("SELECT role,rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.deleted_at IS NULL AND f.role IN ('main','dependency')").map_err(|e|e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (role, path) = row.map_err(|e| e.to_string())?;
+            if !base_dir.join(path).is_file() {
+                if role == "main" {
+                    missing_original += 1
+                } else {
+                    missing_dependency += 1
+                }
+            }
+        }
+    }
+    let media_specs=[
+      ("mediaLibraryMissingOriginal","媒体库原件缺失",missing_original),
+      ("mediaLibraryMissingDependency","模型依赖缺失",missing_dependency),
+      ("mediaLibraryProxyError","媒体代理或解析失败",connection.query_row("SELECT count(*) FROM media_entries WHERE deleted_at IS NULL AND processing_status='error'",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?),
+      ("mediaLibraryNoThumbnail","媒体库无缩略图",connection.query_row("SELECT count(*) FROM media_entries e WHERE e.deleted_at IS NULL AND e.kind IN ('image','audio','video') AND NOT EXISTS(SELECT 1 FROM media_files f WHERE f.entry_id=e.id AND f.role IN ('thumbnail','waveform'))",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?),
+      ("mediaLibraryOrphanLink","媒体库孤立关联",connection.query_row("SELECT (SELECT count(*) FROM media_entry_assets x JOIN assets a ON a.id=x.asset_id WHERE a.deleted_at IS NOT NULL)+(SELECT count(*) FROM project_media_entries x LEFT JOIN projects p ON p.id=x.project_id WHERE p.id IS NULL)",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?),
+    ];
+    for (issue, label, count) in media_specs {
+        total_issues += count;
+        counts.push(HealthCount {
+            issue: issue.into(),
+            label: label.into(),
+            count,
+        });
+    }
     Ok(HealthSummary {
         total_issues,
         counts,
@@ -2621,9 +2713,6 @@ pub fn list_health_issues(
             smart_collection_id: None,
             project_id: None,
             project_asset_status: None,
-            manual_collection_id: None,
-            include_child_collections: true,
-            ratings: Vec::new(),
             sort: "updated".into(),
             offset: request.offset,
             limit: request.limit,
@@ -2921,7 +3010,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
@@ -2971,7 +3060,6 @@ mod tests {
                 share_url: "https://pan.baidu.com/s/bilingual".into(),
                 extraction_code: String::new(),
                 favorite: false,
-                rating: 0,
                 images: Vec::new(),
                 localizations,
                 content_language: "zh-CN".into(),
@@ -3000,9 +3088,6 @@ mod tests {
                 smart_collection_id: None,
                 project_id: None,
                 project_asset_status: None,
-                manual_collection_id: None,
-                include_child_collections: true,
-                ratings: Vec::new(),
                 sort: "relevance".into(),
                 offset: 0,
                 limit: 10,
@@ -3034,7 +3119,6 @@ mod tests {
             share_url: "https://pan.baidu.com/s/first?pwd=1234".into(),
             extraction_code: "1234".into(),
             favorite: false,
-            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -3081,7 +3165,6 @@ mod tests {
             share_url: url.into(),
             extraction_code: String::new(),
             favorite: false,
-            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -3108,7 +3191,6 @@ mod tests {
                 add_tags: vec!["Nanite".into()],
                 remove_tags: Vec::new(),
                 favorite: Some(true),
-                rating: None,
                 content_language: "zh-CN".into(),
             },
         )
@@ -3150,7 +3232,6 @@ mod tests {
             share_url: String::new(),
             extraction_code: String::new(),
             favorite: false,
-            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
@@ -3198,7 +3279,6 @@ mod tests {
             share_url: String::new(),
             extraction_code: String::new(),
             favorite: false,
-            rating: 0,
             images: Vec::new(),
             localizations: HashMap::new(),
             content_language: "zh-CN".into(),
