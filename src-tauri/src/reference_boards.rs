@@ -228,6 +228,32 @@ pub fn add_asset_images(
     add_paths_internal(connection, base_dir, board_id, inputs, placement, skipped)
 }
 
+pub fn add_media_images(
+    connection: &mut Connection,
+    base_dir: &Path,
+    board_id: &str,
+    entry_ids: &[String],
+    placement: &ReferencePlacement,
+) -> Result<ReferenceImageAddReport, String> {
+    ensure_board(connection, board_id)?;
+    let mut inputs = Vec::new();
+    let mut skipped = 0;
+    for entry_id in entry_ids {
+        let source=connection.query_row("SELECT f.rel_path,f.original_name FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE e.id=?1 AND e.kind='image' AND e.deleted_at IS NULL",[entry_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional().map_err(|e|e.to_string())?;
+        if let Some((relative, name)) = source {
+            inputs.push((
+                images::safe_join(base_dir, &relative)?,
+                None,
+                None,
+                Some(name),
+            ));
+        } else {
+            skipped += 1;
+        }
+    }
+    add_paths_internal(connection, base_dir, board_id, inputs, placement, skipped)
+}
+
 pub fn import_paths(
     connection: &mut Connection,
     base_dir: &Path,

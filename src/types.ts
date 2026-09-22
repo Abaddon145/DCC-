@@ -1,6 +1,7 @@
-export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite" | "rating";
-export type ViewMode = "library" | "projects" | "collections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
-export type ModuleId = "library" | "projects" | "collections" | "smartCollections" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
+export type MediaKind = "image" | "model" | "audio" | "video";
+export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ModuleId = ViewMode | "smartCollections";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -47,9 +48,6 @@ export interface SearchRequest {
   smartCollectionId?: string | null;
   projectId?: string | null;
   projectAssetStatus?: ProjectAssetStatus | null;
-  manualCollectionId?: string | null;
-  includeChildCollections?: boolean;
-  ratings?: number[];
   sort: SortMode;
   offset: number;
   limit: number;
@@ -137,7 +135,6 @@ export interface AssetCard {
   versions: string[];
   formats: string[];
   favorite: boolean;
-  rating?: number;
   updatedAt: string;
   lastViewedAt: string | null;
   coverImageId: string | null;
@@ -185,6 +182,7 @@ export interface AssetDetail extends AssetCard {
   extractionCode: string;
   images: AssetImage[];
   media?: AssetMedia[];
+  mediaLibrary?: LinkedMediaPreview[];
   createdAt: string;
   localizations: Partial<Record<ContentLanguage, LocalizedAssetText>>;
 }
@@ -217,7 +215,6 @@ export interface AssetInput {
   shareUrl: string;
   extractionCode: string;
   favorite: boolean;
-  rating?: number;
   images: ImageInput[];
   localizations: Partial<Record<ContentLanguage, LocalizedAssetText>>;
   contentLanguage: ContentLanguage;
@@ -259,8 +256,8 @@ export interface ImportReport {
 export interface ImportProgress { current: number; total: number; imported: number; skipped: number; failed: number; currentName: string; phase: string }
 export interface AssetSelection { ids: string[]; total: number }
 export interface DeleteRequest { assetIds: string[]; categoryId: string | null }
-export interface DeleteResult { batchId: string; label: string; assetCount: number; categoryCount: number }
-export interface TrashBatch { id: string; kind: "assets" | "category"; label: string; assetCount: number; categoryCount: number; createdAt: string }
+export interface DeleteResult { batchId: string; label: string; assetCount: number; categoryCount: number; mediaCount: number; mediaFolderCount: number }
+export interface TrashBatch { id: string; kind: "assets" | "category" | "media" | "mediaFolder"; label: string; assetCount: number; categoryCount: number; mediaCount: number; mediaFolderCount: number; createdAt: string }
 
 export interface LibraryLocation {
   path: string;
@@ -328,14 +325,10 @@ export interface BatchAssetUpdate {
   addTags: string[];
   removeTags: string[];
   favorite: boolean | null;
-  rating?: number | null;
   contentLanguage: ContentLanguage;
 }
 
 export interface BatchUpdateReport { requested: number; updated: number }
-export interface ManualCollectionInput { id?: string | null; parentId: string | null; name: string; description: string; coverAssetId: string | null }
-export interface ManualCollection extends ManualCollectionInput { id: string; coverImageId: string | null; sortOrder: number; directAssetCount: number; descendantAssetCount: number; createdAt: string; updatedAt: string }
-export interface CollectionMutationReport { affectedAssets: number }
 export interface AdvancedSearchError { message: string; position?: number }
 export interface MoveCategoryRequest { id: string; targetParentId: string | null; targetIndex: number }
 export interface MoveResult { moved: number; message: string; undoToken: string | null }
@@ -347,6 +340,17 @@ export interface HealthIssueRequest { issue: string; offset: number; limit: numb
 export interface LinkCheckResult { assetId: string; status: Exclude<LinkCheckStatus, "unknown">; checkedAt: string | null; message: string }
 export interface LinkCheckProgress { checked: number; total: number; valid: number; invalid: number; error: number; currentUrl: string | null }
 export interface LinkCheckReport { totalAssets: number; uniqueLinks: number; checkedAssets: number; valid: number; invalid: number; error: number; skipped: number; cancelled: boolean; stoppedReason: string | null }
+
+export interface MediaFolder { id: string; kind: MediaKind; parentId: string | null; name: string; sortOrder: number; entryCount: number }
+export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null }
+export interface MediaEntry { id: string; kind: MediaKind; folderId: string | null; name: string; description: string; author: string; sourceUrl: string; license: string; favorite: boolean; processingStatus: string; processingMessage: string; format: string; fileSize: number; tags: string[]; thumbnailFileId: string | null; primaryFileId: string; createdAt: string; updatedAt: string }
+export interface MediaEntryDetail extends MediaEntry { files: MediaFile[]; assetIds: string[]; projectIds: string[] }
+export interface LinkedMediaPreview { id: string; kind: MediaKind; name: string; originalName: string; logicalPath: string; primaryFileId: string; streamFileId: string; thumbnailFileId: string | null; processingStatus: string }
+export interface MediaSearchRequest { kind: MediaKind; query: string; folderId: string | null; includeChildFolders: boolean; tags: string[]; formats: string[]; favoriteOnly: boolean; sort: "updated" | "name" | "created" | "favorite"; offset: number; limit: number }
+export interface MediaImportRequest { kind: MediaKind; paths: string[]; folderId: string | null; tags: string[]; favorite: boolean }
+export interface MediaImportRow { path: string; status: "imported" | "duplicate" | "error"; message: string; entryId: string | null; duplicateEntryId: string | null }
+export interface MediaImportReport { imported: number; skipped: number; failed: number; rows: MediaImportRow[] }
+export interface MediaBatchUpdate { ids: string[]; folderId: string | null; clearFolder: boolean; addTags: string[]; removeTags: string[]; favorite: boolean | null }
 
 export interface TranslationSettings { provider: "baidu"; configured: boolean; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }

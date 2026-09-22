@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Box, Check, Heart, Star } from "lucide-react";
+import { Box, Check, Heart } from "lucide-react";
 import type { AssetCard, LibraryPreferences } from "../types";
 import type { LibraryDragPayload } from "../types";
 import { ImagePreview } from "./ImagePreview";
@@ -76,7 +76,6 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         {preferences?.cardFields.tags !== false && <span className="asset-list-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join("  ") || "—"}</span>}
         {preferences?.cardFields.linkStatus !== false && <span className={`asset-list-status ${item.hasShareLink === false ? "missing" : item.linkCheckStatus}`}>{item.hasShareLink === false ? "无链接" : item.linkCheckStatus === "invalid" ? "失效" : item.linkCheckStatus === "valid" ? "有效" : "未检查"}</span>}
         <button className={`list-favorite ${item.favorite ? "active" : ""}`} onClick={event => { event.stopPropagation(); onFavorite(item); }}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /></button>
-        <span className="asset-rating"><Star size={13} fill={(item.rating || 0) > 0 ? "currentColor" : "none"} />{item.rating || "—"}</span>
         <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
       </article>;
       return <article key={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
@@ -93,7 +92,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         <div className="card-body">
           <h3 title={item.name}><HighlightedText text={item.name} query={query} />{item.languageFallback && <small className="language-fallback" title={item.contentLanguage === "en" ? "暂无中文，显示英文" : "No English version"}>{item.contentLanguage === "en" ? "EN" : "中"}</small>}</h3>
           <div className="card-meta">{preferences?.cardFields.software !== false && <span>{item.dccTools[0] || "DCC"}</span>}{preferences?.cardFields.version !== false && item.versions[0] && <span>{item.versions[0]}</span>}{preferences?.cardFields.format !== false && item.formats[0] && <span>{item.formats[0]}</span>}</div>
-          <div className="card-bottom-row">{preferences?.cardFields.tags !== false && <div className="card-tags">{item.tags.slice(0, 3).map(tag => <span key={tag}>#{tag}</span>)}</div>}<span className="asset-rating"><Star size={13} fill={(item.rating || 0) > 0 ? "currentColor" : "none"} />{item.rating || "—"}</span></div>
+          <div className="card-bottom-row">{preferences?.cardFields.tags !== false && <div className="card-tags">{item.tags.slice(0, 3).map(tag => <span key={tag}>#{tag}</span>)}</div>}</div>
         </div>
       </article>; })}
     </div>;

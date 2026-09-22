@@ -15,7 +15,7 @@ const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", t
 
 const empty: AssetInput = {
   name: "", description: "", categoryId: null, tags: [], dccTools: ["Unreal Engine"], versions: [], formats: [],
-  sizeBytes: null, author: "", sourceUrl: "", fabListingId: null, autoCategoryPath: [], license: "", shareUrl: "", extractionCode: "", favorite: false, rating: 0, images: [],
+  sizeBytes: null, author: "", sourceUrl: "", fabListingId: null, autoCategoryPath: [], license: "", shareUrl: "", extractionCode: "", favorite: false, images: [],
   localizations: { "zh-CN": blankLocalized(), en: blankLocalized() }, contentLanguage: "zh-CN"
 };
 
@@ -26,7 +26,7 @@ function toInput(asset: AssetDetail | null, contentLanguage: ContentLanguage, in
     dccTools: asset.dccTools, versions: asset.versions, formats: asset.formats, sizeBytes: asset.sizeBytes,
     author: asset.author, sourceUrl: asset.sourceUrl, license: asset.license, shareUrl: asset.shareUrl,
     fabListingId: asset.fabListingId, autoCategoryPath: [],
-    extractionCode: asset.extractionCode, favorite: asset.favorite, rating: asset.rating || 0,
+    extractionCode: asset.extractionCode, favorite: asset.favorite,
     images: asset.images.map(image => ({ id: image.id, originalName: image.originalName, isCover: image.isCover, sortOrder: image.sortOrder })),
     localizations: { "zh-CN": asset.localizations["zh-CN"] || blankLocalized(), en: asset.localizations.en || blankLocalized() }, contentLanguage
   };
@@ -250,7 +250,6 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
         <label><span>提取码</span><input value={form.extractionCode} onChange={e => update("extractionCode", e.target.value.trim())} maxLength={32} /></label>
         <label className="checkbox-label"><input type="checkbox" checked={form.favorite} onChange={e => update("favorite", e.target.checked)} />加入收藏</label>
-        <label><span>评分</span><select value={form.rating || 0} onChange={e => update("rating", Number(e.target.value))}>{[0,1,2,3,4,5].map(value => <option key={value} value={value}>{value === 0 ? "未评分" : `${value} 星`}</option>)}</select></label>
         {warnings.map(warning => <div key={warning} className="form-warning wide">{warning}</div>)}
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>预览图片</h3><button type="button" className="secondary-button" onClick={chooseImages}><ImagePlus size={16} />选择图片</button></div>

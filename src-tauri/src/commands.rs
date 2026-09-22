@@ -1,7 +1,142 @@
 use crate::{
-    backup, collections, db, fab, images, importer, link_checker, media, models::*, organization,
+    backup, db, fab, images, importer, link_checker, media, media_library, models::*, organization,
     projects, reference_boards, state::AppState, translation,
 };
+
+#[tauri::command]
+pub fn search_media_entries(
+    state: State<AppState>,
+    request: MediaSearchRequest,
+) -> Result<Page<MediaEntry>, String> {
+    state.with_library(|connection, _| media_library::search(connection, &request))
+}
+#[tauri::command]
+pub fn get_media_entry(state: State<AppState>, id: String) -> Result<MediaEntryDetail, String> {
+    state.with_library(|connection, _| media_library::get(connection, &id))
+}
+#[tauri::command]
+pub fn import_media_entries(
+    app: AppHandle,
+    state: State<AppState>,
+    request: MediaImportRequest,
+) -> Result<MediaImportReport, String> {
+    let resources = app.path().resource_dir().ok();
+    state.with_library_mut(|connection, base| {
+        media_library::import(connection, base, resources.as_deref(), request)
+    })
+}
+#[tauri::command]
+pub fn collect_asset_previews_to_media(
+    app: AppHandle,
+    state: State<AppState>,
+    asset_id: String,
+) -> Result<MediaImportReport, String> {
+    let resources = app.path().resource_dir().ok();
+    state.with_library_mut(|c, base| {
+        media_library::collect_asset_previews(c, base, resources.as_deref(), &asset_id)
+    })
+}
+#[tauri::command]
+pub fn add_media_images_to_board(
+    state: State<AppState>,
+    board_id: String,
+    entry_ids: Vec<String>,
+    placement: ReferencePlacement,
+) -> Result<ReferenceImageAddReport, String> {
+    state.with_library_mut(|c, base| {
+        reference_boards::add_media_images(c, base, &board_id, &entry_ids, &placement)
+    })
+}
+#[tauri::command]
+pub fn update_media_entry(
+    state: State<AppState>,
+    id: String,
+    name: String,
+    description: String,
+    author: String,
+    source_url: String,
+    license: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    state.with_library(|c, _| {
+        media_library::update(c, &id, name, description, author, source_url, license, tags)
+    })
+}
+#[tauri::command]
+pub fn delete_media_entries(state: State<AppState>, ids: Vec<String>) -> Result<usize, String> {
+    state.with_library_mut(|c, _| media_library::delete_entries(c, ids))
+}
+#[tauri::command]
+pub fn batch_update_media_entries(
+    state: State<AppState>,
+    update: MediaBatchUpdate,
+) -> Result<BatchUpdateReport, String> {
+    state.with_library_mut(|c, _| media_library::batch_update(c, update))
+}
+#[tauri::command]
+pub fn list_media_folders(
+    state: State<AppState>,
+    kind: MediaKind,
+) -> Result<Vec<MediaFolder>, String> {
+    state.with_library(|c, _| media_library::list_folders(c, &kind))
+}
+#[tauri::command]
+pub fn upsert_media_folder(
+    state: State<AppState>,
+    kind: MediaKind,
+    id: Option<String>,
+    parent_id: Option<String>,
+    name: String,
+) -> Result<MediaFolder, String> {
+    state.with_library(|c, _| media_library::upsert_folder(c, kind, id, parent_id, name))
+}
+#[tauri::command]
+pub fn move_media_folder(
+    state: State<AppState>,
+    id: String,
+    target_parent_id: Option<String>,
+    target_index: usize,
+) -> Result<(), String> {
+    state.with_library_mut(|c, _| {
+        media_library::move_folder(c, &id, target_parent_id.as_deref(), target_index)
+    })
+}
+#[tauri::command]
+pub fn delete_media_folder(state: State<AppState>, id: String) -> Result<(), String> {
+    state.with_library_mut(|c, _| media_library::delete_folder(c, &id))
+}
+#[tauri::command]
+pub fn link_media_assets(
+    state: State<AppState>,
+    entry_ids: Vec<String>,
+    asset_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library(|c, _| media_library::link_assets(c, entry_ids, asset_ids, true))
+}
+#[tauri::command]
+pub fn unlink_media_assets(
+    state: State<AppState>,
+    entry_ids: Vec<String>,
+    asset_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library(|c, _| media_library::link_assets(c, entry_ids, asset_ids, false))
+}
+#[tauri::command]
+pub fn link_project_media(
+    state: State<AppState>,
+    entry_ids: Vec<String>,
+    project_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library(|c, _| media_library::link_projects(c, entry_ids, project_ids, true))
+}
+#[tauri::command]
+pub fn unlink_project_media(
+    state: State<AppState>,
+    entry_ids: Vec<String>,
+    project_ids: Vec<String>,
+) -> Result<usize, String> {
+    state.with_library(|c, _| media_library::link_projects(c, entry_ids, project_ids, false))
+}
 use arboard::Clipboard;
 use std::{collections::HashMap, path::PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -580,78 +715,6 @@ pub fn set_asset_cover_media(
 }
 
 #[tauri::command]
-pub fn list_manual_collections(state: State<AppState>) -> Result<Vec<ManualCollection>, String> {
-    state.with_library(|connection, _| collections::list(connection))
-}
-
-#[tauri::command]
-pub fn upsert_manual_collection(
-    state: State<AppState>,
-    input: ManualCollectionInput,
-) -> Result<ManualCollection, String> {
-    state.with_library_mut(|connection, _| collections::upsert(connection, input))
-}
-
-#[tauri::command]
-pub fn move_manual_collection(
-    state: State<AppState>,
-    id: String,
-    target_parent_id: Option<String>,
-    target_index: usize,
-) -> Result<(), String> {
-    state.with_library_mut(|connection, _| {
-        collections::move_collection(connection, &id, target_parent_id.as_deref(), target_index)
-    })
-}
-
-#[tauri::command]
-pub fn delete_manual_collection(state: State<AppState>, id: String) -> Result<(), String> {
-    state.with_library_mut(|connection, _| collections::delete(connection, &id))
-}
-
-#[tauri::command]
-pub fn add_collection_assets(
-    state: State<AppState>,
-    collection_id: String,
-    asset_ids: Vec<String>,
-) -> Result<CollectionMutationReport, String> {
-    state.with_library_mut(|connection, _| {
-        collections::add_assets(connection, &collection_id, asset_ids)
-    })
-}
-
-#[tauri::command]
-pub fn remove_collection_assets(
-    state: State<AppState>,
-    collection_id: String,
-    asset_ids: Vec<String>,
-) -> Result<CollectionMutationReport, String> {
-    state.with_library_mut(|connection, _| {
-        collections::remove_assets(connection, &collection_id, asset_ids)
-    })
-}
-
-#[tauri::command]
-pub fn reorder_collection_assets(
-    state: State<AppState>,
-    collection_id: String,
-    ids: Vec<String>,
-) -> Result<(), String> {
-    state.with_library_mut(|connection, _| {
-        collections::reorder_assets(connection, &collection_id, ids)
-    })
-}
-
-#[tauri::command]
-pub fn batch_set_asset_rating(
-    state: State<AppState>,
-    ids: Vec<String>,
-    rating: i64,
-) -> Result<BatchUpdateReport, String> {
-    state.with_library_mut(|connection, _| db::batch_set_rating(connection, ids, rating))
-}
-
-#[tauri::command]
 pub fn copy_extraction_code(state: State<AppState>, id: String) -> Result<(), String> {
     let (_, code) = state.with_library(|connection, _| db::share_info(connection, &id))?;
     if code.is_empty() {
@@ -900,7 +963,6 @@ pub async fn import_assets(
                 share_url: parsed_share.share_url,
                 extraction_code: parsed_share.extraction_code,
                 favorite: false,
-                rating: 0,
                 images,
                 localizations,
                 content_language: "en".into(),

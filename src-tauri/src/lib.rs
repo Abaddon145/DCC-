@@ -1,5 +1,4 @@
 mod backup;
-mod collections;
 mod commands;
 mod db;
 mod fab;
@@ -8,6 +7,7 @@ mod images;
 mod importer;
 mod link_checker;
 mod media;
+mod media_library;
 mod models;
 mod organization;
 mod projects;
@@ -38,7 +38,21 @@ pub fn run() {
                 .and_then(|value| value.to_str().ok());
             let state = context.app_handle().state::<AppState>();
             match state.with_library(|connection, base_dir| {
-                media::protocol_response(connection, base_dir, id, variant, range)
+                if id == "library" && variant == "file" {
+                    media_library::protocol_response(
+                        connection,
+                        base_dir,
+                        parts.next().unwrap_or_default(),
+                        range,
+                    )
+                } else if id == "library" && variant == "bundle" {
+                    let entry_id = parts.next().unwrap_or_default();
+                    let raw = parts.collect::<Vec<_>>().join("/");
+                    let logical = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy();
+                    media_library::bundle_response(connection, base_dir, entry_id, &logical, range)
+                } else {
+                    media::protocol_response(connection, base_dir, id, variant, range)
+                }
             }) {
                 Ok(response) => response,
                 Err(error) => tauri::http::Response::builder()
@@ -78,14 +92,22 @@ pub fn run() {
             retry_asset_media,
             reorder_asset_media,
             set_asset_cover_media,
-            list_manual_collections,
-            upsert_manual_collection,
-            move_manual_collection,
-            delete_manual_collection,
-            add_collection_assets,
-            remove_collection_assets,
-            reorder_collection_assets,
-            batch_set_asset_rating,
+            search_media_entries,
+            get_media_entry,
+            import_media_entries,
+            collect_asset_previews_to_media,
+            add_media_images_to_board,
+            update_media_entry,
+            delete_media_entries,
+            batch_update_media_entries,
+            list_media_folders,
+            upsert_media_folder,
+            move_media_folder,
+            delete_media_folder,
+            link_media_assets,
+            unlink_media_assets,
+            link_project_media,
+            unlink_project_media,
             copy_extraction_code,
             open_share_link,
             open_external_url,
