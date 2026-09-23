@@ -1088,7 +1088,7 @@ mod tests {
         let model = dir.path().join("mesh.obj");
         let audio = dir.path().join("sound.mp3");
         let video = dir.path().join("clip.mp4");
-        fs::write(&model, "v 0 0 0\\nv 1 0 0\\nv 0 1 0\\nf 1 2 3\\n").unwrap();
+        fs::write(&model, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
         fs::write(&audio, b"test mp3 payload").unwrap();
         fs::write(&video, b"test mp4 payload").unwrap();
 
