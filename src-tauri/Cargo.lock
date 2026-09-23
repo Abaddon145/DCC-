@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "dcc-asset-library"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "arboard",
  "base64 0.22.1",

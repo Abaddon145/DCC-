@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS projects (
   resolution_height INTEGER,
   frame_rate REAL,
   cover_asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+  cover_media_entry_id TEXT REFERENCES media_entries(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_opened_at TEXT,
@@ -217,6 +218,7 @@ CREATE TABLE IF NOT EXISTS project_units (
   resolution_width INTEGER,
   resolution_height INTEGER,
   frame_rate REAL,
+  video_media_entry_id TEXT REFERENCES media_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

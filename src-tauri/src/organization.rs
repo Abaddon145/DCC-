@@ -14,6 +14,13 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
     if !matches!(value.density.as_str(), "comfortable" | "compact") {
         value.density = "comfortable".into();
     }
+    if !value.font_scale.is_finite() {
+        value.font_scale = 1.0;
+    }
+    value.font_scale = value.font_scale.clamp(0.9, 1.25);
+    if !matches!(value.toolbar_density.as_str(), "comfortable" | "compact") {
+        value.toolbar_density = "comfortable".into();
+    }
     value.sidebar_width = value.sidebar_width.clamp(210, 360);
     value.detail_width = value.detail_width.clamp(340, 640);
     let defaults = default_shortcuts();
@@ -93,6 +100,12 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     }
     if !matches!(value.cover_fit.as_str(), "cover" | "contain") {
         value.cover_fit = "cover".into();
+    }
+    if !matches!(
+        value.cover_aspect_ratio.as_str(),
+        "standard" | "square" | "wide"
+    ) {
+        value.cover_aspect_ratio = "standard".into();
     }
     if !matches!(
         value.default_sort.as_str(),

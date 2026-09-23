@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Category, LibraryDragPayload, MoveCategoryRequest } from "../types";
 import type { BeginLibraryPointerDrag } from "../lib/drag";
 import { HoverDismissDetails } from "./HoverDismissDetails";
+import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 
 export type DropZone = "before" | "inside" | "after";
 
@@ -80,6 +81,7 @@ export function CategoryTree(props: Props) {
   const tree = useMemo(() => buildTree(props.categories), [props.categories]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
   const expandTimer = useRef<number | null>(null);
   const expandTarget = useRef<string | null>(null);
 
@@ -141,7 +143,7 @@ export function CategoryTree(props: Props) {
     const isCollapsed = collapsed.has(node.id);
     const selected = props.selected.includes(node.id);
     return <div key={node.id}>
-      <div data-category-drop-id={node.id} className={`category-row ${selected ? "selected" : ""} ${dropClasses(node.id)}`} style={{ paddingLeft: 10 + depth * 14 }} onPointerMove={event => updateDrop(event, node)} onPointerLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) { clearExpandTimer(); setDropTarget(current => current?.id === node.id ? null : current); } }}>
+      <div data-category-drop-id={node.id} className={`category-row ${selected ? "selected" : ""} ${dropClasses(node.id)}`} style={{ paddingLeft: 10 + depth * 14 }} onContextMenu={event => { event.preventDefault(); setContextMenu({ x:event.clientX, y:event.clientY, title:node.name, items:[{label:"打开分类",run:()=>props.onChange([node.id])},{label:"新建子分类",run:()=>props.onAdd(node.id)},{label:"重命名",run:()=>props.onRename(node)},{label:"移入回收站",danger:true,run:()=>props.onDelete(node)}] }); }} onPointerMove={event => updateDrop(event, node)} onPointerLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) { clearExpandTimer(); setDropTarget(current => current?.id === node.id ? null : current); } }}>
         <button className="tree-toggle" onClick={() => setCollapsed(previous => {
           const next = new Set(previous); next.has(node.id) ? next.delete(node.id) : next.add(node.id); return next;
         })}>{node.children.length ? (isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />) : <span />}</button>
@@ -166,10 +168,11 @@ export function CategoryTree(props: Props) {
   };
 
   return <nav className="category-tree">
-    <div data-category-drop-id="__root__" className={`category-row root ${props.selected.length === 0 ? "selected" : ""} ${dropClasses(null)}`} onPointerMove={event => updateDrop(event, null)} onPointerLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) setDropTarget(current => current?.id === null ? null : current); }}>
+    <div data-category-drop-id="__root__" className={`category-row root ${props.selected.length === 0 ? "selected" : ""} ${dropClasses(null)}`} onContextMenu={event => { event.preventDefault(); setContextMenu({x:event.clientX,y:event.clientY,title:"全部素材",items:[{label:"显示全部素材",run:()=>props.onChange([])},{label:"新建根分类",run:()=>props.onAdd(null)}]}); }} onPointerMove={event => updateDrop(event, null)} onPointerLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) setDropTarget(current => current?.id === null ? null : current); }}>
       <button className="category-main" onClick={() => props.onChange([])}><Layers3 size={16} /><span>全部素材</span><small>{props.total}</small></button>
       <button className="icon-button subtle" title="新建根分类" onClick={() => props.onAdd(null)}><FolderPlus size={15} /></button>
     </div>
     {tree.map(node => nodeView(node, 0))}
+    {contextMenu && <ContextMenu {...contextMenu} onClose={() => setContextMenu(null)} />}
   </nav>;
 }

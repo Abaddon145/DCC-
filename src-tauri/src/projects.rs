@@ -1,4 +1,4 @@
-use crate::models::*;
+use crate::{media_library, models::*};
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
 use std::{collections::HashSet, path::Path};
@@ -70,6 +70,8 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectSummary> {
         frame_rate: row.get(9)?,
         cover_asset_id: row.get(10)?,
         cover_image_id: row.get(11)?,
+        cover_media_entry_id: row.get(22)?,
+        cover_media_file_id: row.get(23)?,
         asset_count: row.get(12)?,
         unavailable_asset_count: row.get(13)?,
         task_count,
@@ -96,7 +98,9 @@ const SUMMARY_SELECT: &str = "SELECT p.id,p.name,p.description,p.project_type,p.
  (SELECT COUNT(*) FROM project_tasks pt WHERE pt.project_id=p.id AND pt.status='done'),
  (SELECT COUNT(*) FROM project_tasks pt WHERE pt.project_id=p.id AND pt.status='review'),
  (SELECT board_id FROM project_reference_boards prb WHERE prb.project_id=p.id AND prb.is_main=1 LIMIT 1),
- p.created_at,p.updated_at,p.last_opened_at,p.archived_at FROM projects p";
+ p.created_at,p.updated_at,p.last_opened_at,p.archived_at,p.cover_media_entry_id,
+ (SELECT COALESCE((SELECT mf.id FROM media_files mf WHERE mf.entry_id=p.cover_media_entry_id AND mf.role='thumbnail' LIMIT 1),me.primary_file_id) FROM media_entries me WHERE me.id=p.cover_media_entry_id AND me.deleted_at IS NULL)
+ FROM projects p";
 
 pub fn list_projects(
     connection: &Connection,
@@ -140,11 +144,18 @@ fn unit_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectUnit> {
         sort_order: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+        video_media_entry_id: row.get(14)?,
+        video_stream_file_id: row.get(15)?,
+        video_name: row.get(16)?,
     })
 }
 
 fn list_units(connection: &Connection, project_id: &str) -> Result<Vec<ProjectUnit>, String> {
-    let mut statement = connection.prepare("SELECT id,project_id,parent_id,kind,name,description,start_frame,end_frame,resolution_width,resolution_height,frame_rate,sort_order,created_at,updated_at FROM project_units WHERE project_id=?1 ORDER BY CASE kind WHEN 'scene' THEN 0 ELSE 1 END,sort_order,name").map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT u.id,u.project_id,u.parent_id,u.kind,u.name,u.description,u.start_frame,u.end_frame,u.resolution_width,u.resolution_height,u.frame_rate,u.sort_order,u.created_at,u.updated_at,
+      CASE WHEN me.deleted_at IS NULL THEN u.video_media_entry_id ELSE NULL END,
+      CASE WHEN me.deleted_at IS NULL THEN COALESCE((SELECT f.id FROM media_files f WHERE f.entry_id=me.id AND f.role='proxy' LIMIT 1),me.primary_file_id) ELSE NULL END,
+      CASE WHEN me.deleted_at IS NULL THEN me.name ELSE NULL END
+      FROM project_units u LEFT JOIN media_entries me ON me.id=u.video_media_entry_id WHERE u.project_id=?1 ORDER BY CASE u.kind WHEN 'scene' THEN 0 ELSE 1 END,u.sort_order,u.name").map_err(|e| e.to_string())?;
     let values = statement
         .query_map([project_id], unit_from_row)
         .map_err(|e| e.to_string())?
@@ -271,6 +282,21 @@ fn list_paths(
     Ok(values)
 }
 
+fn list_project_media(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<MediaEntry>, String> {
+    let mut statement = connection.prepare("SELECT pme.entry_id FROM project_media_entries pme JOIN media_entries me ON me.id=pme.entry_id WHERE pme.project_id=?1 AND me.deleted_at IS NULL ORDER BY pme.created_at DESC").map_err(|e| e.to_string())?;
+    let ids = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    ids.iter()
+        .map(|id| media_library::get(connection, id).map(|detail| detail.entry))
+        .collect()
+}
+
 pub fn get_project(
     connection: &Connection,
     id: &str,
@@ -290,6 +316,7 @@ pub fn get_project(
         units: list_units(connection, id)?,
         tasks: list_tasks(connection, id)?,
         assets: list_assets(connection, id, language)?,
+        media: list_project_media(connection, id)?,
         boards: list_boards(connection, id)?,
         paths: list_paths(connection, id)?,
     })
@@ -313,6 +340,15 @@ pub fn upsert_project(
             return Err("封面素材不存在".into());
         }
     }
+    if input.cover_asset_id.is_some() && input.cover_media_entry_id.is_some() {
+        return Err("项目封面只能选择一种来源".into());
+    }
+    if let Some(cover) = input.cover_media_entry_id.as_deref() {
+        let valid = connection.query_row("SELECT EXISTS(SELECT 1 FROM media_entries WHERE id=?1 AND kind='image' AND deleted_at IS NULL)", [cover], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())? != 0;
+        if !valid {
+            return Err("项目封面图片不存在".into());
+        }
+    }
     let id = input
         .id
         .clone()
@@ -323,9 +359,12 @@ pub fn upsert_project(
     } else {
         None
     };
-    connection.execute("INSERT INTO projects(id,name,description,project_type,status,target_tools_json,versions_json,resolution_width,resolution_height,frame_rate,cover_asset_id,created_at,updated_at,archived_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12,?13)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,project_type=excluded.project_type,status=excluded.status,target_tools_json=excluded.target_tools_json,versions_json=excluded.versions_json,resolution_width=excluded.resolution_width,resolution_height=excluded.resolution_height,frame_rate=excluded.frame_rate,cover_asset_id=excluded.cover_asset_id,updated_at=excluded.updated_at,archived_at=CASE WHEN excluded.status='archived' THEN COALESCE(projects.archived_at,excluded.archived_at) ELSE NULL END",
-      params![id,input.name.trim(),input.description.trim(),input.project_type,input.status,json_text(&input.target_tools),json_text(&input.versions),input.resolution_width,input.resolution_height,input.frame_rate,input.cover_asset_id,timestamp,archived_at]).map_err(|e| format!("保存项目失败：{e}"))?;
+    connection.execute("INSERT INTO projects(id,name,description,project_type,status,target_tools_json,versions_json,resolution_width,resolution_height,frame_rate,cover_asset_id,cover_media_entry_id,created_at,updated_at,archived_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13,?14)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,project_type=excluded.project_type,status=excluded.status,target_tools_json=excluded.target_tools_json,versions_json=excluded.versions_json,resolution_width=excluded.resolution_width,resolution_height=excluded.resolution_height,frame_rate=excluded.frame_rate,cover_asset_id=excluded.cover_asset_id,cover_media_entry_id=excluded.cover_media_entry_id,updated_at=excluded.updated_at,archived_at=CASE WHEN excluded.status='archived' THEN COALESCE(projects.archived_at,excluded.archived_at) ELSE NULL END",
+      params![id,input.name.trim(),input.description.trim(),input.project_type,input.status,json_text(&input.target_tools),json_text(&input.versions),input.resolution_width,input.resolution_height,input.frame_rate,input.cover_asset_id,input.cover_media_entry_id,timestamp,archived_at]).map_err(|e| format!("保存项目失败：{e}"))?;
+    if let Some(cover) = input.cover_media_entry_id.as_deref() {
+        connection.execute("INSERT OR IGNORE INTO project_media_entries(project_id,entry_id,created_at) VALUES(?1,?2,?3)", params![id,cover,timestamp]).map_err(|e| e.to_string())?;
+    }
     get_project(connection, &id, "zh-CN", false)
 }
 
@@ -558,7 +597,43 @@ pub fn upsert_project_unit(
     connection.execute("INSERT INTO project_units(id,project_id,parent_id,kind,name,description,start_frame,end_frame,resolution_width,resolution_height,frame_rate,sort_order,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)
       ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,kind=excluded.kind,name=excluded.name,description=excluded.description,start_frame=excluded.start_frame,end_frame=excluded.end_frame,resolution_width=excluded.resolution_width,resolution_height=excluded.resolution_height,frame_rate=excluded.frame_rate,sort_order=excluded.sort_order,updated_at=excluded.updated_at",
       params![id,input.project_id,input.parent_id,input.kind,input.name.trim(),input.description.trim(),input.start_frame,input.end_frame,input.resolution_width,input.resolution_height,input.frame_rate,sort_order,timestamp]).map_err(|e| e.to_string())?;
-    connection.query_row("SELECT id,project_id,parent_id,kind,name,description,start_frame,end_frame,resolution_width,resolution_height,frame_rate,sort_order,created_at,updated_at FROM project_units WHERE id=?1", [&id], unit_from_row).map_err(|e| e.to_string())
+    list_units(connection, &input.project_id)?
+        .into_iter()
+        .find(|unit| unit.id == id)
+        .ok_or("场景或镜头不存在".into())
+}
+
+pub fn set_project_shot_video(
+    connection: &mut Connection,
+    shot_id: &str,
+    entry_id: Option<&str>,
+) -> Result<(), String> {
+    let project_id: String = connection
+        .query_row(
+            "SELECT project_id FROM project_units WHERE id=?1 AND kind='shot'",
+            [shot_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("镜头不存在")?;
+    if let Some(id) = entry_id {
+        let valid = connection.query_row("SELECT EXISTS(SELECT 1 FROM media_entries WHERE id=?1 AND kind='video' AND deleted_at IS NULL)", [id], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())? != 0;
+        if !valid {
+            return Err("视频库条目不存在或不是视频".into());
+        }
+    }
+    let transaction = connection.transaction().map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "UPDATE project_units SET video_media_entry_id=?1,updated_at=?2 WHERE id=?3",
+            params![entry_id, now(), shot_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some(id) = entry_id {
+        transaction.execute("INSERT OR IGNORE INTO project_media_entries(project_id,entry_id,created_at) VALUES(?1,?2,?3)", params![project_id,id,now()]).map_err(|e| e.to_string())?;
+    }
+    transaction.commit().map_err(|e| e.to_string())
 }
 
 pub fn delete_project_unit(connection: &Connection, id: &str) -> Result<(i64, i64), String> {
@@ -965,7 +1040,73 @@ mod tests {
             resolution_height: Some(1080),
             frame_rate: Some(24.0),
             cover_asset_id: None,
+            cover_media_entry_id: None,
         }
+    }
+
+    fn insert_test_media(connection: &Connection, id: &str, kind: &str, extension: &str) {
+        let file_id = format!("file-{id}");
+        connection.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,?2,?3,?4,'now','now')", params![id,kind,id,file_id]).unwrap();
+        connection.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,mime_type,created_at) VALUES(?1,?2,'main',?3,?3,?4,'application/octet-stream','now')", params![file_id,id,format!("{id}.{extension}"),format!("media-library/{kind}/{id}/originals/{id}.{extension}")]).unwrap();
+    }
+
+    #[test]
+    fn project_cover_and_shot_video_use_independent_media_library_entries() {
+        let dir = tempdir().unwrap();
+        let mut connection = db::open_database(&dir.path().join("library.sqlite3")).unwrap();
+        insert_test_media(&connection, "cover-image", "image", "png");
+        insert_test_media(&connection, "shot-video", "video", "mp4");
+        insert_test_media(&connection, "another-video", "video", "webm");
+        let mut input = project();
+        input.cover_media_entry_id = Some("cover-image".into());
+        let saved = upsert_project(&mut connection, input).unwrap();
+        assert_eq!(
+            saved.summary.cover_media_entry_id.as_deref(),
+            Some("cover-image")
+        );
+        assert_eq!(
+            saved.summary.cover_media_file_id.as_deref(),
+            Some("file-cover-image")
+        );
+        assert_eq!(saved.media.len(), 1);
+        let project_id = saved.summary.id;
+        connection.execute("INSERT INTO project_units(id,project_id,kind,name,created_at,updated_at) VALUES('shot-1',?1,'shot','SH010','now','now')", [&project_id]).unwrap();
+        assert!(set_project_shot_video(&mut connection, "shot-1", Some("cover-image")).is_err());
+        set_project_shot_video(&mut connection, "shot-1", Some("shot-video")).unwrap();
+        let linked = get_project(&connection, &project_id, "zh-CN", false).unwrap();
+        assert_eq!(
+            linked.units[0].video_media_entry_id.as_deref(),
+            Some("shot-video")
+        );
+        assert_eq!(
+            linked.units[0].video_stream_file_id.as_deref(),
+            Some("file-shot-video")
+        );
+        assert_eq!(linked.media.len(), 2);
+        set_project_shot_video(&mut connection, "shot-1", Some("another-video")).unwrap();
+        assert_eq!(
+            get_project(&connection, &project_id, "zh-CN", false)
+                .unwrap()
+                .units[0]
+                .video_media_entry_id
+                .as_deref(),
+            Some("another-video")
+        );
+        set_project_shot_video(&mut connection, "shot-1", None).unwrap();
+        assert_eq!(
+            get_project(&connection, &project_id, "zh-CN", false)
+                .unwrap()
+                .units[0]
+                .video_media_entry_id,
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM media_entries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
     }
 
     #[test]

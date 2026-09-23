@@ -472,22 +472,61 @@ fn html_to_text(html: &str) -> String {
     if html.is_empty() {
         return String::new();
     }
-    let breaks = Regex::new(r"(?i)</?(p|div|li|br|h[1-6])[^>]*>").expect("valid regex");
+    // Fab descriptions contain useful external references in anchor hrefs. Keep the
+    // URL alongside its label before stripping markup, but never surface script links.
+    let anchors = Regex::new(
+        r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>(.*?)</a>"#,
+    )
+    .expect("valid regex");
     let tags = Regex::new(r"(?s)<[^>]*>").expect("valid regex");
-    let spaced = breaks.replace_all(html, "\n");
+    let with_links = anchors.replace_all(html, |captures: &regex::Captures<'_>| {
+        let raw_url = captures
+            .get(1)
+            .or_else(|| captures.get(2))
+            .or_else(|| captures.get(3))
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let url = decode_html_entities(raw_url);
+        let label = decode_html_entities(
+            tags.replace_all(captures.get(4).map_or("", |value| value.as_str()), "")
+                .trim(),
+        );
+        let resolved = Url::parse(&url).or_else(|_| {
+            Url::parse("https://www.fab.com/")
+                .expect("fixed Fab base URL")
+                .join(&url)
+        });
+        match resolved {
+            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                let target = parsed.to_string();
+                if label.is_empty() || label == target {
+                    target
+                } else {
+                    format!("{label} ({target})")
+                }
+            }
+            _ => label,
+        }
+    });
+    let breaks = Regex::new(r"(?i)</?(p|div|li|br|h[1-6])[^>]*>").expect("valid regex");
+    let spaced = breaks.replace_all(&with_links, "\n");
     let plain = tags.replace_all(&spaced, "");
-    plain
+    decode_html_entities(&plain)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]
@@ -535,6 +574,17 @@ mod tests {
         assert_eq!(metadata.formats, vec!["uasset", "uproject"]);
         assert_eq!(metadata.license, "Fab Standard License");
         assert_eq!(metadata.description, "84 HQ meshes\nNanite ready");
+    }
+
+    #[test]
+    fn retains_safe_links_embedded_in_fab_descriptions() {
+        let text = html_to_text(
+            r#"<p>Guide: <a href="https://example.com/watch?v=1&amp;lang=en">Watch tutorial</a></p><p><a href='http://example.com/docs'>http://example.com/docs</a> <a href="/listings/example">Fab reference</a> <a href="javascript:alert(1)">unsafe label</a></p>"#,
+        );
+        assert_eq!(
+            text,
+            "Guide: Watch tutorial (https://example.com/watch?v=1&lang=en)\nhttp://example.com/docs Fab reference (https://www.fab.com/listings/example) unsafe label"
+        );
     }
 
     #[test]

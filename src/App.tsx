@@ -26,6 +26,7 @@ import { ProjectPicker } from "./components/ProjectPicker";
 import { MediaLibraryView } from "./components/MediaLibraryView";
 import { ResizableContextPane } from "./components/ResizableContextPane";
 import { SearchHelpPopover } from "./components/SearchHelpPopover";
+import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, moduleRegistry, shortcutMatches } from "./lib/personalization";
 
 const emptyMeta: LibraryMeta = { categories: [], filters: { tags: [], dccTools: [], versions: [], formats: [], licenses: [] }, totalAssets: 0 };
@@ -74,6 +75,7 @@ export default function App() {
   const [sourceSmartId, setSourceSmartId] = useState<string | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [selectingAll, setSelectingAll] = useState(false);
+  const [assetContextMenu, setAssetContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestVersion = useRef(0);
@@ -384,6 +386,22 @@ export default function App() {
       notify(`已更新 ${report.updated} 项素材`); setSelectedIds(new Set()); await refreshAll(); if (view === "health") refreshHealth();
     } catch (error) { notify(String(error), true); throw error; }
   };
+  const openAssetContextMenu = (item: AssetCard, x: number, y: number) => {
+    const ids = selectedIds.has(item.id) ? [...selectedIds] : [item.id];
+    const single = ids.length === 1;
+    const title = single ? item.name : `${ids.length} 项已选素材`;
+    const menuItems: ContextMenuItem[] = [
+      { label: "打开详情", disabled: !single, run: () => void selectAsset(item.id) },
+      { label: "编辑基本信息", disabled: !single, run: () => { void api.getAsset(item.id, contentLanguage).then(value => { setSelectedId(item.id); setDetail(value); setEditor("edit"); }).catch(error => notify(String(error), true)); } },
+      { label: single && item.favorite ? "取消收藏" : `收藏${single ? "" : ` ${ids.length} 项`}`, run: () => { void (async () => { try { for (let start = 0; start < ids.length; start += 5000) await api.batchUpdate({ ids: ids.slice(start, start + 5000), categoryId: null, clearCategory: false, addTags: [], removeTags: [], favorite: single ? !item.favorite : true, contentLanguage }); await refreshAll(); } catch (error) { notify(String(error), true); } })(); } },
+      { label: `加入项目${single ? "" : `（${ids.length} 项）`}`, run: () => setProjectPicker(ids) },
+      { label: "加入参考板", run: () => { void api.prepareReferenceCoverIds(ids).then(imageIds => imageIds.length ? setReferencePicker({ imageIds, title }) : notify("所选素材没有可用预览图", true)).catch(error => notify(String(error), true)); } },
+      { label: "在批量栏中移动分类…", run: () => { setSelectionMode(true); setSelectedIds(new Set(ids)); } },
+      { label: "打开百度网盘", disabled: !single || !item.hasShareLink, run: () => { void api.openShare(item.id).catch(error => notify(String(error), true)); } },
+      { label: `移入回收站${single ? "" : `（${ids.length} 项）`}`, danger: true, run: () => { void deleteLibraryItems({ assetIds: ids, categoryId: null }); } },
+    ];
+    setAssetContextMenu({ x, y, title, items: menuItems });
+  };
   const addSelectionToReference = async () => {
     if (!selectedIds.size) return;
     try {
@@ -415,7 +433,7 @@ export default function App() {
     if (!selectedId || editor) return;
     const closeOnOutside = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (!target || target.closest(".detail-panel,.asset-card,.asset-list-item,.modal-backdrop,.reference-portal-menu,.popover-dismiss-layer")) return;
+      if (!target || target.closest(".detail-panel,.asset-card,.asset-list-item,.modal-backdrop,.reference-portal-menu,.popover-dismiss-layer,.app-context-menu")) return;
       setSelectedId(null); setDetail(null);
       window.requestAnimationFrame(() => detailReturnFocus.current?.focus());
     };
@@ -543,7 +561,11 @@ export default function App() {
       projects: { label: "创作项目", icon: BriefcaseBusiness, target: "projects" }, reference: { label: "参考板", icon: Grid3X3, target: "reference" }, tagManager: { label: "标签管理", icon: Tags, target: "tagManager" }, health: { label: "素材库检查", icon: ShieldCheck, target: "health" }, trash: { label: "回收站", icon: Trash2, target: "trash" },
     };
     const item = values[id]; if (!item) return null; const Icon = item.icon;
-    return <button key={id} className={`${view === item.target && !(id === "library" && activeSmartId) ? "active" : ""} ${nested ? "nested" : ""}`} onClick={() => changeView(item.target)}><Icon size={17} />{item.label}</button>;
+    const hasContextPane = ["library", "imageLibrary", "modelLibrary", "audioLibrary", "videoLibrary"].includes(id);
+    return <button key={id} className={`${view === item.target && !(id === "library" && activeSmartId) ? "active" : ""} ${nested ? "nested" : ""}`} onClick={() => {
+      if (hasContextPane && view === item.target && !activeSmartId) setContextPaneCollapsed(id, !personalization.library.collapsedContextPanes.includes(id));
+      else changeView(item.target);
+    }} title={hasContextPane && view === item.target ? "再次点击可展开或收起导航" : undefined}><Icon size={17} />{item.label}</button>;
   };
 
   return <div className="app-shell">
@@ -558,7 +580,7 @@ export default function App() {
     </aside>
 
     <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}>
-      {mediaKind ? <MediaLibraryView kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <div className="asset-workspace-layout">
+      {mediaKind ? <MediaLibraryView kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} onEditAsset={id=>{changeView("library");void api.getAsset(id,contentLanguage).then(asset=>{setSelectedId(id);setDetail(asset);setEditor("edit")}).catch(error=>notify(String(error),true))}} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <div className="asset-workspace-layout">
       <ResizableContextPane ariaLabel="素材分类" className="asset-context-pane" width={personalization.library.contextPaneWidths.library || 248} defaultWidth={248} collapsed={personalization.library.collapsedContextPanes.includes("library")} onResizeEnd={width => setContextPaneWidth("library", width)} onCollapsedChange={collapsed => setContextPaneCollapsed("library", collapsed)}>
         <div className="asset-context-heading"><strong>素材导航</strong><span>{meta.totalAssets.toLocaleString("zh-CN")} 项</span></div>
         <div className="asset-context-shortcuts">{enabledIds.has("favorites") && <button className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={15} />我的收藏</button>}{enabledIds.has("recent") && <button className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={15} />最近查看</button>}</div>
@@ -571,7 +593,7 @@ export default function App() {
       {view === "health" && <HealthPanel summary={health} activeIssue={request.healthIssue || null} loading={healthLoading} linkCheckRunning={linkCheckRunning} linkProgress={linkProgress} onSelect={issue => patchRequest({ healthIssue: issue })} onRefresh={refreshHealth} onCheckLinks={() => void checkAllLinks()} onCancelLinkCheck={() => void cancelLinkCheck()} />}
       <FilterBar request={request} options={meta.filters} onChange={patchRequest} />
       {selectionMode && <BatchToolbar count={selectedIds.size} totalCount={total} selectingAll={selectingAll} categories={meta.categories} onSelectAll={() => void selectAllResults()} onClear={() => setSelectedIds(new Set())} onExit={() => { setSelectionMode(false); setSelectedIds(new Set()); }} onAddToReference={() => void addSelectionToReference()} onAddToProject={() => selectedIds.size && setProjectPicker([...selectedIds])} onApply={applyBatch} />}
-      <div className="grid-scroll" ref={scrollRef}><AssetGrid items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
+      <div className="grid-scroll" ref={scrollRef}><AssetGrid items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onContextMenu={openAssetContextMenu} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
       </section></div>}
     </main>
 
@@ -584,6 +606,7 @@ export default function App() {
     {projectPicker && <ProjectPicker assetIds={projectPicker} onClose={() => setProjectPicker(null)} onAdded={() => setProjectRefreshKey(value => value + 1)} notify={notify} />}
     {activeDrag && dragPoint && <div className="library-drag-preview active" style={{ left: dragPoint.x + 14, top: dragPoint.y + 14 }}>{dragPreviewText(activeDrag)}</div>}
     {showCommandPalette && <CommandPalette commands={paletteCommands} onClose={() => setShowCommandPalette(false)} />}
+    {assetContextMenu && <ContextMenu {...assetContextMenu} onClose={() => setAssetContextMenu(null)} />}
     <div className="toast-stack">{toasts.map(toast => <div key={toast.id} className={`toast ${toast.error ? "error" : ""}`}><span>{toast.message}</span>{toast.action && <button onClick={() => { setToasts(previous => previous.filter(item => item.id !== toast.id)); void toast.action?.(); }}>{toast.actionLabel}</button>}</div>)}</div>
   </div>;
 }
