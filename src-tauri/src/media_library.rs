@@ -1080,4 +1080,57 @@ mod tests {
         crate::db::restore_trash_batch(&mut db, &trash.items[0].id).unwrap();
         assert_eq!(get(&db, &entry).unwrap().entry.id, entry);
     }
+
+    #[test]
+    fn imports_model_audio_and_video_without_terminating_the_library() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let model = dir.path().join("mesh.obj");
+        let audio = dir.path().join("sound.mp3");
+        let video = dir.path().join("clip.mp4");
+        fs::write(&model, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        fs::write(&audio, b"test mp3 payload").unwrap();
+        fs::write(&video, b"test mp4 payload").unwrap();
+
+        for (kind, source) in [
+            (MediaKind::Model, model),
+            (MediaKind::Audio, audio),
+            (MediaKind::Video, video),
+        ] {
+            let report = import(
+                &mut db,
+                dir.path(),
+                None,
+                MediaImportRequest {
+                    kind: kind.clone(),
+                    paths: vec![source.to_string_lossy().into_owned()],
+                    folder_id: None,
+                    tags: vec![],
+                    favorite: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(report.imported, 1, "{kind:?} import failed");
+            assert_eq!(
+                search(
+                    &db,
+                    &MediaSearchRequest {
+                        kind,
+                        query: String::new(),
+                        folder_id: None,
+                        include_child_folders: true,
+                        tags: vec![],
+                        formats: vec![],
+                        favorite_only: false,
+                        sort: "updated".into(),
+                        offset: 0,
+                        limit: 80,
+                    },
+                )
+                .unwrap()
+                .total,
+                1
+            );
+        }
+    }
 }
