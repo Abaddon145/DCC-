@@ -11,6 +11,13 @@ pub fn search_media_entries(
     state.with_library(|connection, _| media_library::search(connection, &request))
 }
 #[tauri::command]
+pub fn select_media_entry_ids(
+    state: State<AppState>,
+    request: MediaSearchRequest,
+) -> Result<Vec<String>, String> {
+    state.with_library(|connection, _| media_library::select_ids(connection, &request))
+}
+#[tauri::command]
 pub fn get_media_entry(state: State<AppState>, id: String) -> Result<MediaEntryDetail, String> {
     state.with_library(|connection, _| media_library::get(connection, &id))
 }
@@ -223,6 +230,17 @@ pub fn upsert_project_unit(
     input: ProjectUnitInput,
 ) -> Result<ProjectUnit, String> {
     state.with_library(|connection, _| projects::upsert_project_unit(connection, input))
+}
+
+#[tauri::command]
+pub fn set_project_shot_video(
+    state: State<AppState>,
+    shot_id: String,
+    entry_id: Option<String>,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::set_project_shot_video(connection, &shot_id, entry_id.as_deref())
+    })
 }
 
 #[tauri::command]

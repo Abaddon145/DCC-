@@ -33,14 +33,14 @@ export const commandRegistry: Array<{ id: CommandId; label: string; keywords: st
 ];
 
 export const defaultGlobalPreferences: GlobalPreferences = {
-  theme: "graphite", accentColor: "#D99A42", density: "comfortable", reduceMotion: false,
+  theme: "graphite", accentColor: "#D99A42", density: "comfortable", fontScale: 1, toolbarDensity: "comfortable", reduceMotion: false,
   sidebarWidth: 248, detailWidth: 420,
   shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete" },
 };
 
 export const defaultLibraryPreferences: LibraryPreferences = {
   moduleOrder: moduleRegistry.map(module => module.id), disabledModules: [], startupModule: "library", rememberLastContext: false,
-  assetView: "grid", cardSize: "medium", coverFit: "cover",
+  assetView: "grid", cardSize: "medium", coverFit: "cover", coverAspectRatio: "standard",
   cardFields: { category: true, tags: true, software: true, version: true, format: true, linkStatus: true },
   defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null,
   contextPaneWidths: { library: 248, imageLibrary: 220, modelLibrary: 260, audioLibrary: 220, videoLibrary: 220 },
@@ -59,6 +59,7 @@ export function applyGlobalPreferences(preferences: GlobalPreferences) {
   const root = document.documentElement;
   root.dataset.theme = preferences.theme;
   root.dataset.density = preferences.density;
+  root.dataset.toolbarDensity = preferences.toolbarDensity;
   root.dataset.reduceMotion = String(preferences.reduceMotion);
   root.style.setProperty("--accent", preferences.accentColor);
   root.style.setProperty("--accent-bright", preferences.accentColor);
@@ -66,6 +67,7 @@ export function applyGlobalPreferences(preferences: GlobalPreferences) {
   root.style.setProperty("--accent-text", textColorFor(preferences.accentColor));
   root.style.setProperty("--sidebar-width", `${preferences.sidebarWidth}px`);
   root.style.setProperty("--detail-width", `${preferences.detailWidth}px`);
+  root.style.setProperty("--font-scale", String(preferences.fontScale));
 }
 
 export function normalizeShortcut(event: KeyboardEvent) {
