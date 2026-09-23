@@ -53,7 +53,10 @@ fn validate_kind_path(kind: &MediaKind, path: &Path) -> Result<(String, String),
 fn digest(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("读取文件失败：{e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // This runs inside Tauri's WebView callback on Windows. A 1 MiB stack array here
+    // exhausted the already-deep WebView2 callback stack before the import could copy
+    // any file. Keep the I/O buffer on the heap and deliberately modest in size.
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -1132,5 +1135,19 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn checksum_runs_on_a_small_callback_stack() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("payload.bin");
+        fs::write(&source, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+        let worker = std::thread::Builder::new()
+            .name("webview-callback-sized-stack".into())
+            .stack_size(256 * 1024)
+            .spawn(move || digest(&source))
+            .unwrap();
+        let checksum = worker.join().unwrap().unwrap();
+        assert_eq!(checksum.len(), 64);
     }
 }
