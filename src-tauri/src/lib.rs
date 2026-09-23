@@ -20,6 +20,20 @@ use commands::*;
 use state::AppState;
 use tauri::Manager;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainWindowAction {
+    Ignore,
+    ExitApplication,
+}
+
+fn main_window_action(label: &str, close_requested: bool) -> MainWindowAction {
+    if label == "main" && close_requested {
+        MainWindowAction::ExitApplication
+    } else {
+        MainWindowAction::Ignore
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if let Ok(entry) = keyring::Entry::new("DCCAssetLibrary.BaiduNetdisk", "default") {
@@ -65,7 +79,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+            // Calling `AppHandle::exit` from `Destroyed` re-enters window destruction on
+            // Windows. That recursion terminates the process with 0xc00000fd (stack overflow).
+            if main_window_action(
+                window.label(),
+                matches!(event, tauri::WindowEvent::CloseRequested { .. }),
+            ) == MainWindowAction::ExitApplication
+            {
                 window.app_handle().exit(0);
             }
         })
@@ -206,4 +226,22 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{main_window_action, MainWindowAction};
+
+    #[test]
+    fn destroyed_main_window_does_not_request_exit_again() {
+        assert_eq!(main_window_action("main", false), MainWindowAction::Ignore);
+        assert_eq!(
+            main_window_action("main", true),
+            MainWindowAction::ExitApplication
+        );
+        assert_eq!(
+            main_window_action("reference-board", true),
+            MainWindowAction::Ignore
+        );
+    }
 }
