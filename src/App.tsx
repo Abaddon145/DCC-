@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { ArchiveRestore, AudioLines, BriefcaseBusiness, Box, Clock3, DatabaseBackup, Download, Film, Grid3X3, Heart, Image, Library, ListChecks, Plus, Search, Settings, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from "lucide-react";
+import { ArchiveRestore, AudioLines, BriefcaseBusiness, Box, ChevronDown, ChevronRight, Clock3, DatabaseBackup, Download, Film, FolderTree, Grid3X3, Heart, Image, Library, ListChecks, PanelLeftOpen, Plus, Search, Settings, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from "lucide-react";
 import { api } from "./lib/api";
 import type { AssetCard, AssetDetail, AssetInput, BatchAssetUpdate, ContentLanguage, DeleteRequest, HealthSummary, LibraryDragPayload, LibraryMeta, LinkCheckProgress, MediaKind, MoveCategoryRequest, MoveResult, ParsedShareText, PersonalizationState, SearchRequest, SmartCollection, SmartCollectionInput, SmartCollectionRule, ViewMode } from "./types";
 import { CategoryTree, categoryDropZone, categoryMoveRequest } from "./components/CategoryTree";
@@ -24,7 +24,9 @@ import { TrashPanel } from "./components/TrashPanel";
 import { ProjectHub } from "./components/ProjectHub";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { MediaLibraryView } from "./components/MediaLibraryView";
-import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, shortcutMatches } from "./lib/personalization";
+import { ResizableContextPane } from "./components/ResizableContextPane";
+import { SearchHelpPopover } from "./components/SearchHelpPopover";
+import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, moduleRegistry, shortcutMatches } from "./lib/personalization";
 
 const emptyMeta: LibraryMeta = { categories: [], filters: { tags: [], dccTools: [], versions: [], formats: [], licenses: [] }, totalAssets: 0 };
 const initialRequest: SearchRequest = {
@@ -77,12 +79,32 @@ export default function App() {
   const requestVersion = useRef(0);
   const moveBusy = useRef(false);
   const pointerDragCleanup = useRef<(() => void) | null>(null);
+  const detailReturnFocus = useRef<HTMLElement | null>(null);
 
   const notify = useCallback((message: string, error = false, action?: { label: string; run: () => Promise<void> }, kind?: "move" | "delete") => {
     const id = Date.now() + Math.random();
     setToasts(previous => [...(kind ? previous.filter(item => item.kind !== kind) : previous), { id, message, error, kind, actionLabel: action?.label, action: action?.run }]);
     window.setTimeout(() => setToasts(previous => previous.filter(item => item.id !== id)), kind ? 8000 : 3500);
   }, []);
+
+  const updateLibraryUi = useCallback((updater: (current: PersonalizationState["library"]) => PersonalizationState["library"]) => {
+    setPersonalization(previous => {
+      const library = updater(previous.library);
+      if (library === previous.library) return previous;
+      void api.saveLibraryPreferences(library).catch(error => notify(`界面设置保存失败：${String(error)}`, true));
+      return { ...previous, library };
+    });
+  }, [notify]);
+
+  const setContextPaneCollapsed = useCallback((id: string, collapsed: boolean) => {
+    updateLibraryUi(current => ({ ...current, collapsedContextPanes: collapsed ? [...new Set([...current.collapsedContextPanes, id])] : current.collapsedContextPanes.filter(value => value !== id) }));
+  }, [updateLibraryUi]);
+  const setContextPaneWidth = useCallback((id: string, width: number) => {
+    updateLibraryUi(current => ({ ...current, contextPaneWidths: { ...current.contextPaneWidths, [id]: width } }));
+  }, [updateLibraryUi]);
+  const toggleModuleGroup = useCallback((id: string) => {
+    updateLibraryUi(current => ({ ...current, collapsedModuleGroups: current.collapsedModuleGroups.includes(id) ? current.collapsedModuleGroups.filter(value => value !== id) : [...current.collapsedModuleGroups, id] }));
+  }, [updateLibraryUi]);
 
   const refreshMeta = useCallback(async () => {
     try { setMeta(await api.getMeta(contentLanguage)); } catch (error) { notify(`读取素材库失败：${String(error)}`, true); }
@@ -151,6 +173,8 @@ export default function App() {
 
   const patchRequest = (patch: Partial<SearchRequest>) => { setActiveSmartId(null); setRequest(prev => ({ ...prev, ...patch, ...(Object.hasOwn(patch, "tags") ? { tagIds: [] } : {}), smartCollectionId: null, offset: 0 })); };
   const changeView = (next: ViewMode) => {
+    const group = ["projects", "reference"].includes(next) ? "creation" : ["tagManager", "health", "trash"].includes(next) ? "manage" : "content";
+    updateLibraryUi(current => current.collapsedModuleGroups.includes(group) ? { ...current, collapsedModuleGroups: current.collapsedModuleGroups.filter(value => value !== group) } : current);
     setView(next);
     setActiveSmartId(null); setSourceSmartId(null);
     setSelectionMode(false); setSelectedIds(new Set());
@@ -189,7 +213,12 @@ export default function App() {
     finally { setCheckingDetailLink(false); }
   };
 
-  const selectAsset = async (id: string) => {
+  const closeAssetDetail = useCallback(() => {
+    setSelectedId(null); setDetail(null);
+    window.requestAnimationFrame(() => detailReturnFocus.current?.focus());
+  }, []);
+  const selectAsset = async (id: string, trigger?: HTMLElement) => {
+    if (trigger) detailReturnFocus.current = trigger;
     setSelectedId(id); setDetailLoading(true); setDetail(null);
     try { setDetail(await api.getAsset(id, contentLanguage)); } catch (error) { notify(String(error), true); setSelectedId(null); }
     finally { setDetailLoading(false); }
@@ -388,6 +417,7 @@ export default function App() {
       const target = event.target as HTMLElement | null;
       if (!target || target.closest(".detail-panel,.asset-card,.asset-list-item,.modal-backdrop,.reference-portal-menu,.popover-dismiss-layer")) return;
       setSelectedId(null); setDetail(null);
+      window.requestAnimationFrame(() => detailReturnFocus.current?.focus());
     };
     window.addEventListener("pointerdown", closeOnOutside);
     return () => window.removeEventListener("pointerdown", closeOnOutside);
@@ -503,44 +533,49 @@ export default function App() {
   const heading = activeSmartId ? smartCollections.find(item => item.id === activeSmartId)?.name || "智能集合" : view === "favorites" ? "我的收藏" : view === "recent" ? "最近查看" : view === "health" ? "素材库检查" : request.categoryIds.length ? meta.categories.find(c => c.id === request.categoryIds[0])?.name || "素材库" : "全部素材";
   const mediaKind: MediaKind | null = view === "imageLibrary" ? "image" : view === "modelLibrary" ? "model" : view === "audioLibrary" ? "audio" : view === "videoLibrary" ? "video" : null;
   const activeFilterText = useMemo(() => [request.tags, request.dccTools, request.versions, request.formats, request.licenses].flat().slice(0, 3), [request]);
+  const enabledIds = new Set(enabledModules(personalization.library));
+  const orderedModules = (group: "content" | "creation" | "manage") => personalization.library.moduleOrder.filter(id => enabledIds.has(id) && moduleRegistry.find(item => item.id === id)?.group === group);
+  const groupCollapsed = (group: string) => personalization.library.collapsedModuleGroups.includes(group);
+  const mediaModules = orderedModules("content").filter(id => id !== "library");
+  const renderNavItem = (id: string, nested = false) => {
+    const values: Record<string, { label: string; icon: typeof Library; target: ViewMode }> = {
+      library: { label: "素材库", icon: Library, target: "library" }, imageLibrary: { label: "图片", icon: Image, target: "imageLibrary" }, modelLibrary: { label: "三维模型", icon: Box, target: "modelLibrary" }, audioLibrary: { label: "音频", icon: AudioLines, target: "audioLibrary" }, videoLibrary: { label: "视频", icon: Film, target: "videoLibrary" },
+      projects: { label: "创作项目", icon: BriefcaseBusiness, target: "projects" }, reference: { label: "参考板", icon: Grid3X3, target: "reference" }, tagManager: { label: "标签管理", icon: Tags, target: "tagManager" }, health: { label: "素材库检查", icon: ShieldCheck, target: "health" }, trash: { label: "回收站", icon: Trash2, target: "trash" },
+    };
+    const item = values[id]; if (!item) return null; const Icon = item.icon;
+    return <button key={id} className={`${view === item.target && !(id === "library" && activeSmartId) ? "active" : ""} ${nested ? "nested" : ""}`} onClick={() => changeView(item.target)}><Icon size={17} />{item.label}</button>;
+  };
 
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><ArchiveRestore size={21} /></div><div><strong>栈藏</strong><span>DCC ASSET LIBRARY</span></div></div>
       <div className="nav-section">
-        {enabledModules(personalization.library).map(id => {
-          if (id === "smartCollections") return <SmartCollections key={id} items={smartCollections} activeId={activeSmartId} onOpen={openSmartCollection} onCreate={() => void saveSmartCollection()} onRename={item => void renameSmartCollection(item)} onDuplicate={item => void duplicateSmartCollection(item)} onDelete={item => void deleteSmartCollection(item)} onReorder={ids => void reorderSmartCollections(ids)} />;
-          if (id === "library") return <button key={id} className={view === "library" && !activeSmartId ? "active" : ""} onClick={() => changeView("library")}><Library size={17} />素材库</button>;
-          if (id === "imageLibrary") return <button key={id} className={view === id ? "active" : ""} onClick={() => changeView(id)}><Image size={17} />图片库</button>;
-          if (id === "modelLibrary") return <button key={id} className={view === id ? "active" : ""} onClick={() => changeView(id)}><Box size={17} />三维模型库</button>;
-          if (id === "audioLibrary") return <button key={id} className={view === id ? "active" : ""} onClick={() => changeView(id)}><AudioLines size={17} />音频库</button>;
-          if (id === "videoLibrary") return <button key={id} className={view === id ? "active" : ""} onClick={() => changeView(id)}><Film size={17} />视频库</button>;
-          if (id === "projects") return <button key={id} className={view === "projects" ? "active" : ""} onClick={() => changeView("projects")}><BriefcaseBusiness size={17} />创作项目</button>;
-          if (id === "favorites") return <button key={id} className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={17} />我的收藏</button>;
-          if (id === "recent") return <button key={id} className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={17} />最近查看</button>;
-          if (id === "tagManager") return <button key={id} className={view === "tagManager" ? "active" : ""} onClick={() => changeView("tagManager")}><Tags size={17} />标签管理</button>;
-          if (id === "health") return <button key={id} className={view === "health" ? "active" : ""} onClick={() => changeView("health")}><ShieldCheck size={17} />素材库检查</button>;
-          if (id === "reference") return <button key={id} className={view === "reference" ? "active" : ""} onClick={() => changeView("reference")}><Grid3X3 size={17} />参考板</button>;
-          if (id === "trash") return <button key={id} className={view === "trash" ? "active" : ""} onClick={() => changeView("trash")}><Trash2 size={17} />回收站</button>;
-          return null;
-        })}
+        <section className="nav-group"><button className="nav-group-header" onClick={() => toggleModuleGroup("content")}>{groupCollapsed("content") ? <ChevronRight size={14} /> : <ChevronDown size={14} />}<span>内容</span></button>{!groupCollapsed("content") && <div className="nav-group-items">{enabledIds.has("library") && renderNavItem("library")}{mediaModules.length > 0 && <><button className={`nav-parent ${mediaKind ? "active-parent" : ""}`} onClick={() => toggleModuleGroup("mediaLibraries")}><FolderTree size={17} />媒体库<span className="nav-expander">{groupCollapsed("mediaLibraries") ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</span></button>{!groupCollapsed("mediaLibraries") && mediaModules.map(id => renderNavItem(id, true))}</>}</div>}</section>
+        <section className="nav-group"><button className="nav-group-header" onClick={() => toggleModuleGroup("creation")}>{groupCollapsed("creation") ? <ChevronRight size={14} /> : <ChevronDown size={14} />}<span>创作</span></button>{!groupCollapsed("creation") && <div className="nav-group-items">{orderedModules("creation").map(id => renderNavItem(id))}</div>}</section>
+        <section className="nav-group"><button className="nav-group-header" onClick={() => toggleModuleGroup("manage")}>{groupCollapsed("manage") ? <ChevronRight size={14} /> : <ChevronDown size={14} />}<span>管理</span></button>{!groupCollapsed("manage") && <div className="nav-group-items">{orderedModules("manage").map(id => renderNavItem(id))}</div>}</section>
       </div>
-      {!mediaKind&&<><div className="sidebar-label"><span>分类</span></div><div className="category-scroll"><CategoryTree categories={meta.categories} selected={request.categoryIds} total={meta.totalAssets} activeDrag={activeDrag} defaultExpanded={personalization.library.categoryTreeExpanded} onChange={ids => { setView("library"); patchRequest({ categoryIds: ids, favoriteOnly: false, recentOnly: false, healthIssue: null }); }} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory} onPointerDragStart={beginLibraryPointerDrag} /></div></>}
       <div className="sidebar-footer"><button onClick={() => setShowSettings(true)}><Settings size={15} />设置中心</button><button onClick={exportBackup}><DatabaseBackup size={15} />导出整库备份</button><button onClick={restoreBackup}><Download size={15} />从备份恢复</button><span>本地素材库 · 离线可用</span></div>
     </aside>
 
     <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}>
-      {mediaKind ? <MediaLibraryView kind={mediaKind} onNotify={notify}/> : view === "projects" ? <ProjectHub contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <>
-      <header className="topbar"><div className="search-box"><Search size={18} /><input ref={searchRef} value={queryInput} onChange={e => setQueryInput(e.target.value)} placeholder='高级搜索：tag:Nanite -format:FBX' />{queryInput && <button onClick={() => setQueryInput("")}><X size={15} /></button>}<details className="search-help"><summary>?</summary><div><strong>高级搜索</strong><span>空格表示 AND，| 表示 OR，- 表示排除，双引号匹配完整短语。</span><code>name:"desert dune" tag:Nanite</code><code>software:Unreal -format:FBX</code><span>字段：name、tag、desc、category、author、software、version、format、license、source</span></div></details><kbd>Ctrl K</kbd></div><div className="content-language-toggle" aria-label="素材内容语言"><button className={contentLanguage === "zh-CN" ? "active" : ""} onClick={() => void changeContentLanguage("zh-CN")}>中文</button><button className={contentLanguage === "en" ? "active" : ""} onClick={() => void changeContentLanguage("en")}>English</button></div><button className={`secondary-button ${selectionMode ? "active" : ""}`} onClick={() => { setSelectionMode(value => !value); setSelectedIds(new Set()); }}><ListChecks size={16} />多选</button><button className="secondary-button" onClick={() => setShowImport(true)}><Upload size={16} />批量导入</button><button className="primary-button" onClick={() => { setInitialShare(null); setEditor("new"); }}><Plus size={17} />添加素材</button></header>
+      {mediaKind ? <MediaLibraryView kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} /> : <div className="asset-workspace-layout">
+      <ResizableContextPane ariaLabel="素材分类" className="asset-context-pane" width={personalization.library.contextPaneWidths.library || 248} defaultWidth={248} collapsed={personalization.library.collapsedContextPanes.includes("library")} onResizeEnd={width => setContextPaneWidth("library", width)} onCollapsedChange={collapsed => setContextPaneCollapsed("library", collapsed)}>
+        <div className="asset-context-heading"><strong>素材导航</strong><span>{meta.totalAssets.toLocaleString("zh-CN")} 项</span></div>
+        <div className="asset-context-shortcuts">{enabledIds.has("favorites") && <button className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={15} />我的收藏</button>}{enabledIds.has("recent") && <button className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={15} />最近查看</button>}</div>
+        <div className="context-section-title"><span>分类</span></div><div className="asset-category-scroll"><CategoryTree categories={meta.categories} selected={request.categoryIds} total={meta.totalAssets} activeDrag={activeDrag} defaultExpanded={personalization.library.categoryTreeExpanded} onChange={ids => { setView("library"); patchRequest({ categoryIds: ids, favoriteOnly: false, recentOnly: false, healthIssue: null }); }} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory} onPointerDragStart={beginLibraryPointerDrag} /></div>
+        {enabledIds.has("smartCollections") && <div className="asset-smart-collections"><SmartCollections items={smartCollections} activeId={activeSmartId} onOpen={openSmartCollection} onCreate={() => void saveSmartCollection()} onRename={item => void renameSmartCollection(item)} onDuplicate={item => void duplicateSmartCollection(item)} onDelete={item => void deleteSmartCollection(item)} onReorder={ids => void reorderSmartCollections(ids)} /></div>}
+      </ResizableContextPane>
+      <section className="asset-library-main">
+      <header className="topbar">{personalization.library.collapsedContextPanes.includes("library") && <button className="context-pane-open" onClick={() => setContextPaneCollapsed("library", false)} title="展开素材导航"><PanelLeftOpen size={17} /></button>}<div className="search-box"><Search size={18} /><input ref={searchRef} value={queryInput} onChange={e => setQueryInput(e.target.value)} placeholder='高级搜索：tag:Nanite -format:FBX' />{queryInput && <button onClick={() => setQueryInput("")}><X size={15} /></button>}<SearchHelpPopover /><kbd>Ctrl K</kbd></div><div className="content-language-toggle" aria-label="素材内容语言"><button className={contentLanguage === "zh-CN" ? "active" : ""} onClick={() => void changeContentLanguage("zh-CN")}>中文</button><button className={contentLanguage === "en" ? "active" : ""} onClick={() => void changeContentLanguage("en")}>English</button></div><button className={`secondary-button ${selectionMode ? "active" : ""}`} onClick={() => { setSelectionMode(value => !value); setSelectedIds(new Set()); }}><ListChecks size={16} />多选</button><button className="secondary-button" onClick={() => setShowImport(true)}><Upload size={16} />批量导入</button><button className="primary-button" onClick={() => { setInitialShare(null); setEditor("new"); }}><Plus size={17} />添加素材</button></header>
       <section className="library-header"><div><span className="eyebrow">{activeSmartId ? "SMART COLLECTION" : "ASSET COLLECTION"}</span><h1>{heading}</h1><p>{loading ? "正在检索…" : `${total.toLocaleString("zh-CN")} 项素材`}{activeFilterText.length ? ` · ${activeFilterText.join(" / ")}` : ""}</p></div>{sourceSmartId && !activeSmartId && <button className="secondary-button" onClick={() => { const collection = smartCollections.find(item => item.id === sourceSmartId); if (collection) void saveSmartCollection(collection); }}><Sparkles size={15} />更新原集合</button>}<button className="secondary-button" onClick={() => void saveSmartCollection()}><Plus size={15} />另存为智能集合</button></section>
       {view === "health" && <HealthPanel summary={health} activeIssue={request.healthIssue || null} loading={healthLoading} linkCheckRunning={linkCheckRunning} linkProgress={linkProgress} onSelect={issue => patchRequest({ healthIssue: issue })} onRefresh={refreshHealth} onCheckLinks={() => void checkAllLinks()} onCancelLinkCheck={() => void cancelLinkCheck()} />}
       <FilterBar request={request} options={meta.filters} onChange={patchRequest} />
       {selectionMode && <BatchToolbar count={selectedIds.size} totalCount={total} selectingAll={selectingAll} categories={meta.categories} onSelectAll={() => void selectAllResults()} onClear={() => setSelectedIds(new Set())} onExit={() => { setSelectionMode(false); setSelectedIds(new Set()); }} onAddToReference={() => void addSelectionToReference()} onAddToProject={() => selectedIds.size && setProjectPicker([...selectedIds])} onApply={applyBatch} />}
       <div className="grid-scroll" ref={scrollRef}><AssetGrid items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
-      </>}
+      </section></div>}
     </main>
 
-    {!mediaKind && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <DetailPanel asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={() => { setSelectedId(null); setDetail(null); }} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} />}
+    {!mediaKind && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <>{selectedId && <button className="inspector-backdrop" aria-label="关闭素材详情" onClick={closeAssetDetail} />}<DetailPanel asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={closeAssetDetail} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} /></>}
     {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onMediaImported={async id=>{setDetail(await api.getAsset(id,contentLanguage));await refreshAll();}} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
     {showImport && <ImportDialog onClose={() => setShowImport(false)} onImported={refreshAll} notify={notify} />}
     {showQuickAdd && <QuickAddDialog onClose={() => setShowQuickAdd(false)} notify={notify} onParsed={parsed => { setInitialShare(parsed); setShowQuickAdd(false); setEditor("new"); }} onOpenExisting={id => { setShowQuickAdd(false); selectAsset(id); }} />}

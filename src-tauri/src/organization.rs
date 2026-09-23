@@ -4,22 +4,6 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const KNOWN_MODULES: [&str; 13] = [
-    "library",
-    "imageLibrary",
-    "modelLibrary",
-    "audioLibrary",
-    "videoLibrary",
-    "projects",
-    "smartCollections",
-    "favorites",
-    "recent",
-    "tagManager",
-    "health",
-    "reference",
-    "trash",
-];
-
 pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreferences, String> {
     if !matches!(value.theme.as_str(), "graphite" | "ue-slate" | "midnight") {
         value.theme = "graphite".into();
@@ -47,13 +31,38 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
 }
 
 pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
-    let mut order = KNOWN_MODULES
-        .iter()
-        .take(6)
-        .map(|value| value.to_string())
+    const GROUPS: [&[&str]; 4] = [
+        &[
+            "library",
+            "imageLibrary",
+            "modelLibrary",
+            "audioLibrary",
+            "videoLibrary",
+        ],
+        &["projects", "reference"],
+        &["smartCollections", "favorites", "recent"],
+        &["tagManager", "health", "trash"],
+    ];
+    let requested = value
+        .module_order
+        .drain(..)
+        .filter(|id| id != "collections")
         .collect::<Vec<_>>();
-    let mut seen = order.iter().cloned().collect::<HashSet<_>>();
-    for id in value.module_order.drain(..) {
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for group in GROUPS {
+        for id in requested.iter().filter(|id| group.contains(&id.as_str())) {
+            if seen.insert(id.clone()) {
+                order.push(id.clone());
+            }
+        }
+        for id in group {
+            if seen.insert(id.to_string()) {
+                order.push(id.to_string());
+            }
+        }
+    }
+    for id in requested {
         if id == "collections" {
             continue;
         }
@@ -61,11 +70,10 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
             order.push(id);
         }
     }
-    for id in KNOWN_MODULES.iter().skip(6) {
-        if seen.insert((*id).to_string()) {
-            order.push((*id).to_string());
-        }
+    if let Some(position) = order.iter().position(|id| id == "library") {
+        order.remove(position);
     }
+    order.insert(0, "library".into());
     value.module_order = order;
     value.disabled_modules.retain(|id| id != "library");
     value.disabled_modules.sort();
@@ -92,6 +100,36 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     ) {
         value.default_sort = "updated".into();
     }
+    let defaults = LibraryPreferences::default().context_pane_widths;
+    for (id, width) in defaults {
+        value.context_pane_widths.entry(id).or_insert(width);
+    }
+    value.context_pane_widths.retain(|id, width| {
+        if !matches!(
+            id.as_str(),
+            "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary"
+        ) {
+            return false;
+        }
+        *width = (*width).clamp(180, 420);
+        true
+    });
+    value.collapsed_context_panes.retain(|id| {
+        matches!(
+            id.as_str(),
+            "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary"
+        )
+    });
+    value.collapsed_context_panes.sort();
+    value.collapsed_context_panes.dedup();
+    value.collapsed_module_groups.retain(|id| {
+        matches!(
+            id.as_str(),
+            "content" | "mediaLibraries" | "creation" | "manage"
+        )
+    });
+    value.collapsed_module_groups.sort();
+    value.collapsed_module_groups.dedup();
     value
 }
 
@@ -652,10 +690,18 @@ mod tests {
         let mut value = LibraryPreferences::default();
         value.module_order = vec!["future".into(), "favorites".into(), "library".into()];
         value.disabled_modules = vec!["library".into(), "future".into()];
+        value.context_pane_widths.insert("library".into(), 900);
+        value.collapsed_module_groups =
+            vec!["manage".into(), "mediaLibraries".into(), "unknown".into()];
         let value = normalize_library(value);
         assert_eq!(value.module_order[0], "library");
         assert!(value.module_order.contains(&"future".into()));
         assert!(!value.disabled_modules.contains(&"library".into()));
+        assert_eq!(value.context_pane_widths["library"], 420);
+        assert_eq!(
+            value.collapsed_module_groups,
+            vec!["manage", "mediaLibraries"]
+        );
     }
     #[test]
     fn rejects_duplicate_shortcuts() {

@@ -291,6 +291,21 @@ fn default_sort() -> String {
 fn default_startup_module() -> String {
     "library".into()
 }
+fn default_context_pane_widths() -> HashMap<String, i64> {
+    [
+        ("library", 248),
+        ("imageLibrary", 220),
+        ("modelLibrary", 260),
+        ("audioLibrary", 220),
+        ("videoLibrary", 220),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.into(), value))
+    .collect()
+}
+fn default_collapsed_module_groups() -> Vec<String> {
+    vec!["manage".into()]
+}
 
 pub fn default_shortcuts() -> HashMap<String, String> {
     [
@@ -397,6 +412,12 @@ pub struct LibraryPreferences {
     pub remember_search: bool,
     #[serde(default = "default_true_value")]
     pub category_tree_expanded: bool,
+    #[serde(default = "default_context_pane_widths")]
+    pub context_pane_widths: HashMap<String, i64>,
+    #[serde(default)]
+    pub collapsed_context_panes: Vec<String>,
+    #[serde(default = "default_collapsed_module_groups")]
+    pub collapsed_module_groups: Vec<String>,
     #[serde(default)]
     pub last_context: Option<serde_json::Value>,
 }
@@ -415,6 +436,9 @@ impl Default for LibraryPreferences {
             default_sort: default_sort(),
             remember_search: false,
             category_tree_expanded: true,
+            context_pane_widths: default_context_pane_widths(),
+            collapsed_context_panes: vec![],
+            collapsed_module_groups: default_collapsed_module_groups(),
             last_context: None,
         }
     }

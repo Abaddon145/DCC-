@@ -2,6 +2,8 @@ export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" |
 export type MediaKind = "image" | "model" | "audio" | "video";
 export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
+export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
+export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -77,6 +79,9 @@ export interface LibraryPreferences {
   defaultSort: SortMode;
   rememberSearch: boolean;
   categoryTreeExpanded: boolean;
+  contextPaneWidths: Record<string, number>;
+  collapsedContextPanes: string[];
+  collapsedModuleGroups: string[];
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }

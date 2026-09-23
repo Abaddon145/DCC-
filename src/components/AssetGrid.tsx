@@ -12,7 +12,7 @@ interface Props {
   total: number;
   loading: boolean;
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, trigger?: HTMLElement) => void;
   onFavorite: (item: AssetCard) => void;
   onLoadMore: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -61,12 +61,12 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         const payload: LibraryDragPayload = { kind: "assets", ids, label: ids.length > 1 ? `${ids.length} 项素材` : item.name };
         onPointerDragStart?.(payload, event);
       }, onClick: (event: React.MouseEvent<HTMLElement>) => {
-        if (!selectionMode) return onSelect(item.id);
+        if (!selectionMode) return onSelect(item.id, event.currentTarget);
         let rangeIds: string[] | undefined;
         if (event.shiftKey && lastSelected.current !== null) { const [start, end] = [lastSelected.current, itemIndex].sort((a, b) => a - b); rangeIds = items.slice(start, end + 1).map(value => value.id); }
         lastSelected.current = itemIndex; onToggleSelect?.(item.id, rangeIds);
       }};
-      if (viewMode === "list") return <article key={item.id} className={`asset-list-item ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
+      if (viewMode === "list") return <article key={item.id} tabIndex={0} role="button" data-asset-id={item.id} className={`asset-list-item ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} onKeyDown={event => { if (!selectionMode && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelect(item.id, event.currentTarget); } }} {...interaction}>
         {selectionMode && <button className={`list-select ${checked ? "active" : ""}`} onClick={event => { event.stopPropagation(); onToggleSelect?.(item.id); }}><span>{checked && <Check size={12} />}</span></button>}
         {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="asset-list-thumb" /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="asset-list-thumb" /> : <ImagePreview imageId={null} alt={item.name} className="asset-list-thumb" />}
         <div className="asset-list-name"><strong><HighlightedText text={item.name} query={query} /></strong>{preferences?.cardFields.category !== false && <span>{item.categoryName || "未分类"}</span>}</div>
@@ -78,7 +78,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         <button className={`list-favorite ${item.favorite ? "active" : ""}`} onClick={event => { event.stopPropagation(); onFavorite(item); }}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /></button>
         <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
       </article>;
-      return <article key={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
+      return <article key={item.id} tabIndex={0} role="button" data-asset-id={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} onKeyDown={event => { if (!selectionMode && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelect(item.id, event.currentTarget); } }} {...interaction}>
         <div className="card-image">
           {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="card-image-content" style={{ objectFit: preferences?.coverFit || "cover" }} /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="card-image-content" hoverPlay /> : <ImagePreview imageId={null} alt={item.name} className="card-image-content" />}
           {preferences?.cardFields.linkStatus !== false && item.linkCheckStatus === "invalid" && <span className="link-invalid-badge">网盘失效</span>}
