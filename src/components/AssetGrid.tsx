@@ -12,8 +12,9 @@ interface Props {
   total: number;
   loading: boolean;
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, trigger?: HTMLElement) => void;
   onFavorite: (item: AssetCard) => void;
+  onContextMenu?: (item: AssetCard, x: number, y: number) => void;
   onLoadMore: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   selectionMode?: boolean;
@@ -28,13 +29,15 @@ export function assetIdsForDrag(itemId: string, selectionMode: boolean, selected
   return selectionMode && selectedIds.has(itemId) ? [...selectedIds] : [itemId];
 }
 
-export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavorite, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences, query = "" }: Props) {
+export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavorite, onContextMenu, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences, query = "" }: Props) {
   const [width, setWidth] = useState(900);
   const lastSelected = useRef<number | null>(null);
   const viewMode = preferences?.assetView || "grid";
   const cardWidth = preferences?.cardSize === "small" ? 190 : preferences?.cardSize === "large" ? 330 : 252;
-  const rowHeight = preferences?.cardSize === "small" ? 225 : preferences?.cardSize === "large" ? 326 : 267;
   const columns = viewMode === "list" ? 1 : Math.max(1, Math.floor(width / cardWidth));
+  const customRatio = preferences?.coverAspectRatio === "square" ? 1 : preferences?.coverAspectRatio === "wide" ? 16 / 9 : null;
+  const coverHeight = customRatio ? Math.max(100, Math.round((width / columns - 20) / customRatio)) : null;
+  const rowHeight = coverHeight ? coverHeight + 109 : preferences?.cardSize === "small" ? 225 : preferences?.cardSize === "large" ? 326 : 267;
   const rows = Math.ceil(items.length / columns);
   const observerRef = useRef<ResizeObserver | null>(null);
 
@@ -47,6 +50,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
   }, [scrollRef]);
 
   const virtualizer = useVirtualizer({ count: rows, getScrollElement: () => scrollRef.current, estimateSize: () => viewMode === "list" ? 70 : rowHeight, overscan: viewMode === "list" ? 8 : 3 });
+  useEffect(() => virtualizer.measure(), [rowHeight, viewMode]);
   const virtualRows = virtualizer.getVirtualItems();
   const lastIndex = virtualRows.at(-1)?.index ?? 0;
   useEffect(() => { if (!loading && items.length < total && lastIndex >= rows - 2) onLoadMore(); }, [lastIndex, rows, items.length, total, loading, onLoadMore]);
@@ -55,18 +59,19 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
     const slice = items.slice(row.index * columns, row.index * columns + columns);
     return <div className={viewMode === "list" ? "asset-list-virtual-row" : "asset-row"} key={row.key} style={{ transform: `translateY(${row.start}px)`, ...(viewMode === "grid" ? { gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` } : {}) }}>
       {slice.map(item => { const itemIndex = items.findIndex(value => value.id === item.id); const checked = selectedIds.has(item.id); const interaction = {
+        onContextMenu: (event: React.MouseEvent<HTMLElement>) => { event.preventDefault(); onContextMenu?.(item, event.clientX, event.clientY); },
         onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
         if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
         const ids = assetIdsForDrag(item.id, selectionMode, selectedIds);
         const payload: LibraryDragPayload = { kind: "assets", ids, label: ids.length > 1 ? `${ids.length} 项素材` : item.name };
         onPointerDragStart?.(payload, event);
       }, onClick: (event: React.MouseEvent<HTMLElement>) => {
-        if (!selectionMode) return onSelect(item.id);
+        if (!selectionMode) return onSelect(item.id, event.currentTarget);
         let rangeIds: string[] | undefined;
         if (event.shiftKey && lastSelected.current !== null) { const [start, end] = [lastSelected.current, itemIndex].sort((a, b) => a - b); rangeIds = items.slice(start, end + 1).map(value => value.id); }
         lastSelected.current = itemIndex; onToggleSelect?.(item.id, rangeIds);
       }};
-      if (viewMode === "list") return <article key={item.id} className={`asset-list-item ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
+      if (viewMode === "list") return <article key={item.id} tabIndex={0} role="button" data-asset-id={item.id} className={`asset-list-item ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} onKeyDown={event => { if (!selectionMode && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelect(item.id, event.currentTarget); } }} {...interaction}>
         {selectionMode && <button className={`list-select ${checked ? "active" : ""}`} onClick={event => { event.stopPropagation(); onToggleSelect?.(item.id); }}><span>{checked && <Check size={12} />}</span></button>}
         {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="asset-list-thumb" /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="asset-list-thumb" /> : <ImagePreview imageId={null} alt={item.name} className="asset-list-thumb" />}
         <div className="asset-list-name"><strong><HighlightedText text={item.name} query={query} /></strong>{preferences?.cardFields.category !== false && <span>{item.categoryName || "未分类"}</span>}</div>
@@ -78,8 +83,8 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         <button className={`list-favorite ${item.favorite ? "active" : ""}`} onClick={event => { event.stopPropagation(); onFavorite(item); }}><Heart size={15} fill={item.favorite ? "currentColor" : "none"} /></button>
         <time>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
       </article>;
-      return <article key={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} {...interaction}>
-        <div className="card-image">
+      return <article key={item.id} tabIndex={0} role="button" data-asset-id={item.id} className={`asset-card card-${preferences?.cardSize || "medium"} ${selectedId === item.id ? "selected" : ""} ${checked ? "multi-selected" : ""}`} style={coverHeight ? { height: coverHeight + 95 } : undefined} onKeyDown={event => { if (!selectionMode && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onSelect(item.id, event.currentTarget); } }} {...interaction}>
+        <div className="card-image" style={coverHeight ? { height: coverHeight } : undefined}>
           {item.coverImageId ? <ImagePreview imageId={item.coverImageId} alt={item.name} className="card-image-content" style={{ objectFit: preferences?.coverFit || "cover" }} /> : item.coverMediaId && item.coverMediaKind ? <MediaCover mediaId={item.coverMediaId} kind={item.coverMediaKind} className="card-image-content" hoverPlay /> : <ImagePreview imageId={null} alt={item.name} className="card-image-content" />}
           {preferences?.cardFields.linkStatus !== false && item.linkCheckStatus === "invalid" && <span className="link-invalid-badge">网盘失效</span>}
           {preferences?.cardFields.linkStatus !== false && item.hasShareLink === false && <span className="link-missing-badge">无网盘链接</span>}
@@ -96,7 +101,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
         </div>
       </article>; })}
     </div>;
-  }), [virtualRows, items, columns, onSelect, onFavorite, selectedId, selectionMode, selectedIds, onToggleSelect, onPointerDragStart, preferences, viewMode, query]);
+  }), [virtualRows, items, columns, onSelect, onFavorite, onContextMenu, selectedId, selectionMode, selectedIds, onToggleSelect, onPointerDragStart, preferences, viewMode, query, coverHeight]);
 
   if (!loading && items.length === 0) return <div className="empty-state"><div className="empty-icon"><Box size={34} /></div><h2>还没有找到素材</h2><p>调整搜索条件，或者添加第一条素材。</p></div>;
   return <div className="virtual-grid" style={{ height: virtualizer.getTotalSize() }}>{content}{loading && <div className="grid-loading">正在读取素材…</div>}</div>;

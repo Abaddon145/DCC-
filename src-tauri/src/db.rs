@@ -31,6 +31,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v9(&connection)?;
     migrate_to_v10(&connection)?;
     migrate_to_v11(&connection)?;
+    migrate_to_v12(&connection)?;
     Ok(connection)
 }
 
@@ -488,6 +489,56 @@ fn migrate_to_v11(connection: &Connection) -> Result<(), String> {
          INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','11');",
         )
         .map_err(|e| format!("升级数据库到 v11 失败：{e}"))?;
+    Ok(())
+}
+
+fn migrate_to_v12(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 12 {
+        return Ok(());
+    }
+    for (table, column, definition) in [
+        (
+            "projects",
+            "cover_media_entry_id",
+            "TEXT REFERENCES media_entries(id) ON DELETE SET NULL",
+        ),
+        (
+            "project_units",
+            "video_media_entry_id",
+            "TEXT REFERENCES media_entries(id) ON DELETE SET NULL",
+        ),
+    ] {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| e.to_string())?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if !names.iter().any(|name| name == column) {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
+                .map_err(|e| format!("升级数据库到 v12 失败：{e}"))?;
+        }
+    }
+    connection
+        .execute_batch(
+            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','12')",
+        )
+        .map_err(|e| format!("升级数据库到 v12 失败：{e}"))?;
     Ok(())
 }
 
@@ -2793,6 +2844,47 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v11_project_media_columns_without_losing_existing_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES('schema_version','11');
+            CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
+            CREATE TABLE project_units(id TEXT PRIMARY KEY,project_id TEXT NOT NULL);
+            INSERT INTO projects VALUES('project-1','旧项目');
+            INSERT INTO project_units VALUES('shot-1','project-1');",
+            )
+            .unwrap();
+        migrate_to_v12(&connection).unwrap();
+        migrate_to_v12(&connection).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cover: Option<String> = connection
+            .query_row(
+                "SELECT cover_media_entry_id FROM projects WHERE id='project-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let video: Option<String> = connection
+            .query_row(
+                "SELECT video_media_entry_id FROM project_units WHERE id='shot-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "12");
+        assert_eq!(cover, None);
+        assert_eq!(video, None);
+    }
+
+    #[test]
     fn category_lifecycle_and_meta() {
         let (_dir, mut connection) = setup();
         let id = upsert_category(&connection, None, "环境".into(), None, false).unwrap();
@@ -3010,7 +3102,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "11");
+        assert_eq!(version, "12");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

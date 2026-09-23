@@ -2,6 +2,8 @@ export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" |
 export type MediaKind = "image" | "model" | "audio" | "video";
 export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
+export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
+export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -58,6 +60,8 @@ export interface GlobalPreferences {
   theme: ThemeId;
   accentColor: string;
   density: "comfortable" | "compact";
+  fontScale: number;
+  toolbarDensity: "comfortable" | "compact";
   reduceMotion: boolean;
   sidebarWidth: number;
   detailWidth: number;
@@ -73,10 +77,14 @@ export interface LibraryPreferences {
   assetView: AssetViewMode;
   cardSize: CardSize;
   coverFit: "cover" | "contain";
+  coverAspectRatio: "standard" | "square" | "wide";
   cardFields: CardFieldVisibility;
   defaultSort: SortMode;
   rememberSearch: boolean;
   categoryTreeExpanded: boolean;
+  contextPaneWidths: Record<string, number>;
+  collapsedContextPanes: string[];
+  collapsedModuleGroups: string[];
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }
@@ -90,10 +98,10 @@ export type ProjectTaskPriority = "low" | "normal" | "high" | "urgent";
 export interface ProjectInput {
   id?: string | null; name: string; description: string; projectType: ProjectType; status: ProjectStatus;
   targetTools: string[]; versions: string[]; resolutionWidth: number | null; resolutionHeight: number | null;
-  frameRate: number | null; coverAssetId: string | null;
+  frameRate: number | null; coverAssetId: string | null; coverMediaEntryId: string | null;
 }
 export interface ProjectSummary extends Omit<ProjectInput, "id"> {
-  id: string; coverImageId: string | null; assetCount: number; unavailableAssetCount: number; taskCount: number;
+  id: string; coverImageId: string | null; coverMediaFileId: string | null; assetCount: number; unavailableAssetCount: number; taskCount: number;
   completedTaskCount: number; reviewTaskCount: number; progress: number; mainBoardId: string | null;
   createdAt: string; updatedAt: string; lastOpenedAt: string | null; archivedAt: string | null;
 }
@@ -102,7 +110,7 @@ export interface ProjectUnitInput {
   startFrame: number | null; endFrame: number | null; resolutionWidth: number | null; resolutionHeight: number | null;
   frameRate: number | null; sortOrder?: number | null;
 }
-export interface ProjectUnit extends Omit<ProjectUnitInput, "id" | "sortOrder"> { id: string; sortOrder: number; createdAt: string; updatedAt: string }
+export interface ProjectUnit extends Omit<ProjectUnitInput, "id" | "sortOrder"> { id: string; sortOrder: number; videoMediaEntryId: string | null; videoStreamFileId: string | null; videoName: string | null; createdAt: string; updatedAt: string }
 export interface ProjectTaskInput {
   id?: string | null; projectId: string; unitId: string | null; title: string; description: string; status: ProjectTaskStatus;
   priority: ProjectTaskPriority; dueDate: string | null; sortOrder?: number | null; assetIds: string[];
@@ -114,7 +122,7 @@ export interface ProjectBoardLink { boardId: string; name: string; isMain: boole
 export interface ProjectPathInput { id?: string | null; projectId: string; kind: "root" | "project_file" | "output" | "custom"; label: string; path: string; pathType: "file" | "directory"; sortOrder?: number | null }
 export interface ProjectPathShortcut extends Omit<ProjectPathInput, "id" | "sortOrder"> { id: string; sortOrder: number; available: boolean; createdAt: string; updatedAt: string }
 export interface ProjectPathCheck { id: string; available: boolean; message: string }
-export interface CreativeProject extends ProjectSummary { units: ProjectUnit[]; tasks: ProjectTask[]; assets: ProjectAssetLink[]; boards: ProjectBoardLink[]; paths: ProjectPathShortcut[] }
+export interface CreativeProject extends ProjectSummary { units: ProjectUnit[]; tasks: ProjectTask[]; assets: ProjectAssetLink[]; media: MediaEntry[]; boards: ProjectBoardLink[]; paths: ProjectPathShortcut[] }
 
 export interface SmartCollectionRule {
   query: string; categoryIds: string[]; tagIds: string[]; dccTools: string[]; versions: string[];

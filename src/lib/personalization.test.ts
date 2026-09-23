@@ -9,4 +9,9 @@ describe("personalization", () => {
     expect(moduleRegistry.slice(0, 6).map(item => item.id)).toEqual(["library", "imageLibrary", "modelLibrary", "audioLibrary", "videoLibrary", "projects"]);
     expect(moduleRegistry.some(item => item.id === ("collections" as never))).toBe(false);
   });
+  it("keeps navigation modules in stable product groups", () => {
+    expect(moduleRegistry.filter(item => item.group === "content").map(item => item.id)).toEqual(["library", "imageLibrary", "modelLibrary", "audioLibrary", "videoLibrary"]);
+    expect(moduleRegistry.filter(item => item.group === "libraryContext").map(item => item.id)).toEqual(["smartCollections", "favorites", "recent"]);
+    expect(moduleRegistry.filter(item => item.group === "manage").map(item => item.id)).toEqual(["tagManager", "health", "trash"]);
+  });
 });

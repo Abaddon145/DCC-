@@ -43,6 +43,7 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
     setDetailLanguage(contentLanguage);
   }, [asset?.id]);
   useEffect(() => { const handler=(event:KeyboardEvent)=>{ if(event.code!=="Space" || !asset || !previews.length || (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")) return; event.preventDefault(); setLightbox(true); }; window.addEventListener("keydown",handler); return()=>window.removeEventListener("keydown",handler); },[asset,previews.length]);
+  useEffect(() => { if (!asset) return; const handler = (event: KeyboardEvent) => { if (event.key === "Escape" && !lightbox && !referenceMenu) onClose(); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [asset, lightbox, referenceMenu, onClose]);
   if (!asset && !loading) return null;
   const currentPreview = previews[selectedPreview] || previews[0];
   const preferred = asset?.localizations[detailLanguage];
@@ -56,7 +57,7 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
     {loading || !asset ? <div className="detail-loading">正在加载详情…</div> : <>
       <div className="detail-hero">
         <button className="detail-image-button" onClick={() => previews.length && setLightbox(true)} title="打开媒体查看器">{currentPreview?.type === "image" ? <ImagePreview imageId={currentPreview.image.id} alt={shownName} thumbnail={false} className="detail-image" /> : currentPreview?.type === "media" ? <MediaPreview media={currentPreview.media} className="detail-image" /> : currentPreview?.type === "library" ? <LibraryMediaPreview media={currentPreview.media} className="detail-image" /> : <ImagePreview imageId={null} alt={shownName} className="detail-image" />}</button>
-        <button className="detail-close" onClick={onClose}><X size={18} /></button>
+        <button className="detail-close" onClick={onClose} aria-label="关闭素材详情"><X size={18} /></button>
       </div>
       {previews.length > 1 && <div className="thumb-strip">{previews.map((item, index) => <button key={item.type === "image" ? item.image.id : `${item.type}-${item.media.id}`} className={index === selectedPreview ? "active" : ""} onClick={() => setSelectedPreview(index)}>{item.type === "image" ? <ImagePreview imageId={item.image.id} alt={item.image.originalName} className="detail-thumb" /> : item.type === "library" ? <LibraryMediaPreview media={item.media} className="detail-thumb" /> : <MediaPreview media={item.media} className="detail-thumb" />}</button>)}</div>}
       <div className="detail-content">

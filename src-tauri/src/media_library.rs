@@ -53,7 +53,10 @@ fn validate_kind_path(kind: &MediaKind, path: &Path) -> Result<(String, String),
 fn digest(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("读取文件失败：{e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // This runs inside Tauri's WebView callback on Windows. A 1 MiB stack array here
+    // exhausted the already-deep WebView2 callback stack before the import could copy
+    // any file. Keep the I/O buffer on the heap and deliberately modest in size.
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -261,19 +264,23 @@ fn entry_row(row: &Row<'_>) -> rusqlite::Result<MediaEntry> {
 }
 const ENTRY_SELECT:&str="SELECT e.id,e.kind,e.folder_id,e.name,e.description,e.author,e.source_url,e.license,e.favorite,e.processing_status,e.processing_message,lower(substr(m.original_name,instr(m.original_name,'.')+1)),m.file_size,COALESCE(group_concat(DISTINCT t.name),'') ,(SELECT id FROM media_files WHERE entry_id=e.id AND role IN ('thumbnail','waveform') ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END LIMIT 1),e.primary_file_id,e.created_at,e.updated_at FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id LEFT JOIN media_entry_tags et ON et.entry_id=e.id LEFT JOIN localized_tags t ON t.id=et.tag_id";
 
-pub fn search(
-    connection: &Connection,
-    request: &MediaSearchRequest,
-) -> Result<Page<MediaEntry>, String> {
+fn search_filter(request: &MediaSearchRequest) -> (String, Vec<Value>) {
     let mut conditions = vec!["e.deleted_at IS NULL".to_string(), "e.kind=?".to_string()];
     let mut values = vec![Value::Text(request.kind.as_str().into())];
     if !request.query.trim().is_empty() {
-        conditions
-            .push("e.id IN (SELECT entry_id FROM media_search WHERE media_search MATCH ?)".into());
-        values.push(Value::Text(format!(
-            "\"{}\"",
-            request.query.trim().replace('"', "\"")
-        )))
+        let query = request.query.trim();
+        if query.chars().count() < 3 {
+            conditions.push(
+                "e.id IN (SELECT entry_id FROM media_search WHERE instr(lower(text),lower(?))>0)"
+                    .into(),
+            );
+            values.push(Value::Text(query.into()));
+        } else {
+            conditions.push(
+                "e.id IN (SELECT entry_id FROM media_search WHERE media_search MATCH ?)".into(),
+            );
+            values.push(Value::Text(format!("\"{}\"", query.replace('"', "\"\""))));
+        }
     }
     if let Some(folder) = &request.folder_id {
         if request.include_child_folders {
@@ -302,19 +309,31 @@ pub fn search(
                 .map(|v| Value::Text(v.to_lowercase())),
         )
     }
-    let where_sql = conditions.join(" AND ");
-    let total=connection.query_row(&format!("SELECT count(*) FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql}"),params_from_iter(values.clone()),|r|r.get(0)).map_err(|e|e.to_string())?;
-    let order = match request.sort.as_str() {
+    (conditions.join(" AND "), values)
+}
+
+fn search_order(sort: &str) -> &str {
+    match sort {
         "name" => "e.name COLLATE NOCASE",
         "created" => "e.created_at DESC",
         "favorite" => "e.favorite DESC,e.updated_at DESC",
         _ => "e.updated_at DESC",
-    };
+    }
+}
+
+pub fn search(
+    connection: &Connection,
+    request: &MediaSearchRequest,
+) -> Result<Page<MediaEntry>, String> {
+    let (where_sql, values) = search_filter(request);
+    let total=connection.query_row(&format!("SELECT count(*) FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql}"),params_from_iter(values.clone()),|r|r.get(0)).map_err(|e|e.to_string())?;
+    let order = search_order(&request.sort);
     let mut page_values = values;
     page_values.push(Value::Integer(request.limit.clamp(1, 500)));
     page_values.push(Value::Integer(request.offset.max(0)));
-    let sql =
-        format!("{ENTRY_SELECT} WHERE {where_sql} GROUP BY e.id ORDER BY {order} LIMIT ? OFFSET ?");
+    let sql = format!(
+        "{ENTRY_SELECT} WHERE {where_sql} GROUP BY e.id ORDER BY {order},e.id LIMIT ? OFFSET ?"
+    );
     let mut stmt = connection.prepare(&sql).map_err(|e| e.to_string())?;
     let items = stmt
         .query_map(params_from_iter(page_values), entry_row)
@@ -327,6 +346,21 @@ pub fn search(
         offset: request.offset.max(0),
         limit: request.limit.clamp(1, 500),
     })
+}
+pub fn select_ids(
+    connection: &Connection,
+    request: &MediaSearchRequest,
+) -> Result<Vec<String>, String> {
+    let (where_sql, values) = search_filter(request);
+    let order = search_order(&request.sort);
+    let sql = format!("SELECT e.id FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql} ORDER BY {order},e.id");
+    let mut statement = connection.prepare(&sql).map_err(|e| e.to_string())?;
+    let ids = statement
+        .query_map(params_from_iter(values), |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
 }
 pub fn get(connection: &Connection, id: &str) -> Result<MediaEntryDetail, String> {
     let sql = format!("{ENTRY_SELECT} WHERE e.id=?1 AND e.deleted_at IS NULL GROUP BY e.id");
@@ -1009,7 +1043,7 @@ pub fn bundle_response(
         .replace('\\', "/");
     let (rel, mime): (String, String) = connection
         .query_row(
-            "SELECT rel_path,mime_type FROM media_files WHERE entry_id=?1 AND logical_path=?2",
+            "SELECT f.rel_path,f.mime_type FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.entry_id=?1 AND f.logical_path=?2 AND e.deleted_at IS NULL",
             params![entry_id, logical],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1024,6 +1058,38 @@ mod tests {
     use super::*;
     use crate::db::open_database;
     use tempfile::tempdir;
+    #[test]
+    fn selects_every_matching_media_id_beyond_the_first_virtual_page() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let folder = upsert_folder(&db, MediaKind::Image, None, None, "参考图".into()).unwrap();
+        let transaction = db.transaction().unwrap();
+        for index in 0..507 {
+            let id = format!("image-{index}");
+            let file_id = format!("file-{index}");
+            transaction.execute("INSERT INTO media_entries(id,kind,folder_id,name,primary_file_id,created_at,updated_at) VALUES(?1,'image',?2,?1,?3,'now','now')", params![id,folder.id,file_id]).unwrap();
+            transaction.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'main','image.png','image.png',?3,'now')", params![file_id,id,format!("media-library/image/{index}/originals/image.png")]).unwrap();
+        }
+        transaction.commit().unwrap();
+        let ids = select_ids(
+            &db,
+            &MediaSearchRequest {
+                kind: MediaKind::Image,
+                query: String::new(),
+                folder_id: Some(folder.id),
+                include_child_folders: true,
+                tags: vec![],
+                formats: vec![],
+                favorite_only: false,
+                sort: "updated".into(),
+                offset: 150,
+                limit: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 507);
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 507);
+    }
     #[test]
     fn rejects_unsafe_model_dependency_and_folder_cycle() {
         assert!(safe_dependency("../secret.png").is_err());
@@ -1053,6 +1119,26 @@ mod tests {
         let two = import(&mut db, dir.path(), None, req).unwrap();
         assert_eq!(one.imported, 1);
         assert_eq!(two.skipped, 1);
+        assert_eq!(
+            search(
+                &db,
+                &MediaSearchRequest {
+                    kind: MediaKind::Image,
+                    query: "a".into(),
+                    folder_id: None,
+                    include_child_folders: true,
+                    tags: vec![],
+                    formats: vec![],
+                    favorite_only: false,
+                    sort: "updated".into(),
+                    offset: 0,
+                    limit: 80
+                }
+            )
+            .unwrap()
+            .total,
+            1
+        );
         assert_eq!(
             search(
                 &db,
@@ -1132,5 +1218,19 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn checksum_runs_on_a_small_callback_stack() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("payload.bin");
+        fs::write(&source, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+        let worker = std::thread::Builder::new()
+            .name("webview-callback-sized-stack".into())
+            .stack_size(256 * 1024)
+            .spawn(move || digest(&source))
+            .unwrap();
+        let checksum = worker.join().unwrap().unwrap();
+        assert_eq!(checksum.len(), 64);
     }
 }

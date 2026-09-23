@@ -3,7 +3,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, CheckCircle2, Download, FileSpreadsheet, Upload, X } from "lucide-react";
 import { api } from "../lib/api";
 import { listen } from "@tauri-apps/api/event";
-import type { ImportMapping, ImportPreview, ImportProgress, ImportReport } from "../types";
+import type { ImportMapping, ImportPreview, ImportProgress, ImportReport, TranslationSettings } from "../types";
 
 interface Props { onClose: () => void; onImported: () => void; notify: (message: string, error?: boolean) => void }
 
@@ -25,6 +25,7 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
+  const [translationSettings, setTranslationSettings] = useState<TranslationSettings | null>(null);
 
   const inspect = async (selectedPath: string, nextMapping: ImportMapping = {}) => {
     setBusy(true);
@@ -49,18 +50,20 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
 
   useEffect(() => { if (path && preview) { const timer = setTimeout(() => inspect(path, mapping), 250); return () => clearTimeout(timer); } }, [mapping]);
   useEffect(() => { let dispose: (() => void) | undefined; void listen<ImportProgress>("fab-import-progress", event => setProgress(event.payload)).then(value => { dispose = value; }); return () => dispose?.(); }, []);
+  useEffect(() => { void api.getTranslationSettings().then(setTranslationSettings).catch(() => setTranslationSettings(null)); }, []);
 
   const fields = mapping.fab_url || preview?.suggestedMapping.fab_url ? simpleFields : legacyFields;
   const canCommit = Boolean(mapping.fab_url || mapping.name || mapping.name_zh || mapping.name_en);
+  const visibleRows = report?.rows ?? preview?.rows ?? [];
 
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true">
     <header className="modal-header"><div><span className="eyebrow">批量录入</span><h2>导入 Excel / CSV</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
     <div className="import-body">
       {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>支持直接 URL，也支持显示标题但链接到 Fab 页面的 Excel 超链接；启用 Fab 自动翻译后会逐条补齐中文。</p><div><button className="primary-button" onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载 Excel 模板</button></div></div> : <>
         <div className="selected-file"><FileSpreadsheet size={20} /><span title={path}>{path.split(/[\\/]/).at(-1)}</span><button onClick={choose}>更换文件</button></div>
-        <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3>{fields === simpleFields && <p className="import-hint">Fab 单元格可填写完整 URL，也可使用网页标题作为显示文字并把真实地址设为 Excel 超链接。批量导入遵循设置中的 Fab 自动翻译开关。</p>}<div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select value={mapping[field.key] || ""} onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
+        <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3>{fields === simpleFields && <p className="import-hint">Fab 单元格可填写完整 URL，也可使用网页标题作为显示文字并把真实地址设为 Excel 超链接。{translationSettings ? translationSettings.fabAutoTranslate ? translationSettings.configured ? "导入时将逐条在线翻译中文；失败原因会列在对应行。" : "自动翻译已开启，但尚未配置百度翻译凭据；导入后将保留英文并逐行提示。" : "Fab 自动翻译已在设置中关闭；导入后保留英文。" : "批量导入遵循设置中的 Fab 自动翻译开关。"}</p>}<div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select value={mapping[field.key] || ""} onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
         {preview && <><div className="import-summary"><span className="valid"><CheckCircle2 size={15} />有效 {preview.validCount}</span><span className="warning"><AlertCircle size={15} />警告 {preview.warningCount}</span><span className="warning"><AlertCircle size={15} />重复 {preview.duplicateCount}</span><span className="error"><AlertCircle size={15} />错误 {preview.errorCount}</span></div>
-          <div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>行</th><th>名称</th><th>分类</th><th>状态</th><th>说明</th></tr></thead><tbody>{preview.rows.slice(0, 100).map(row => <tr key={row.row}><td>{row.row}</td><td>{row.name || "—"}</td><td>{row.actualCategoryPath || row.suggestedCategoryPath || "导入时识别"}</td><td><span className={`status ${row.status}`}>{row.status === "valid" ? "有效" : row.status === "warning" ? "警告" : row.status === "duplicate" ? "重复" : row.status === "imported" ? "已导入" : row.status === "skipped" ? "已跳过" : "错误"}</span></td><td>{row.messages.join("；") || "—"}</td></tr>)}</tbody></table></div></>}
+          {report && <h3>逐行导入结果</h3>}<div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>行</th><th>名称</th><th>分类</th><th>状态</th><th>说明</th></tr></thead><tbody>{visibleRows.slice(0, 500).map(row => <tr key={row.row}><td>{row.row}</td><td>{row.name || "—"}</td><td>{row.actualCategoryPath || row.suggestedCategoryPath || "导入时识别"}</td><td><span className={`status ${row.status}`}>{row.status === "valid" ? "有效" : row.status === "warning" ? "警告" : row.status === "duplicate" ? "重复" : row.status === "imported" ? "已导入" : row.status === "skipped" ? "已跳过" : "错误"}</span></td><td>{row.messages.join("；") || "—"}</td></tr>)}</tbody></table></div>{visibleRows.length > 500 && <p className="import-hint">仅显示前 500 行，共 {visibleRows.length} 行。</p>}</>}
         {report && <div className="report-banner">导入完成：新增 {report.imported}，跳过 {report.skipped}，失败 {report.failed}</div>}
         {busy && progress && <div className="import-live-progress"><div><span style={{ width: `${progress.total ? progress.current / progress.total * 100 : 0}%` }} /></div><strong>{progress.current} / {progress.total} · {progress.phase}</strong><small>{progress.currentName || "正在完成导入"}</small><p>成功 {progress.imported} · 跳过 {progress.skipped} · 失败 {progress.failed}</p></div>}
       </>}
