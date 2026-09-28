@@ -559,6 +559,18 @@ async fn dispatch(app: AppHandle) {
         }
     }
 }
+fn open_media_worker_connection(path: &Path) -> Result<rusqlite::Connection, String> {
+    let connection = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| format!("配置媒体导入数据库失败：{e}"))?;
+    // busy_timeout PRAGMA returns a row; execute_batch rejects it under extra_check.
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("配置媒体导入等待超时失败：{e}"))?;
+    Ok(connection)
+}
+
 async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
     let state = app.state::<AppState>();
     if state.active_library_id()? != task.library_id {
@@ -598,11 +610,7 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                 let (base, path) = state.with_active_mut(|active| {
                     Ok((active.base_dir.clone(), active.db_path.clone()))
                 })?;
-                let mut connection =
-                    rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
-                connection
-                    .execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
-                    .map_err(|e| e.to_string())?;
+                let mut connection = open_media_worker_connection(&path)?;
                 let resource = worker_app.path().resource_dir().ok();
                 let stop_app = worker_app.clone();
                 let stop_id = task.id.clone();
@@ -710,6 +718,98 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sqlite_busy_timeout_assignment_returns_a_result_row() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let timeout: i64 = connection
+            .query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+    #[test]
+    fn background_media_import_initializes_connection_and_commits_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let active = crate::db::open_database(&path).unwrap();
+        let source = dir.path().join("triangle.obj");
+        fs::write(&source, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let mut worker = open_media_worker_connection(&path).expect("后台导入连接应成功初始化");
+        assert_eq!(
+            worker
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            worker
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5000
+        );
+        let report = media_library::import_controlled(
+            &mut worker,
+            dir.path(),
+            None,
+            MediaImportRequest {
+                kind: MediaKind::Model,
+                paths: vec![source.to_string_lossy().into_owned()],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.failed, 0);
+        let id = report.rows[0].entry_id.as_ref().unwrap();
+        assert_eq!(
+            media_library::get(&active, id).unwrap().entry.name,
+            "triangle"
+        );
+    }
+    #[test]
+    fn background_image_import_keeps_existing_entries_and_skips_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let active = crate::db::open_database(&path).unwrap();
+        let source = dir.path().join("reference.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([20, 70, 120, 255]))
+            .save(&source)
+            .unwrap();
+        let mut worker = open_media_worker_connection(&path).unwrap();
+        for expected in [1, 0] {
+            let report = media_library::import_controlled(
+                &mut worker,
+                dir.path(),
+                None,
+                MediaImportRequest {
+                    kind: MediaKind::Image,
+                    paths: vec![source.to_string_lossy().into_owned()],
+                    folder_id: None,
+                    tags: vec![],
+                    favorite: false,
+                },
+                &|_, _, _, _| {},
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(report.imported, expected);
+            assert_eq!(report.failed, 0);
+            if expected == 0 {
+                assert_eq!(report.skipped, 1);
+            }
+        }
+        assert_eq!(
+            active
+                .query_row("SELECT COUNT(*) FROM media_entries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
     #[test]
     fn maintenance_is_exclusive_and_thumbnail_tasks_are_deduplicated() {
         let dir = tempfile::tempdir().unwrap();
