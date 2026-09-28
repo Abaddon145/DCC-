@@ -1,11 +1,36 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectUnit, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate } from "../types";
+import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, BatchTranslationReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate, ModelThumbnailJob } from "../types";
+import type { ProjectUnit } from "../types";
+import type { LibraryTask, LibraryTaskRequest } from "../types";
+
+async function runLibraryTask<T>(payload: LibraryTaskRequest): Promise<T> {
+  const created=await invoke<LibraryTask>("start_library_task",{payload});
+  window.dispatchEvent(new Event("library-task-started"));
+  for (;;) {
+    const task=await invoke<LibraryTask>("get_library_task",{id:created.id});
+    if(task.status==="completed")return task.result as T;
+    if(task.status==="failed")throw new Error(task.message||"任务失败，请查看任务中心");
+    if(task.status==="stopped"||task.status==="interrupted")throw new Error("任务已停止，已完成结果保留；请在任务中心检查并手动继续");
+    await new Promise(resolve=>window.setTimeout(resolve,500));
+  }
+}
 
 export const assetMediaUrl = (id: string, variant: "stream" | "thumbnail" | "original" = "stream") => `http://dcc-media.localhost/${encodeURIComponent(id)}/${variant}`;
 export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localhost/library/file/${encodeURIComponent(fileId)}`;
 export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
+  queueModelThumbnailTasks: () => invoke<number>("queue_model_thumbnail_tasks"),
+  getModelThumbnailTask: (id:string) => invoke<ModelThumbnailJob>("get_model_thumbnail_task",{id}),
+  finishModelThumbnailTask: (id:string,bytes:number[]|null,error:string|null) => invoke<void>("finish_model_thumbnail_task",{id,bytes,error}),
+  listLibraryTasks: () => invoke<LibraryTask[]>("list_library_tasks"),
+  getLibraryTask: (id:string) => invoke<LibraryTask>("get_library_task",{id}),
+  cancelLibraryTask: (id:string) => invoke<void>("cancel_library_task",{id}),
+  retryLibraryTask: (id:string) => invoke<LibraryTask>("retry_library_task",{id}),
+  exitWhenTasksIdle: () => invoke<void>("exit_when_tasks_idle"),
+  getSelectionLabels: (ids: string[], media: boolean) => invoke<{id:string;name:string}[]>("get_selection_labels", { ids, media }),
+  getWorkspaceContext: (moduleId: string) => invoke<{ libraryId: string; enabled: boolean; value: unknown }>("get_workspace_context", { moduleId }),
+  saveWorkspaceContext: (libraryId: string, moduleId: string, value: unknown) => invoke<boolean>("save_workspace_context", { libraryId, moduleId, value }),
   getMeta: (contentLanguage: ContentLanguage) => invoke<LibraryMeta>("get_library_meta", { contentLanguage }),
   search: (request: SearchRequest) => invoke<Page<AssetCard>>("search_assets", { request }),
   selectAssetIds: (request: SearchRequest) => invoke<AssetSelection>("select_asset_ids", { request }),
@@ -13,8 +38,8 @@ export const api = {
   saveAsset: (input: AssetInput) => invoke<AssetDetail>("upsert_asset", { input }),
   deleteAsset: (id: string) => invoke<void>("delete_asset", { id }),
   setFavorite: (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite }),
-  addCategory: (name: string, parentId: string | null) => invoke("upsert_category", { id: null, name, parentId }),
-  renameCategory: (id: string, name: string) => invoke("upsert_category", { id, name, parentId: null, preserveParent: true }),
+  addCategory: (name: string, parentId: string | null) => invoke<string>("upsert_category", { id: null, name, parentId }),
+  renameCategory: (id: string, name: string) => invoke<string>("upsert_category", { id, name, parentId: null, preserveParent: true }),
   deleteCategory: (id: string) => invoke<void>("delete_category", { id }),
   getDeleteImpact: (request: DeleteRequest) => invoke<DeleteResult>("get_delete_impact", { request }),
   deleteLibraryItems: (request: DeleteRequest) => invoke<DeleteResult>("delete_library_items", { request }),
@@ -30,8 +55,12 @@ export const api = {
   reorderAssetMedia: (assetId: string, ids: string[]) => invoke<void>("reorder_asset_media", { assetId, ids }),
   setAssetCoverMedia: (assetId: string, mediaId: string | null, imageId: string | null) => invoke<void>("set_asset_cover_media", { assetId, mediaId, imageId }),
   searchMediaEntries: (request: MediaSearchRequest) => invoke<Page<MediaEntry>>("search_media_entries", { request }),
+  selectMediaEntryIds: (request: MediaSearchRequest) => invoke<string[]>("select_media_entry_ids", { request }),
   getMediaEntry: (id: string) => invoke<MediaEntryDetail>("get_media_entry", { id }),
-  importMediaEntries: (request: MediaImportRequest) => invoke<MediaImportReport>("import_media_entries", { request }),
+  pendingModelThumbnails: () => invoke<ModelThumbnailJob[]>("pending_model_thumbnails"),
+  saveModelThumbnail: (entryId: string, bytes: number[]) => invoke<string>("save_model_thumbnail", { entryId, bytes }),
+  reportModelThumbnailFailure: (entryId: string, message: string) => invoke<void>("report_model_thumbnail_failure", { entryId, message }),
+  importMediaEntries: (request: MediaImportRequest) => runLibraryTask<MediaImportReport>({kind:"mediaImport",request}),
   updateMediaEntry: (id: string, input: Pick<MediaEntry, "name" | "description" | "author" | "sourceUrl" | "license" | "tags">) => invoke<void>("update_media_entry", { id, ...input }),
   deleteMediaEntries: (ids: string[]) => invoke<number>("delete_media_entries", { ids }),
   batchUpdateMediaEntries: (update: MediaBatchUpdate) => invoke<BatchUpdateReport>("batch_update_media_entries", { update }),
@@ -49,12 +78,13 @@ export const api = {
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
   copyCode: (id: string) => invoke<void>("copy_extraction_code", { id }),
   inspectImport: (path: string, mapping: ImportMapping = {}) => invoke<ImportPreview>("preview_import", { path, mapping }),
-  commitImport: (path: string, mapping: ImportMapping) => invoke<ImportReport>("import_assets", { path, mapping }),
+  commitImport: (path: string, mapping: ImportMapping, autoTranslate: boolean) => runLibraryTask<ImportReport>({kind:"fabImport",request:{path,mapping,autoTranslate}}),
+  batchTranslateMissingAssets: (ids: string[]) => runLibraryTask<BatchTranslationReport>({kind:"translation",request:{ids}}),
   exportTemplate: (path: string) => invoke<void>("export_import_template", { path }),
-  exportBackup: (path: string) => invoke<void>("export_backup", { path }),
-  restoreBackup: (path: string) => invoke<void>("restore_backup", { path }),
+  exportBackup: (path: string) => runLibraryTask<void>({kind:"backup",request:{path}}),
+  restoreBackup: (path: string) => runLibraryTask<void>({kind:"restore",request:{path}}),
   getLibraryLocations: () => invoke<LibraryLocationState>("get_library_locations"),
-  changeLibrary: (request: StorageChangeRequest) => invoke<LibraryLocationState>("change_library", { request }),
+  changeLibrary: (request: StorageChangeRequest) => request.mode === "migrate" ? runLibraryTask<LibraryLocationState>({kind:"migration",request}) : invoke<LibraryLocationState>("change_library", { request }),
   forgetRecentLibrary: (path: string) => invoke<void>("forget_recent_library", { path }),
   readClipboard: () => invoke<string>("read_clipboard_text"),
   parseShareText: (text: string) => invoke<ParsedShareText>("parse_share_text", { text }),
@@ -67,7 +97,7 @@ export const api = {
   undoLibraryMove: (token: string) => invoke<UndoMoveResult>("undo_library_move", { token }),
   getHealth: () => invoke<HealthSummary>("get_library_health"),
   listHealthIssues: (request: HealthIssueRequest) => invoke<Page<AssetCard>>("list_health_issues", { request }),
-  checkAllShareLinks: () => invoke<LinkCheckReport>("check_all_share_links"),
+  checkAllShareLinks: () => runLibraryTask<LinkCheckReport>({kind:"links"}),
   cancelShareLinkCheck: () => invoke<boolean>("cancel_share_link_check"),
   checkAssetShareLink: (id: string) => invoke<LinkCheckResult>("check_asset_share_link", { id }),
   getTranslationSettings: () => invoke<TranslationSettings>("get_translation_settings"),
@@ -127,6 +157,7 @@ export const api = {
   ,updateProjectAssets: (update: ProjectAssetUpdate) => invoke<number>("update_project_assets", { update })
   ,removeProjectAssets: (projectId: string, assetIds: string[]) => invoke<number>("remove_project_assets", { projectId, assetIds })
   ,saveProjectUnit: (input: ProjectUnitInput) => invoke<ProjectUnit>("upsert_project_unit", { input })
+  ,setProjectShotVideo: (shotId: string, entryId: string | null) => invoke<void>("set_project_shot_video", { shotId, entryId })
   ,deleteProjectUnit: (id: string) => invoke<[number, number]>("delete_project_unit", { id })
   ,reorderProjectUnits: (projectId: string, parentId: string | null, ids: string[]) => invoke<void>("reorder_project_units", { projectId, parentId, ids })
   ,saveProjectTask: (input: ProjectTaskInput) => invoke<ProjectTask>("upsert_project_task", { input })

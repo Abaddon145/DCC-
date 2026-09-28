@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
-import { BriefcaseBusiness, CheckSquare, Images, X } from "lucide-react";
+import { BriefcaseBusiness, CheckSquare, Images, Languages, X } from "lucide-react";
 import type { BatchAssetUpdate, Category } from "../types";
 import { splitValues } from "../lib/validation";
 
-interface Props { count: number; totalCount: number; selectingAll?: boolean; categories: Category[]; onSelectAll: () => void; onClear: () => void; onExit: () => void; onAddToReference: () => void; onAddToProject?: () => void; onApply: (update: Omit<BatchAssetUpdate, "ids" | "contentLanguage">) => Promise<void> }
+interface Props { count: number; totalCount: number; selectingAll?: boolean; categories: Category[]; onSelectAll: () => void; onClear: () => void; onExit: () => void; onAddToReference: () => void; onAddToProject?: () => void; onTranslate: () => void; translating?: boolean; onApply: (update: Omit<BatchAssetUpdate, "ids" | "contentLanguage">) => Promise<void> }
 
-export function BatchToolbar({ count, totalCount, selectingAll = false, categories, onSelectAll, onClear, onExit, onAddToReference, onAddToProject = () => undefined, onApply }: Props) {
+export function BatchToolbar({ count, totalCount, selectingAll = false, categories, onSelectAll, onClear, onExit, onAddToReference, onAddToProject = () => undefined, onTranslate, translating = false, onApply }: Props) {
   const [category, setCategory] = useState("unchanged");
   const [addTags, setAddTags] = useState("");
   const [removeTags, setRemoveTags] = useState("");
@@ -27,6 +27,7 @@ export function BatchToolbar({ count, totalCount, selectingAll = false, categori
     <select value={favorite} onChange={event => setFavorite(event.target.value)}><option value="unchanged">收藏不变</option><option value="true">设为收藏</option><option value="false">取消收藏</option></select>
     <button className="secondary-button compact" disabled={!count || busy} onClick={onAddToReference}><Images size={14} />加入参考板</button>
     <button className="secondary-button compact" disabled={!count || busy} onClick={onAddToProject}><BriefcaseBusiness size={14} />加入项目</button>
+    <button className="secondary-button compact" disabled={!count || busy || translating} onClick={onTranslate}><Languages size={14} />{translating ? "正在补译…" : "补齐双语"}</button>
     <button className="primary-button compact" disabled={!count || busy} onClick={apply}>{busy ? "处理中…" : "应用"}</button><button className="icon-button subtle" onClick={onExit}><X size={16} /></button>
   </div>;
 }

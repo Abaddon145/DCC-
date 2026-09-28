@@ -267,6 +267,9 @@ fn default_accent() -> String {
 fn default_density() -> String {
     "comfortable".into()
 }
+fn default_font_scale() -> f64 {
+    1.0
+}
 fn default_sidebar_width() -> i64 {
     248
 }
@@ -285,11 +288,29 @@ fn default_card_size() -> String {
 fn default_cover_fit() -> String {
     "cover".into()
 }
+fn default_cover_aspect_ratio() -> String {
+    "standard".into()
+}
 fn default_sort() -> String {
     "updated".into()
 }
 fn default_startup_module() -> String {
     "library".into()
+}
+fn default_context_pane_widths() -> HashMap<String, i64> {
+    [
+        ("library", 248),
+        ("imageLibrary", 220),
+        ("modelLibrary", 260),
+        ("audioLibrary", 220),
+        ("videoLibrary", 220),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.into(), value))
+    .collect()
+}
+fn default_collapsed_module_groups() -> Vec<String> {
+    vec!["manage".into()]
 }
 
 pub fn default_shortcuts() -> HashMap<String, String> {
@@ -318,6 +339,10 @@ pub struct GlobalPreferences {
     pub accent_color: String,
     #[serde(default = "default_density")]
     pub density: String,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f64,
+    #[serde(default = "default_density")]
+    pub toolbar_density: String,
     #[serde(default)]
     pub reduce_motion: bool,
     #[serde(default = "default_sidebar_width")]
@@ -334,6 +359,8 @@ impl Default for GlobalPreferences {
             theme: default_theme(),
             accent_color: default_accent(),
             density: default_density(),
+            font_scale: default_font_scale(),
+            toolbar_density: default_density(),
             reduce_motion: false,
             sidebar_width: default_sidebar_width(),
             detail_width: default_detail_width(),
@@ -389,6 +416,8 @@ pub struct LibraryPreferences {
     pub card_size: String,
     #[serde(default = "default_cover_fit")]
     pub cover_fit: String,
+    #[serde(default = "default_cover_aspect_ratio")]
+    pub cover_aspect_ratio: String,
     #[serde(default)]
     pub card_fields: CardFieldVisibility,
     #[serde(default = "default_sort")]
@@ -397,8 +426,18 @@ pub struct LibraryPreferences {
     pub remember_search: bool,
     #[serde(default = "default_true_value")]
     pub category_tree_expanded: bool,
+    #[serde(default = "default_context_pane_widths")]
+    pub context_pane_widths: HashMap<String, i64>,
+    #[serde(default)]
+    pub collapsed_context_panes: Vec<String>,
+    #[serde(default = "default_collapsed_module_groups")]
+    pub collapsed_module_groups: Vec<String>,
     #[serde(default)]
     pub last_context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub workspace_contexts: HashMap<String, serde_json::Value>,
+    #[serde(default = "default_true_value")]
+    pub remember_workspace: bool,
 }
 
 impl Default for LibraryPreferences {
@@ -411,11 +450,17 @@ impl Default for LibraryPreferences {
             asset_view: default_asset_view(),
             card_size: default_card_size(),
             cover_fit: default_cover_fit(),
+            cover_aspect_ratio: default_cover_aspect_ratio(),
             card_fields: CardFieldVisibility::default(),
             default_sort: default_sort(),
             remember_search: false,
             category_tree_expanded: true,
+            context_pane_widths: default_context_pane_widths(),
+            collapsed_context_panes: vec![],
+            collapsed_module_groups: default_collapsed_module_groups(),
             last_context: None,
+            workspace_contexts: HashMap::new(),
+            remember_workspace: true,
         }
     }
 }
@@ -900,6 +945,26 @@ pub struct ImportRowResult {
     pub duplicate_asset_id: Option<String>,
     #[serde(default)]
     pub duplicate_source: Option<String>,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTranslationReport {
+    pub completed: usize,
+    pub pending: usize,
+    pub skipped: usize,
+    pub rows: Vec<BatchTranslationRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTranslationRow {
+    pub asset_id: String,
+    pub name: String,
+    pub status: String,
+    pub messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1093,6 +1158,8 @@ pub struct ProjectInput {
     pub resolution_height: Option<i64>,
     pub frame_rate: Option<f64>,
     pub cover_asset_id: Option<String>,
+    #[serde(default)]
+    pub cover_media_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1110,6 +1177,8 @@ pub struct ProjectSummary {
     pub frame_rate: Option<f64>,
     pub cover_asset_id: Option<String>,
     pub cover_image_id: Option<String>,
+    pub cover_media_entry_id: Option<String>,
+    pub cover_media_file_id: Option<String>,
     pub asset_count: i64,
     pub unavailable_asset_count: i64,
     pub task_count: i64,
@@ -1155,6 +1224,9 @@ pub struct ProjectUnit {
     pub resolution_width: Option<i64>,
     pub resolution_height: Option<i64>,
     pub frame_rate: Option<f64>,
+    pub video_media_entry_id: Option<String>,
+    pub video_stream_file_id: Option<String>,
+    pub video_name: Option<String>,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -1273,6 +1345,7 @@ pub struct CreativeProject {
     pub units: Vec<ProjectUnit>,
     pub tasks: Vec<ProjectTask>,
     pub assets: Vec<ProjectAssetLink>,
+    pub media: Vec<MediaEntry>,
     pub boards: Vec<ProjectBoardLink>,
     pub paths: Vec<ProjectPathShortcut>,
 }

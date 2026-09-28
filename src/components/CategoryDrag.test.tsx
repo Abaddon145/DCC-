@@ -10,7 +10,7 @@ const categories: Category[] = [
   { id: "a2", name: "A2", parentId: "a", sortOrder: 1, assetCount: 0 }
 ];
 
-function renderTree(activeDrag: LibraryDragPayload, overrides: Record<string, unknown> = {}) {
+function renderTree(activeDrag: LibraryDragPayload | null, overrides: Record<string, unknown> = {}) {
   const props = {
     categories, selected: [], total: 0, activeDrag,
     onChange: vi.fn(), onAdd: vi.fn(), onRename: vi.fn(), onDelete: vi.fn(), onPointerDragStart: vi.fn(),
@@ -63,5 +63,10 @@ describe("category drag organization", () => {
     act(() => vi.advanceTimersByTime(600));
     expect(screen.getByRole("button", { name: /^A10$/ })).toBeInTheDocument();
     vi.useRealTimers();
+  });
+
+  it("reveals a newly selected child even when the tree normally starts collapsed", () => {
+    renderTree(null, { defaultExpanded: false, selected: ["a1"] });
+    expect(screen.getByRole("button", { name: /^A10$/ })).toBeInTheDocument();
   });
 });

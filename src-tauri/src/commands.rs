@@ -1,7 +1,23 @@
 use crate::{
-    backup, db, fab, images, importer, link_checker, media, media_library, models::*, organization,
-    projects, reference_boards, state::AppState, translation,
+    backup, bilingual, db, fab, images, importer, link_checker, media, media_library, models::*,
+    organization, projects, reference_boards, state::AppState, translation,
 };
+
+#[tauri::command]
+pub fn get_selection_labels(
+    state: State<AppState>,
+    ids: Vec<String>,
+    media: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    if ids.len() > 5000 {
+        return Err("单次最多读取 5000 项".into());
+    }
+    state.with_library(|connection,_| {
+        let sql = if media {"SELECT name FROM media_entries WHERE id=?1"} else {"SELECT COALESCE((SELECT name FROM asset_localizations WHERE asset_id=assets.id AND locale='zh-CN' AND name<>''),name) FROM assets WHERE id=?1"};
+        let mut statement=connection.prepare(sql).map_err(|e|e.to_string())?;
+        Ok(ids.into_iter().map(|id| {let name=statement.query_row([&id],|r|r.get::<_,String>(0)).unwrap_or_default();serde_json::json!({"id":id,"name":name})}).collect())
+    })
+}
 
 #[tauri::command]
 pub fn search_media_entries(
@@ -11,8 +27,41 @@ pub fn search_media_entries(
     state.with_library(|connection, _| media_library::search(connection, &request))
 }
 #[tauri::command]
+pub fn select_media_entry_ids(
+    state: State<AppState>,
+    request: MediaSearchRequest,
+) -> Result<Vec<String>, String> {
+    state.with_library(|connection, _| media_library::select_ids(connection, &request))
+}
+#[tauri::command]
 pub fn get_media_entry(state: State<AppState>, id: String) -> Result<MediaEntryDetail, String> {
     state.with_library(|connection, _| media_library::get(connection, &id))
+}
+#[tauri::command]
+pub fn pending_model_thumbnails(
+    state: State<AppState>,
+) -> Result<Vec<media_library::ModelThumbnailJob>, String> {
+    state.with_library(|connection, _| media_library::pending_model_thumbnails(connection))
+}
+#[tauri::command]
+pub fn save_model_thumbnail(
+    state: State<AppState>,
+    entry_id: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    state.with_library_mut(|connection, base| {
+        media_library::save_model_thumbnail(connection, base, &entry_id, &bytes)
+    })
+}
+#[tauri::command]
+pub fn report_model_thumbnail_failure(
+    state: State<AppState>,
+    entry_id: String,
+    message: String,
+) -> Result<(), String> {
+    state.with_library(|connection, _| {
+        media_library::report_model_thumbnail_failure(connection, &entry_id, &message)
+    })
 }
 #[tauri::command]
 pub fn import_media_entries(
@@ -226,6 +275,17 @@ pub fn upsert_project_unit(
 }
 
 #[tauri::command]
+pub fn set_project_shot_video(
+    state: State<AppState>,
+    shot_id: String,
+    entry_id: Option<String>,
+) -> Result<(), String> {
+    state.with_library_mut(|connection, _| {
+        projects::set_project_shot_video(connection, &shot_id, entry_id.as_deref())
+    })
+}
+
+#[tauri::command]
 pub fn delete_project_unit(state: State<AppState>, id: String) -> Result<(i64, i64), String> {
     state.with_library(|connection, _| projects::delete_project_unit(connection, &id))
 }
@@ -403,11 +463,70 @@ pub fn save_global_preferences(
 #[tauri::command]
 pub fn save_library_preferences(
     state: State<AppState>,
-    preferences: LibraryPreferences,
+    mut preferences: LibraryPreferences,
 ) -> Result<LibraryPreferences, String> {
     state.with_library(|connection, _| {
+        preferences.workspace_contexts =
+            organization::load_library_preferences(connection)?.workspace_contexts;
         organization::save_library_preferences(connection, preferences)
     })
+}
+
+fn validate_workspace_module(module_id: &str) -> Result<(), String> {
+    if [
+        "navigation",
+        "library",
+        "favorites",
+        "recent",
+        "health",
+        "image",
+        "model",
+        "audio",
+        "video",
+        "projects",
+    ]
+    .contains(&module_id)
+    {
+        Ok(())
+    } else {
+        Err("未知的浏览模块".into())
+    }
+}
+
+#[tauri::command]
+pub fn get_workspace_context(
+    state: State<AppState>,
+    module_id: String,
+) -> Result<serde_json::Value, String> {
+    validate_workspace_module(&module_id)?;
+    let id = state.active_library_id()?;
+    state.with_library_if_id(&id, |connection, _| {
+        let prefs = organization::load_library_preferences(connection)?;
+        Ok(serde_json::json!({"libraryId":id,"enabled":prefs.remember_workspace,"value":prefs.workspace_contexts.get(&module_id)}))
+    })?.ok_or("素材库已切换，请重新读取浏览状态".into())
+}
+
+#[tauri::command]
+pub fn save_workspace_context(
+    state: State<AppState>,
+    library_id: String,
+    module_id: String,
+    value: serde_json::Value,
+) -> Result<bool, String> {
+    validate_workspace_module(&module_id)?;
+    if value.to_string().len() > 131072 {
+        return Err("浏览状态过大".into());
+    }
+    Ok(state
+        .with_library_if_id(&library_id, |connection, _| {
+            let mut prefs = organization::load_library_preferences(connection)?;
+            if prefs.remember_workspace {
+                prefs.workspace_contexts.insert(module_id, value);
+                organization::save_library_preferences(connection, prefs)?;
+            }
+            Ok(true)
+        })?
+        .unwrap_or(false))
 }
 
 #[tauri::command]
@@ -776,10 +895,10 @@ pub async fn import_assets(
     state: State<'_, AppState>,
     path: String,
     mapping: HashMap<String, String>,
+    auto_translate: bool,
 ) -> Result<ImportReport, String> {
+    let library_id = state.active_library_id()?;
     if importer::is_fab_import(&mapping) {
-        let (_, fab_auto_translate) = state.preferences()?;
-        let glossary_terms = state.effective_translation_terms("en", "zh-CN")?;
         let rows = importer::fab_rows(&PathBuf::from(&path), mapping)?;
         let total = rows.len();
         let mut report = ImportReport {
@@ -789,6 +908,9 @@ pub async fn import_assets(
             rows: Vec::new(),
         };
         for (index, row) in rows.into_iter().enumerate() {
+            if state.tasks.stop_label("Fab / 表格导入") {
+                break;
+            }
             emit_import_progress(
                 &app,
                 index + 1,
@@ -808,6 +930,7 @@ pub async fn import_assets(
                     actual_category_path: None,
                     duplicate_asset_id: None,
                     duplicate_source: None,
+                    asset_id: None,
                 });
                 continue;
             }
@@ -824,13 +947,16 @@ pub async fn import_assets(
                         actual_category_path: None,
                         duplicate_asset_id: None,
                         duplicate_source: None,
+                        asset_id: None,
                     });
                     continue;
                 }
             };
-            let duplicate = state.with_library(|connection, _| {
-                db::fab_duplicate_match(connection, &listing_id, None)
-            })?;
+            let duplicate = state
+                .with_library_if_id(&library_id, |connection, _| {
+                    db::fab_duplicate_match(connection, &listing_id, None)
+                })?
+                .ok_or("导入过程中已切换素材库，已停止")?;
             if let Some(duplicate) = duplicate {
                 report.skipped += 1;
                 report.rows.push(ImportRowResult {
@@ -852,6 +978,7 @@ pub async fn import_assets(
                     actual_category_path: Some(duplicate.category_path),
                     duplicate_asset_id: Some(duplicate.asset_id),
                     duplicate_source: Some(duplicate.location),
+                    asset_id: None,
                 });
                 continue;
             }
@@ -868,14 +995,17 @@ pub async fn import_assets(
                         actual_category_path: None,
                         duplicate_asset_id: None,
                         duplicate_source: None,
+                        asset_id: None,
                     });
                     continue;
                 }
             };
             let suggested_category = metadata.suggested_category_path.join(" / ");
-            let category_existed = state.with_library(|connection, _| {
-                db::auto_category_path_exists(connection, &metadata.suggested_category_path)
-            })?;
+            let category_existed = state
+                .with_library_if_id(&library_id, |connection, _| {
+                    db::auto_category_path_exists(connection, &metadata.suggested_category_path)
+                })?
+                .ok_or("导入过程中已切换素材库，已停止")?;
             emit_import_progress(
                 &app,
                 index + 1,
@@ -892,18 +1022,14 @@ pub async fn import_assets(
                     extraction_code: String::new(),
                 })
             };
-            let mut localizations = HashMap::new();
-            localizations.insert(
-                "en".into(),
-                LocalizedAssetText {
-                    name: metadata.name.clone(),
-                    description: metadata.description.clone(),
-                    tags: metadata.tags.clone(),
-                    license: metadata.license.clone(),
-                },
-            );
+            let mut localizations = bilingual::fab_localizations(LocalizedAssetText {
+                name: metadata.name.clone(),
+                description: metadata.description.clone(),
+                tags: metadata.tags.clone(),
+                license: metadata.license.clone(),
+            });
             let mut messages = Vec::new();
-            if fab_auto_translate {
+            if auto_translate {
                 emit_import_progress(
                     &app,
                     index + 1,
@@ -912,22 +1038,11 @@ pub async fn import_assets(
                     &metadata.name,
                     "在线翻译中文信息",
                 );
-                let request = TranslationRequest {
-                    source_language: "en".into(),
-                    target_language: "zh-CN".into(),
-                    fields: LocalizedAssetText {
-                        name: metadata.name.clone(),
-                        description: metadata.description.clone(),
-                        tags: metadata.tags.clone(),
-                        license: metadata.license.clone(),
-                    },
-                };
-                match translation::translate(request, &glossary_terms).await {
-                    Ok(preview) => {
-                        apply_fab_translation(&mut localizations, &mut messages, preview)
-                    }
-                    Err(error) => messages.push(format!("自动翻译跳过：{error}")),
-                }
+                messages.extend(translate_missing_localizations(&state, &mut localizations).await);
+            }
+            let pending = bilingual::pending_fields(&localizations);
+            if !pending.is_empty() {
+                messages.push(format!("待补译：{}", pending.join("、")));
             }
             let images = metadata
                 .preview_images
@@ -965,12 +1080,17 @@ pub async fn import_assets(
                 favorite: false,
                 images,
                 localizations,
-                content_language: "en".into(),
+                content_language: if bilingual::has_han(&metadata.name) {
+                    "zh-CN"
+                } else {
+                    "en"
+                }
+                .into(),
             };
-            match state.with_library_mut(|connection, base_dir| {
-                db::upsert_asset(connection, base_dir, input)
-            }) {
-                Ok(_) => {
+            match state.with_library_mut_if_id(&library_id, |connection, base_dir| {
+                Ok(db::upsert_asset(connection, base_dir, input))
+            })? {
+                Some(Ok(asset)) => {
                     report.imported += 1;
                     let mut has_warnings = !messages.is_empty();
                     if suggested_category == "其他 / 待整理" {
@@ -994,7 +1114,9 @@ pub async fn import_assets(
                     report.rows.push(ImportRowResult {
                         row: row.row,
                         name: metadata.name,
-                        status: if has_warnings {
+                        status: if !pending.is_empty() {
+                            "translationPending".into()
+                        } else if has_warnings {
                             "warning".into()
                         } else {
                             "imported".into()
@@ -1004,9 +1126,10 @@ pub async fn import_assets(
                         actual_category_path: Some(suggested_category),
                         duplicate_asset_id: None,
                         duplicate_source: None,
+                        asset_id: Some(asset.card.id),
                     });
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     report.failed += 1;
                     report.rows.push(ImportRowResult {
                         row: row.row,
@@ -1017,39 +1140,189 @@ pub async fn import_assets(
                         actual_category_path: None,
                         duplicate_asset_id: None,
                         duplicate_source: None,
+                        asset_id: None,
                     });
                 }
+                None => return Err("导入过程中已切换素材库，已停止以避免写入其他库".into()),
             }
         }
         emit_import_progress(&app, total, total, &report, "", "完成");
         return Ok(report);
     }
-    state.with_library_mut(|connection, base_dir| {
-        importer::commit(connection, base_dir, &PathBuf::from(path), mapping)
-    })
+    let mut report = state
+        .with_library_mut_if_id(&library_id, |connection, base_dir| {
+            importer::commit(connection, base_dir, &PathBuf::from(path), mapping)
+        })?
+        .ok_or("导入过程中已切换素材库，已停止以避免写入其他库")?;
+    let report_total = report.rows.len();
+    for (index, row) in report.rows.iter_mut().enumerate() {
+        if state.tasks.stop_label("Fab / 表格导入") {
+            break;
+        }
+        let Some(asset_id) = row.asset_id.clone() else {
+            continue;
+        };
+        let Some(asset) = state.with_library_if_id(&library_id, |connection, _| {
+            db::get_asset(connection, &asset_id, false, "en")
+        })?
+        else {
+            return Err("导入过程中已切换素材库，已停止翻译".into());
+        };
+        let mut localizations = asset.localizations;
+        if auto_translate {
+            let _ = app.emit(
+                "fab-import-progress",
+                ImportProgress {
+                    current: index + 1,
+                    total: report_total,
+                    imported: report.imported,
+                    skipped: report.skipped,
+                    failed: report.failed,
+                    current_name: row.name.clone(),
+                    phase: "在线补齐双语信息".into(),
+                },
+            );
+            row.messages
+                .extend(translate_missing_localizations(&state, &mut localizations).await);
+            localizations = state
+                .with_library_mut_if_id(&library_id, |connection, _| {
+                    db::fill_missing_localizations(connection, &asset_id, localizations)
+                })?
+                .ok_or("导入过程中已切换素材库，已停止翻译")?;
+        }
+        let pending = bilingual::pending_fields(&localizations);
+        if !pending.is_empty() {
+            row.status = "translationPending".into();
+            row.messages.push(format!("待补译：{}", pending.join("、")));
+        }
+    }
+    Ok(report)
 }
 
-fn apply_fab_translation(
+async fn translate_missing_localizations(
+    state: &AppState,
     localizations: &mut HashMap<String, LocalizedAssetText>,
-    messages: &mut Vec<String>,
-    preview: TranslationPreview,
-) {
-    messages.extend(
-        preview
-            .warnings
-            .into_iter()
-            .map(|warning| format!("自动翻译：{warning}")),
-    );
-    let translated = preview.fields;
-    if !translated.name.trim().is_empty()
-        || !translated.description.trim().is_empty()
-        || !translated.tags.is_empty()
-        || !translated.license.trim().is_empty()
-    {
-        localizations.insert("zh-CN".into(), translated);
-    } else if messages.is_empty() {
-        messages.push("自动翻译未返回可保存的中文内容".into());
+) -> Vec<String> {
+    if bilingual::pending_fields(localizations).is_empty() {
+        return Vec::new();
     }
+    if !translation::is_configured() {
+        return vec!["尚未配置百度翻译凭据".into()];
+    }
+    let mut messages = Vec::new();
+    for (source, target) in [("en", "zh-CN"), ("zh-CN", "en")] {
+        let Some(request) = bilingual::missing_request(localizations, source, target) else {
+            continue;
+        };
+        let terms = match state.effective_translation_terms(source, target) {
+            Ok(value) => value,
+            Err(error) => {
+                messages.push(error);
+                continue;
+            }
+        };
+        match translation::translate(request, &terms).await {
+            Ok(preview) => {
+                messages.extend(bilingual::merge_preview(localizations, target, preview))
+            }
+            Err(error) => messages.push(format!("{target} 自动翻译失败：{error}")),
+        }
+    }
+    messages
+}
+
+#[tauri::command]
+pub async fn batch_translate_missing_assets(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<BatchTranslationReport, String> {
+    if ids.len() > 5000 {
+        return Err("单次最多补译 5000 条素材".into());
+    }
+    let library_id = state.active_library_id()?;
+    let mut report = BatchTranslationReport::default();
+    let total = ids.len();
+    for (index, id) in ids.into_iter().enumerate() {
+        if state.tasks.stop_label("双语补译") {
+            break;
+        }
+        let detail = state
+            .with_library_if_id(&library_id, |connection, _| {
+                Ok(db::get_asset(connection, &id, false, "en"))
+            })?
+            .ok_or("补译过程中已切换素材库，已停止")?;
+        let asset = match detail {
+            Ok(asset) => asset,
+            Err(error) => {
+                report.skipped += 1;
+                report.rows.push(BatchTranslationRow {
+                    asset_id: id,
+                    name: String::new(),
+                    status: "skipped".into(),
+                    messages: vec![error],
+                });
+                continue;
+            }
+        };
+        let name = asset.card.name;
+        let mut localizations = asset.localizations;
+        if bilingual::pending_fields(&localizations).is_empty() {
+            report.skipped += 1;
+            report.rows.push(BatchTranslationRow {
+                asset_id: id,
+                name,
+                status: "skipped".into(),
+                messages: vec!["双语字段已完整".into()],
+            });
+            continue;
+        }
+        let _ = app.emit(
+            "batch-translation-progress",
+            ImportProgress {
+                current: index + 1,
+                total,
+                imported: report.completed,
+                skipped: report.skipped,
+                failed: report.pending,
+                current_name: name.clone(),
+                phase: "在线补齐双语信息".into(),
+            },
+        );
+        state.tasks.progress(
+            "双语补译",
+            index + 1,
+            total,
+            name.clone(),
+            "在线补齐双语信息".into(),
+        );
+        state.tasks.checkpoint(
+            "双语补译",
+            serde_json::to_value(&report).map_err(|e| e.to_string())?,
+        );
+        let mut messages = translate_missing_localizations(&state, &mut localizations).await;
+        let persisted = state
+            .with_library_mut_if_id(&library_id, |connection, _| {
+                db::fill_missing_localizations(connection, &id, localizations)
+            })?
+            .ok_or("补译过程中已切换素材库，已停止")?;
+        let pending = bilingual::pending_fields(&persisted);
+        let status = if pending.is_empty() {
+            report.completed += 1;
+            "complete"
+        } else {
+            report.pending += 1;
+            messages.push(format!("待补译：{}", pending.join("、")));
+            "pending"
+        };
+        report.rows.push(BatchTranslationRow {
+            asset_id: id,
+            name,
+            status: status.into(),
+            messages,
+        });
+    }
+    Ok(report)
 }
 
 fn emit_import_progress(
@@ -1060,6 +1333,18 @@ fn emit_import_progress(
     current_name: &str,
     phase: &str,
 ) {
+    app.state::<AppState>().tasks.progress(
+        "Fab / 表格导入",
+        current,
+        total,
+        current_name.into(),
+        phase.into(),
+    );
+    if let Ok(result) = serde_json::to_value(report) {
+        app.state::<AppState>()
+            .tasks
+            .checkpoint("Fab / 表格导入", result);
+    }
     let _ = app.emit(
         "fab-import-progress",
         ImportProgress {
@@ -1088,6 +1373,9 @@ pub fn export_backup(state: State<AppState>, path: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn restore_backup(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
+    if state.tasks.busy() {
+        return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
+    }
     if app.get_webview_window("reference-board").is_some()
         && state.reference_window_board_id()?.is_some()
     {
@@ -1107,6 +1395,9 @@ pub fn change_library(
     state: State<AppState>,
     request: StorageChangeRequest,
 ) -> Result<LibraryLocationState, String> {
+    if state.tasks.busy() {
+        return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
+    }
     if app.get_webview_window("reference-board").is_some()
         && state.reference_window_board_id()?.is_some()
     {
@@ -1626,27 +1917,5 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.share_url, "https://pan.baidu.com/s/demo?pwd=a1b2");
         assert_eq!(parsed.extraction_code, "a1b2");
-    }
-
-    #[test]
-    fn keeps_partial_batch_translation_and_reports_failed_fields() {
-        let mut localizations = HashMap::new();
-        let mut messages = Vec::new();
-        apply_fab_translation(
-            &mut localizations,
-            &mut messages,
-            TranslationPreview {
-                fields: LocalizedAssetText {
-                    name: "未来城市".into(),
-                    ..Default::default()
-                },
-                warnings: vec!["description：请求超时".into()],
-                failed_fields: vec!["description".into()],
-                character_count: 12,
-                ..Default::default()
-            },
-        );
-        assert_eq!(localizations["zh-CN"].name, "未来城市");
-        assert!(messages[0].contains("请求超时"));
     }
 }
