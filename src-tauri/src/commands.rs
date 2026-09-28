@@ -2,6 +2,7 @@ use crate::{
     backup, bilingual, db, fab, images, importer, link_checker, media, media_library, models::*,
     organization, projects, reference_boards, state::AppState, translation,
 };
+use std::path::Path;
 
 #[tauri::command]
 pub fn get_selection_labels(
@@ -36,6 +37,31 @@ pub fn select_media_entry_ids(
 #[tauri::command]
 pub fn get_media_entry(state: State<AppState>, id: String) -> Result<MediaEntryDetail, String> {
     state.with_library(|connection, _| media_library::get(connection, &id))
+}
+#[tauri::command]
+pub async fn open_model_location(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().with_library(|connection, base| {
+            crate::model_access::reveal_model(connection, base, &id)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn export_model_package(
+    app: AppHandle,
+    id: String,
+    destination: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().with_library(|connection, base| {
+            crate::model_access::export_model(connection, base, &id, Path::new(&destination))
+                .map(|path| path.to_string_lossy().to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn pending_model_thumbnails(
@@ -1030,14 +1056,21 @@ pub async fn import_assets(
             });
             let mut messages = Vec::new();
             if auto_translate {
-                emit_import_progress(
-                    &app,
-                    index + 1,
-                    total,
-                    &report,
-                    &metadata.name,
-                    "在线翻译中文信息",
-                );
+                emit_import_progress(&app, index + 1, total, &report, &metadata.name, &{
+                    let chars: usize = localizations
+                        .values()
+                        .map(|f| {
+                            f.name.chars().count()
+                                + f.description.chars().count()
+                                + f.license.chars().count()
+                                + f.tags.iter().map(|t| t.chars().count()).sum::<usize>()
+                        })
+                        .sum();
+                    format!(
+                        "在线翻译 · 约 {chars} 字符 / {} Token（预估）",
+                        chars * 2 + 1600
+                    )
+                });
                 messages.extend(translate_missing_localizations(&state, &mut localizations).await);
             }
             let pending = bilingual::pending_fields(&localizations);
@@ -1206,8 +1239,10 @@ async fn translate_missing_localizations(
     if bilingual::pending_fields(localizations).is_empty() {
         return Vec::new();
     }
-    if !translation::is_configured() {
-        return vec!["尚未配置百度翻译凭据".into()];
+    if !state.translation_service.configured("baidu")
+        && !state.translation_service.configured("deepseek")
+    {
+        return vec!["尚未配置在线翻译凭据".into()];
     }
     let mut messages = Vec::new();
     for (source, target) in [("en", "zh-CN"), ("zh-CN", "en")] {
@@ -1221,7 +1256,7 @@ async fn translate_missing_localizations(
                 continue;
             }
         };
-        match translation::translate(request, &terms).await {
+        match translation::translate(state, request, &terms).await {
             Ok(preview) => {
                 messages.extend(bilingual::merge_preview(localizations, target, preview))
             }
@@ -1576,22 +1611,98 @@ pub async fn check_asset_share_link(
 #[tauri::command]
 pub fn get_translation_settings(state: State<AppState>) -> Result<TranslationSettings, String> {
     let (content_language, fab_auto_translate) = state.preferences()?;
+    let preferences = state.translation_preferences()?;
+    let baidu_configured = state.translation_service.configured("baidu");
+    let deepseek_configured = state.translation_service.configured("deepseek");
     Ok(TranslationSettings {
-        provider: "baidu".into(),
-        configured: translation::is_configured(),
+        provider: preferences.provider_order[0].clone(),
+        configured: baidu_configured || deepseek_configured,
+        baidu_configured,
+        deepseek_configured,
+        usage: state.translation_service.usage()?,
+        preferences,
         fab_auto_translate,
         content_language,
     })
 }
 
 #[tauri::command]
-pub fn save_translation_credentials(app_id: String, secret_key: String) -> Result<(), String> {
-    translation::save_credentials(&app_id, &secret_key)
+pub fn save_deepseek_credentials(state: State<AppState>, api_key: String) -> Result<(), String> {
+    crate::translation_service::save_deepseek_key(&api_key)?;
+    state.translation_service.clear_blocks();
+    Ok(())
+}
+#[tauri::command]
+pub fn delete_deepseek_credentials(state: State<AppState>) -> Result<(), String> {
+    crate::translation_service::delete_deepseek_key()?;
+    state.translation_service.clear_blocks();
+    Ok(())
+}
+#[tauri::command]
+pub fn save_translation_preferences(
+    state: State<AppState>,
+    preferences: crate::translation_service::TranslationPreferences,
+) -> Result<(), String> {
+    state.save_translation_preferences(preferences)
+}
+#[tauri::command]
+pub fn clear_translation_cache(state: State<AppState>) -> Result<(), String> {
+    state.translation_service.clear_cache()
+}
+#[tauri::command]
+pub fn estimate_missing_translations(
+    state: State<AppState>,
+    ids: Vec<String>,
+) -> Result<crate::translation_service::TranslationEstimate, String> {
+    if ids.len() > 5000 {
+        return Err("单次最多预估 5000 条素材".into());
+    }
+    state.with_library(|connection, _| {
+        let mut total = crate::translation_service::TranslationEstimate {
+            characters: 0,
+            estimated_tokens: 0,
+        };
+        for id in ids.into_iter().collect::<std::collections::HashSet<_>>() {
+            let asset = db::get_asset(connection, &id, false, "en")?;
+            for (source, target) in [("en", "zh-CN"), ("zh-CN", "en")] {
+                if let Some(request) =
+                    bilingual::missing_request(&asset.localizations, source, target)
+                {
+                    let estimate = crate::translation_service::estimate(&request);
+                    total.characters = total.characters.saturating_add(estimate.characters);
+                    total.estimated_tokens = total
+                        .estimated_tokens
+                        .saturating_add(estimate.estimated_tokens);
+                }
+            }
+        }
+        Ok(total)
+    })
 }
 
 #[tauri::command]
-pub fn delete_translation_credentials() -> Result<(), String> {
-    translation::delete_credentials()
+pub fn estimate_translation(
+    request: TranslationRequest,
+) -> crate::translation_service::TranslationEstimate {
+    crate::translation_service::estimate(&request)
+}
+
+#[tauri::command]
+pub fn save_translation_credentials(
+    state: State<AppState>,
+    app_id: String,
+    secret_key: String,
+) -> Result<(), String> {
+    translation::save_credentials(&app_id, &secret_key)?;
+    state.translation_service.clear_blocks();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_translation_credentials(state: State<AppState>) -> Result<(), String> {
+    translation::delete_credentials()?;
+    state.translation_service.clear_blocks();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1605,8 +1716,11 @@ pub fn set_content_language(state: State<AppState>, language: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn test_translation_service() -> Result<TranslationTestResult, String> {
-    translation::test_service().await
+pub async fn test_translation_service(
+    state: State<'_, AppState>,
+    provider: Option<String>,
+) -> Result<TranslationTestResult, String> {
+    translation::test_service(&state, provider.as_deref().unwrap_or("baidu")).await
 }
 
 #[tauri::command]
@@ -1616,7 +1730,7 @@ pub async fn translate_asset_fields(
 ) -> Result<TranslationPreview, String> {
     let terms =
         state.effective_translation_terms(&request.source_language, &request.target_language)?;
-    translation::translate(request, &terms).await
+    translation::translate(&state, request, &terms).await
 }
 
 #[tauri::command]
