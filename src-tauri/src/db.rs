@@ -32,6 +32,14 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v10(&connection)?;
     migrate_to_v11(&connection)?;
     migrate_to_v12(&connection)?;
+    let migration = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    migration
+        .execute_batch(include_str!("ai_schema.sql"))
+        .map_err(|e| e.to_string())?;
+    migration.execute("UPDATE schema_meta SET value='13' WHERE key='schema_version' AND CAST(value AS INTEGER)<13",[]).map_err(|e|e.to_string())?;
+    migration.commit().map_err(|e| e.to_string())?;
     Ok(connection)
 }
 
@@ -3226,7 +3234,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "12");
+        assert_eq!(version, "13");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

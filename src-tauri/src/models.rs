@@ -79,6 +79,7 @@ pub fn default_module_order() -> Vec<String> {
         "audioLibrary",
         "videoLibrary",
         "projects",
+        "aiAssistant",
         "smartCollections",
         "favorites",
         "recent",
