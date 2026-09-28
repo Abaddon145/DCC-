@@ -438,10 +438,16 @@ export default function App() {
   };
   const translateSelected = async (ids: string[]) => {
     if (!ids.length || translatingBatch) return;
-    if (!window.confirm(`将对明确选中的 ${ids.length} 条素材补齐缺失的中英文字段。此操作会使用百度翻译额度，且不会覆盖已有内容。是否继续？`)) return;
+    setTranslatingBatch(true);
     try {
+      let characters = 0, tokens = 0;
+      for (let start = 0; start < ids.length; start += 5000) {
+        const estimate = await api.estimateMissingTranslations(ids.slice(start, start + 5000));
+        characters += estimate.characters; tokens += estimate.estimatedTokens;
+      }
+      if (!window.confirm(`将补齐明确选中的 ${ids.length} 条素材。待译约 ${characters.toLocaleString("zh-CN")} 字符 / ${tokens.toLocaleString("zh-CN")} Token（粗略估计，缓存和术语命中可减少请求，实际用量以服务返回为准）。会使用在线服务额度，不覆盖已有内容。是否继续？`)) return;
       const settings = await api.getTranslationSettings();
-      if (!settings.configured && !window.confirm("尚未配置百度翻译凭据。继续会生成待补译报告，但不会得到译文，是否继续？")) return;
+      if (!settings.configured && !window.confirm("尚未配置在线翻译凭据。继续会生成待补译报告，但不会得到译文，是否继续？")) return;
       setTranslatingBatch(true); setTranslationProgress(null); setTranslationReport(null);
       const reports: BatchTranslationReport[] = [];
       for (let start = 0; start < ids.length; start += 5000) reports.push(await api.batchTranslateMissingAssets(ids.slice(start, start + 5000)));

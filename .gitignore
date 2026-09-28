@@ -21,6 +21,7 @@ release-artifacts/
 task-journal.json
 task-journal.tmp
 translation-glossary.json
+translation-cache.sqlite*
 library.db*
 media-library/
 media/

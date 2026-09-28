@@ -25,7 +25,7 @@ export function TaskCenter({notify}:{notify:(message:string,error?:boolean)=>voi
     window.addEventListener("library-task-started",refresh);window.addEventListener("library-location-changed",refresh);
     return()=>{active=false;window.clearInterval(timer);disposes.forEach(dispose=>dispose());window.removeEventListener("library-task-started",refresh);window.removeEventListener("library-location-changed",refresh)};
   },[refresh,notify]);
-  const mutate=async(task:LibraryTask,retry:boolean)=>{try{if(retry){if(task.payload.kind==="translation"||task.payload.kind==="fabImport"){if(!window.confirm("继续可能调用 Fab 或百度翻译并使用额度，是否继续？"))return;}await api.retryLibraryTask(task.id)}else await api.cancelLibraryTask(task.id);await refresh()}catch(error){notify(String(error),true)}};
+  const mutate=async(task:LibraryTask,retry:boolean)=>{try{if(retry){if(task.payload.kind==="translation"||task.payload.kind==="fabImport"){if(!window.confirm("继续可能调用 Fab 或在线翻译服务并使用额度，是否继续？"))return;}await api.retryLibraryTask(task.id)}else await api.cancelLibraryTask(task.id);await refresh()}catch(error){notify(String(error),true)}};
   const running=tasks.filter(task=>["running","queued"].includes(task.status)).length;
   const thumbnail=tasks.find(task=>task.status==="running"&&task.payload.kind==="modelThumbnail");
   const selectedSummary=tasks.find(task=>task.id===selected);
