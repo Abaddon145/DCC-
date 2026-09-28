@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import type { ViewMode } from "../types";
+import type { Page, ViewMode } from "../types";
 import { api } from "./api";
 
 export const isAssetWorkspace = (view: ViewMode) => ["library", "favorites", "recent", "health"].includes(view);
@@ -9,6 +9,13 @@ export class RequestGate {
   begin() { return ++this.version; }
   invalidate() { ++this.version; }
   isCurrent(version: number) { return this.version === version; }
+}
+
+/** Restore a distant position through bounded backend pages; never rely on an oversized limit. */
+export async function readContextPage<T,R extends {offset:number;limit:number}>(fetchPage:(request:R)=>Promise<Page<T>>,request:R,wanted:number,stillCurrent:()=>boolean=()=>true):Promise<Page<T>> {
+  const first=await fetchPage(request);const items=[...first.items];let offset=request.offset+first.items.length;
+  while(stillCurrent()&&items.length<Math.min(wanted,first.total)&&offset<first.total){const page=await fetchPage({...request,offset});if(!page.items.length)break;items.push(...page.items);offset+=page.items.length;}
+  return {...first,items};
 }
 
 export function useRequestGate() {

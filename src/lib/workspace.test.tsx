@@ -1,13 +1,16 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
-import { isAssetWorkspace, RequestGate, useWorkspaceState } from "./workspace";
+import { isAssetWorkspace, readContextPage, RequestGate, useWorkspaceState } from "./workspace";
 vi.mock("./api",()=>({api:{getWorkspaceContext:vi.fn(),saveWorkspaceContext:vi.fn()}}));
 describe("workspace safety and persistence",()=>{
  beforeEach(()=>{vi.clearAllMocks();vi.mocked(api.getWorkspaceContext).mockResolvedValue({libraryId:"lib-A",enabled:true,value:{query:"沙漠",scroll:720}});vi.mocked(api.saveWorkspaceContext).mockResolvedValue(true)});
  it("does not treat media, projects or reference boards as an asset-delete workspace",()=>{
    expect(isAssetWorkspace("library")).toBe(true);expect(isAssetWorkspace("health")).toBe(true);
    for(const view of ["modelLibrary","imageLibrary","projects","reference"] as const)expect(isAssetWorkspace(view)).toBe(false);
+ });
+ it("restores distant scroll positions by bounded pages and stops superseded requests",async()=>{
+   const fetch=vi.fn(async({offset}:{offset:number;limit:number})=>({items:[offset,offset+1],total:8,offset,limit:2}));const result=await readContextPage(fetch,{offset:0,limit:2},6);expect(result.items).toEqual([0,1,2,3,4,5]);expect(fetch).toHaveBeenCalledTimes(3);fetch.mockClear();await readContextPage(fetch,{offset:0,limit:2},6,()=>false);expect(fetch).toHaveBeenCalledTimes(1);
  });
  it("invalidates late responses after a later request or dismissal",()=>{const gate=new RequestGate();const first=gate.begin();expect(gate.isCurrent(first)).toBe(true);gate.begin();expect(gate.isCurrent(first)).toBe(false);const last=gate.begin();gate.invalidate();expect(gate.isCurrent(last)).toBe(false)});
  it("restores only view context, flushes to its original library, and resets on library change",async()=>{

@@ -29,7 +29,7 @@ import { SearchHelpPopover } from "./components/SearchHelpPopover";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { HierarchyNameDialog } from "./components/HierarchyNameDialog";
 import { TranslationBatchReportDialog } from "./components/TranslationBatchReportDialog";
-import { isAssetWorkspace, useRequestGate, useWorkspaceState } from "./lib/workspace";
+import { isAssetWorkspace, readContextPage, useRequestGate, useWorkspaceState } from "./lib/workspace";
 import { SelectionSummary } from "./components/SelectionSummary";
 import { TaskCenter } from "./components/TaskCenter";
 import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, moduleRegistry, shortcutMatches } from "./lib/personalization";
@@ -137,7 +137,7 @@ export default function App() {
   const runSearch = useCallback(async (next: SearchRequest, append = false) => {
     const version = ++requestVersion.current; setLoading(true);
     try {
-      const page = await api.search(next);
+      const page = append ? await api.search(next) : await readContextPage(api.search,{...next,limit:Math.min(next.limit,200)},next.limit,()=>version===requestVersion.current);
       if (version !== requestVersion.current) return;
       setItems(prev => append ? [...prev, ...page.items.filter(item => !prev.some(old => old.id === item.id))] : page.items);
       setTotal(page.total);

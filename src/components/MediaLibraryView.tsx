@@ -10,7 +10,7 @@ import { ResizableContextPane } from "./ResizableContextPane";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { HierarchyNameDialog } from "./HierarchyNameDialog";
 import { HoverDismissDetails } from "./HoverDismissDetails";
-import { useRequestGate, useWorkspaceState } from "../lib/workspace";
+import { readContextPage, useRequestGate, useWorkspaceState } from "../lib/workspace";
 import { MediaAssociationPicker } from "./MediaAssociationPicker";
 import { shortcutMatches } from "../lib/personalization";
 import { SelectionSummary } from "./SelectionSummary";
@@ -50,7 +50,7 @@ export function MediaLibraryView({kind,onNotify,paneWidth,paneCollapsed,onPaneWi
   const detailGate=useRequestGate();
   useEffect(()=>{detailGate.invalidate()},[kind,detailGate]);
   const info=labels[kind];
-  const refresh=useCallback(async()=>{const version=++refreshVersion.current;setLoading(true);try{const savedScroll=scrollTarget.current; const pageLimit=Math.max(request.limit,Math.min(20000,(Math.ceil(savedScroll/86)+1)*6));const [page,nextFolders]=await Promise.all([api.searchMediaEntries({...request,kind,limit:pageLimit}),api.listMediaFolders(kind)]);if(version!==refreshVersion.current)return;setItems(page.items);setTotal(page.total);setFolders(nextFolders);if(!request.query.trim()&&!request.folderId&&!request.tags.length&&!request.formats.length&&!request.favoriteOnly)setAllTotal(page.total)}catch(error){if(version===refreshVersion.current)onNotify(`读取${info.title}失败：${String(error)}`,true)}finally{if(version===refreshVersion.current)setLoading(false)}},[request,kind,info.title,onNotify]);
+  const refresh=useCallback(async()=>{const version=++refreshVersion.current;setLoading(true);try{const savedScroll=scrollTarget.current; const pageLimit=Math.max(request.limit,Math.min(20000,(Math.ceil(savedScroll/86)+1)*6));const [page,nextFolders]=await Promise.all([readContextPage(api.searchMediaEntries,{...request,kind,limit:Math.min(pageLimit,500)},pageLimit,()=>version===refreshVersion.current),api.listMediaFolders(kind)]);if(version!==refreshVersion.current)return;setItems(page.items);setTotal(page.total);setFolders(nextFolders);if(!request.query.trim()&&!request.folderId&&!request.tags.length&&!request.formats.length&&!request.favoriteOnly)setAllTotal(page.total)}catch(error){if(version===refreshVersion.current)onNotify(`读取${info.title}失败：${String(error)}`,true)}finally{if(version===refreshVersion.current)setLoading(false)}},[request,kind,info.title,onNotify]);
   useEffect(()=>{refreshVersion.current++;scrollRestored.current=false;scrollTarget.current=0;setSelected(new Set());setSelectionMode(false);setDetail(null);setFolderEditor(null);setFolders([]);setItems([]);setTotal(0);setAllTotal(0)},[kind]);
   useEffect(()=>{if(contextLoaded)void refresh()},[refresh,contextLoaded]);
   useEffect(()=>{let active=true;void api.searchMediaEntries({...initial(kind),limit:1}).then(page=>{if(active)setAllTotal(page.total)}).catch(()=>undefined);return()=>{active=false}},[kind,countRevision]);
