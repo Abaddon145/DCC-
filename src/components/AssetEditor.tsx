@@ -111,6 +111,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
 
   const update = <K extends keyof AssetInput>(key: K, value: AssetInput[K]) => setForm(prev => ({ ...prev, [key]: value }));
   const localized = form.localizations[editLanguage] || blankLocalized();
+  const translationCharacters = [...localized.name, ...localized.description, ...localized.license, ...localized.tags.join("")].length;
+  const translationTokens = translationCharacters * 2 + [localized.name, localized.description, localized.license, localized.tags.join("")].filter(value => value.trim()).length * 400;
   const updateLocalized = <K extends keyof LocalizedAssetText>(key: K, value: LocalizedAssetText[K]) => setForm(previous => ({ ...previous, localizations: { ...previous.localizations, [editLanguage]: { ...(previous.localizations[editLanguage] || blankLocalized()), [key]: value } } }));
 
   const requestTranslation = async (sourceLanguage: ContentLanguage) => {
@@ -181,9 +183,9 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
           const merged = { name: existing.name || preview.fields.name, description: existing.description || preview.fields.description, license: existing.license || preview.fields.license, tags: existing.tags.length ? existing.tags : preview.fields.tags };
           next = { ...next, localizations: { ...next.localizations, "zh-CN": merged } };
           setForm(next);
-          translationNote = preview.warnings.length ? ` 部分翻译失败：${preview.warnings.join("；")}` : " 已自动补齐中文版本。";
+          translationNote = preview.warnings.length ? ` 翻译提示：${preview.warnings.join("；")}` : " 已自动补齐中文版本。";
         } catch (error) { translationNote = ` 在线翻译未完成：${String(error)}`; }
-      } else if (settings.fabAutoTranslate && !settings.configured) translationNote = " 尚未配置百度翻译，已跳过中文翻译。";
+      } else if (settings.fabAutoTranslate && !settings.configured) translationNote = " 尚未配置在线翻译，已跳过中文翻译。";
       setForm(next);
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
@@ -232,6 +234,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
           {fabStatus && <div className={`fab-import-status ${fabStatus.kind}`}>{fabStatus.message}{fabDuplicate?.location === "library" && onOpenExisting && <button type="button" className="secondary-button" onClick={() => onOpenExisting(fabDuplicate.assetId)}>打开现有素材</button>}</div>}
         </div>
         <div className="language-editor-bar"><div className="language-tabs"><button type="button" className={editLanguage === "zh-CN" ? "active" : ""} onClick={() => setEditLanguage("zh-CN")}>中文</button><button type="button" className={editLanguage === "en" ? "active" : ""} onClick={() => setEditLanguage("en")}>English</button></div><button type="button" className="secondary-button" disabled={translating} onClick={() => void requestTranslation(editLanguage)}><Languages size={15} />{translating ? "正在翻译…" : editLanguage === "en" ? "翻译到中文" : "Translate to English"}</button></div>
+        <p className="translation-estimate">待译 {translationCharacters.toLocaleString("zh-CN")} 字符 · 约 {translationTokens.toLocaleString("zh-CN")} Token；仅为粗略预估，缓存和术语命中可减少请求，实际以服务返回用量为准。</p>
         {translation && <div className="translation-preview"><div><strong>翻译预览 · {translation.characterCount ?? translation.preview.characterCount} 字符</strong><span>勾选需要写入 {translation.target === "zh-CN" ? "中文" : "English"} 版本的字段；已有内容默认不覆盖。</span></div>{translation.preview.appliedTerms.length > 0 && <div className="translation-term-summary"><strong>术语库已校正 {translation.preview.appliedTerms.reduce((sum, item) => sum + item.count, 0)} 处</strong><span>{translation.preview.appliedTerms.map(item => `${item.source} → ${item.target}${item.count > 1 ? ` ×${item.count}` : ""}`).join("；")}</span></div>}{(["name", "description", "tags", "license"] as const).map(key => <label key={key}><input type="checkbox" checked={translation.selected.has(key)} onChange={event => setTranslation(current => { if (!current) return current; const selected = new Set(current.selected); event.target.checked ? selected.add(key) : selected.delete(key); return { ...current, selected }; })} /><span>{({ name: "名称", description: "描述", tags: "标签", license: "许可" } as const)[key]}</span><em>{Array.isArray(translation.preview.fields[key]) ? (translation.preview.fields[key] as string[]).join("；") : translation.preview.fields[key] as string || "—"}</em></label>)}{translation.preview.warnings.map(item => <small key={item}>{item}</small>)}<div className="translation-actions"><button type="button" className="secondary-button" onClick={() => setTranslation(null)}>取消</button><button type="button" className="primary-button" disabled={!translation.selected.size} onClick={applyTranslation}>应用所选译文</button></div></div>}
         <div className="form-grid">
         <label className="wide"><span>{editLanguage === "zh-CN" ? "中文名称" : "English name"} *</span><input autoFocus value={localized.name} onChange={e => updateLocalized("name", e.target.value)} placeholder={editLanguage === "zh-CN" ? "例如：中世纪古堡环境包" : "e.g. Medieval Castle Environment"} />{errors.name && <small className="field-error">{errors.name}</small>}</label>

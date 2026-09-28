@@ -10,6 +10,7 @@ mod importer;
 mod link_checker;
 mod media;
 mod media_library;
+mod model_access;
 mod models;
 mod organization;
 mod projects;
@@ -18,6 +19,7 @@ mod search_syntax;
 mod state;
 mod tasks;
 mod translation;
+mod translation_service;
 
 use commands::*;
 use state::AppState;
@@ -174,6 +176,8 @@ pub fn run() {
                     get_selection_labels,
                     select_media_entry_ids,
                     get_media_entry,
+                    open_model_location,
+                    export_model_package,
                     pending_model_thumbnails,
                     save_model_thumbnail,
                     report_model_thumbnail_failure,
@@ -218,6 +222,12 @@ pub fn run() {
                     cancel_share_link_check,
                     check_asset_share_link,
                     get_translation_settings,
+                    save_deepseek_credentials,
+                    delete_deepseek_credentials,
+                    save_translation_preferences,
+                    clear_translation_cache,
+                    estimate_translation,
+                    estimate_missing_translations,
                     save_translation_credentials,
                     delete_translation_credentials,
                     set_fab_auto_translate,

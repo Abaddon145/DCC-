@@ -380,7 +380,11 @@ export interface MediaImportRow { path: string; status: "imported" | "duplicate"
 export interface MediaImportReport { imported: number; skipped: number; failed: number; rows: MediaImportRow[] }
 export interface MediaBatchUpdate { ids: string[]; folderId: string | null; clearFolder: boolean; addTags: string[]; removeTags: string[]; favorite: boolean | null }
 
-export interface TranslationSettings { provider: "baidu"; configured: boolean; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
+export type TranslationProvider = "baidu" | "deepseek";
+export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
+export interface TranslationUsage { month: string; deepseekTokens: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
+export interface TranslationEstimate { characters: number; estimatedTokens: number }
+export interface TranslationSettings { provider: TranslationProvider; configured: boolean; baiduConfigured?: boolean; deepseekConfigured?: boolean; preferences?: TranslationPreferences; usage?: TranslationUsage; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }
 export type TranslationTermMode = "translate" | "preserve";
 export interface TranslationTermInput { id?: string | null; sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; source: string; target: string; mode: TranslationTermMode; caseSensitive: boolean; enabled: boolean }

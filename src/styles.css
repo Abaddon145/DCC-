@@ -729,3 +729,11 @@ input, textarea, select { border: 1px solid var(--border-light); border-radius: 
 :root[data-density="compact"] .project-tab-content { padding:18px; }
 :root[data-density="compact"] .setting-row { min-height:42px; }
 @media(max-width:850px) { .media-library-main { padding:18px; } .project-hub { padding:20px; } .project-tab-content { padding:16px; } }
+.model-file-actions { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0; }
+.model-file-actions button { flex:1 1 auto; white-space:nowrap; }
+.model-file-actions small { flex-basis:100%; color:var(--muted); line-height:1.6; }
+.translation-provider-options h3:not(:first-child) { margin-top:24px; }
+.translation-key-field { display:grid; gap:8px; margin:16px 0; }
+.translation-key-field input { width:100%; }
+.translation-usage { font-variant-numeric:tabular-nums; line-height:1.8; }
+.translation-estimate { color:var(--muted); font-size:12px; line-height:1.7; margin:8px 0 14px; }

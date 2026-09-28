@@ -178,7 +178,7 @@ async fn wait_for_request_slot() {
     }
 }
 
-async fn translate_piece_items(
+async fn baidu_translate_piece_items(
     client: &Client,
     credential: &Credential,
     text: &str,
@@ -250,16 +250,13 @@ async fn translate_piece_items(
     Err(last.unwrap_or_else(|| "翻译请求失败".into()))
 }
 
-async fn translate_piece(
+pub(crate) async fn request_baidu(
     client: &Client,
-    credential: &Credential,
     text: &str,
     from: &str,
     to: &str,
-) -> Result<String, String> {
-    Ok(translate_piece_items(client, credential, text, from, to)
-        .await?
-        .join("\n"))
+) -> Result<Vec<String>, String> {
+    baidu_translate_piece_items(client, &load_credentials()?, text, from, to).await
 }
 
 fn provider_error(code: &str, message: Option<&str>) -> String {
@@ -517,7 +514,7 @@ fn normalized_provider_items(items: Vec<String>, expected: usize) -> Vec<String>
 
 async fn translate_isolated_sources(
     client: &Client,
-    credential: &Credential,
+    session: &crate::translation_service::TranslationSession<'_>,
     sources: &[String],
     from: &str,
     to: &str,
@@ -550,10 +547,8 @@ async fn translate_isolated_sources(
             .map(|index| sources[*index].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let values = normalized_provider_items(
-            translate_piece_items(client, credential, &query, from, to).await?,
-            batch.len(),
-        );
+        let values =
+            normalized_provider_items(session.items(client, &query, from, to).await?, batch.len());
         if values.len() == batch.len() {
             for (index, value) in batch.into_iter().zip(values) {
                 translated[index] = Some(value);
@@ -630,7 +625,7 @@ fn restore_tokens(value: &str, tokens: &[ProtectedToken]) -> Result<String, Stri
 
 async fn translate_text(
     client: &Client,
-    credential: &Credential,
+    session: &crate::translation_service::TranslationSession<'_>,
     text: &str,
     from: &str,
     to: &str,
@@ -646,7 +641,7 @@ async fn translate_text(
     // locally. This avoids a provider dropping or rewriting a placeholder and
     // forcing the entire long description to fall back to its source text.
     let (parts, sources) = isolated_translation_parts(&masked, &tokens)?;
-    let translated = translate_isolated_sources(client, credential, &sources, from, to).await?;
+    let translated = translate_isolated_sources(client, session, &sources, from, to).await?;
     Ok(TranslationOutcome {
         value: assemble_isolated_translation(&parts, &translated),
         applications,
@@ -667,7 +662,7 @@ fn parsed_tag_lines(value: &str, expected: usize) -> Option<Vec<String>> {
 
 async fn translate_tags(
     client: &Client,
-    credential: &Credential,
+    session: &crate::translation_service::TranslationSession<'_>,
     tags: &[String],
     from: &str,
     to: &str,
@@ -728,26 +723,25 @@ async fn translate_tags(
             .map(|(_, value)| *value)
             .collect::<Vec<_>>()
             .join("\n");
-        let outcome =
-            translate_text(client, credential, &combined, from, to, terms, "tags").await?;
-        let translated_values =
-            if let Some(lines) = parsed_tag_lines(&outcome.value, unresolved.len()) {
-                applications.extend(outcome.applications);
-                protected_token_count += outcome.protected_token_count;
-                warnings.extend(outcome.warnings);
-                lines
-            } else {
-                let mut lines = Vec::with_capacity(unresolved.len());
-                for (_, source) in &unresolved {
-                    let item =
-                        translate_text(client, credential, source, from, to, terms, "tags").await?;
-                    applications.extend(item.applications);
-                    protected_token_count += item.protected_token_count;
-                    warnings.extend(item.warnings);
-                    lines.push(item.value);
-                }
-                lines
-            };
+        let outcome = translate_text(client, session, &combined, from, to, terms, "tags").await?;
+        let translated_values = if let Some(lines) =
+            parsed_tag_lines(&outcome.value, unresolved.len())
+        {
+            applications.extend(outcome.applications);
+            protected_token_count += outcome.protected_token_count;
+            warnings.extend(outcome.warnings);
+            lines
+        } else {
+            let mut lines = Vec::with_capacity(unresolved.len());
+            for (_, source) in &unresolved {
+                let item = translate_text(client, session, source, from, to, terms, "tags").await?;
+                applications.extend(item.applications);
+                protected_token_count += item.protected_token_count;
+                warnings.extend(item.warnings);
+                lines.push(item.value);
+            }
+            lines
+        };
         for ((index, _), translated) in unresolved.into_iter().zip(translated_values) {
             values[index] = Some(translated);
         }
@@ -785,6 +779,7 @@ fn merge_applications(values: Vec<TranslationTermApplication>) -> Vec<Translatio
 }
 
 pub async fn translate(
+    state: &crate::state::AppState,
     request: TranslationRequest,
     terms: &[TranslationTerm],
 ) -> Result<TranslationPreview, String> {
@@ -793,7 +788,10 @@ pub async fn translate(
     }
     let from = language_code(&request.source_language)?;
     let to = language_code(&request.target_language)?;
-    let credential = load_credentials()?;
+    let session = crate::translation_service::TranslationSession::new(
+        &state.translation_service,
+        state.translation_preferences()?,
+    );
     let client = client()?;
     let character_count = request.fields.name.chars().count()
         + request.fields.description.chars().count()
@@ -813,7 +811,7 @@ pub async fn translate(
         ("description", request.fields.description.as_str()),
         ("license", request.fields.license.as_str()),
     ] {
-        match translate_text(&client, &credential, source, from, to, terms, field).await {
+        match translate_text(&client, &session, source, from, to, terms, field).await {
             Ok(outcome) => {
                 match field {
                     "name" => preview.fields.name = outcome.value,
@@ -836,7 +834,7 @@ pub async fn translate(
             _ => {}
         }
     }
-    match translate_tags(&client, &credential, &request.fields.tags, from, to, terms).await {
+    match translate_tags(&client, &session, &request.fields.tags, from, to, terms).await {
         Ok((tags, applications, protected, warnings)) => {
             preview.fields.tags = tags;
             preview.applied_terms.extend(applications);
@@ -852,13 +850,36 @@ pub async fn translate(
             preview.warnings.push(format!("tags：{error}"));
         }
     }
+    preview.warnings.extend(session.notes());
     preview.applied_terms = merge_applications(preview.applied_terms);
     Ok(preview)
 }
 
-pub async fn test_service() -> Result<TranslationTestResult, String> {
-    let credential = load_credentials()?;
-    let value = translate_piece(&client()?, &credential, "test", "en", "zh").await?;
+pub async fn test_service(
+    state: &crate::state::AppState,
+    provider: &str,
+) -> Result<TranslationTestResult, String> {
+    if !matches!(provider, "baidu" | "deepseek") {
+        return Err("未知的翻译服务".into());
+    }
+    if !state.translation_service.configured(provider) {
+        return Err(format!("尚未配置 {provider} 凭据"));
+    }
+    state.translation_service.clear_blocks();
+    let mut policy = state.translation_preferences()?;
+    policy.cache_enabled = false;
+    policy.provider_order = if provider == "deepseek" {
+        vec!["deepseek".into(), "baidu".into()]
+    } else {
+        vec!["baidu".into(), "deepseek".into()]
+    };
+    policy.auto_fallback = false;
+    let session =
+        crate::translation_service::TranslationSession::new(&state.translation_service, policy);
+    let value = session
+        .items(&client()?, "test", "en", "zh")
+        .await?
+        .join("\n");
     Ok(TranslationTestResult {
         success: true,
         message: format!("连接成功，测试译文：{value}"),

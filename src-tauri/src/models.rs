@@ -850,6 +850,10 @@ pub struct AssetInput {
 #[serde(rename_all = "camelCase")]
 pub struct TranslationSettings {
     pub provider: String,
+    pub baidu_configured: bool,
+    pub deepseek_configured: bool,
+    pub preferences: crate::translation_service::TranslationPreferences,
+    pub usage: crate::translation_service::TranslationUsage,
     pub configured: bool,
     pub fab_auto_translate: bool,
     pub content_language: String,

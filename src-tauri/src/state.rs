@@ -45,6 +45,8 @@ struct AppSettings {
     fab_auto_translate: bool,
     #[serde(default)]
     global_preferences: GlobalPreferences,
+    #[serde(default)]
+    translation_preferences: crate::translation_service::TranslationPreferences,
 }
 
 fn default_language() -> String {
@@ -63,6 +65,7 @@ impl Default for AppSettings {
             content_language: default_language(),
             fab_auto_translate: true,
             global_preferences: GlobalPreferences::default(),
+            translation_preferences: crate::translation_service::TranslationPreferences::default(),
         }
     }
 }
@@ -76,6 +79,7 @@ pub struct ActiveLibrary {
 
 pub struct AppState {
     pub tasks: crate::tasks::TaskRegistry,
+    pub translation_service: crate::translation_service::TranslationService,
     settings_path: PathBuf,
     settings: Mutex<AppSettings>,
     startup_warning: Mutex<Option<String>>,
@@ -109,6 +113,9 @@ impl AppState {
         fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
         let settings_path = config_dir.join(SETTINGS_FILE);
         let mut settings = read_settings(&settings_path).unwrap_or_default();
+        if settings.translation_preferences.validate().is_err() {
+            settings.translation_preferences = Default::default();
+        }
         let default_path = config_dir.clone();
         ensure_library(&default_path, "默认素材库", true)?;
         let desired = if settings.active_library.trim().is_empty() {
@@ -129,6 +136,9 @@ impl AppState {
         write_settings(&settings_path, &settings)?;
         Ok(Self {
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
+            translation_service: crate::translation_service::TranslationService::open(
+                &config_dir.join("translation-cache.sqlite"),
+            )?,
             settings_path,
             settings: Mutex::new(settings),
             startup_warning: Mutex::new(warning),
@@ -629,6 +639,31 @@ impl AppState {
         write_settings(&self.settings_path, &settings)
     }
 
+    pub fn translation_preferences(
+        &self,
+    ) -> Result<crate::translation_service::TranslationPreferences, String> {
+        Ok(self
+            .settings
+            .lock()
+            .map_err(|_| "设置锁已损坏")?
+            .translation_preferences
+            .clone())
+    }
+
+    pub fn save_translation_preferences(
+        &self,
+        value: crate::translation_service::TranslationPreferences,
+    ) -> Result<(), String> {
+        value.validate()?;
+        let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+        let mut next = settings.clone();
+        next.translation_preferences = value;
+        write_settings(&self.settings_path, &next)?;
+        *settings = next;
+        self.translation_service.clear_blocks();
+        Ok(())
+    }
+
     pub fn preferences(&self) -> Result<(String, bool), String> {
         let settings = self
             .settings
@@ -875,16 +910,15 @@ fn write_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| e.to_string())?;
-    }
-    fs::rename(temporary, path).map_err(|e| e.to_string())
+    use std::io::Write;
+    let parent = path.parent().ok_or("配置目录无效")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    temporary
+        .write_all(&serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+    temporary.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn touch_recent(settings: &mut AppSettings, path: &Path) {
@@ -947,6 +981,10 @@ mod tests {
         ensure_library(path, "测试库", false).unwrap();
         AppState {
             tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
+            translation_service: crate::translation_service::TranslationService::open(
+                &path.join("translation-cache.sqlite"),
+            )
+            .unwrap(),
             settings_path: path.join("settings.json"),
             settings: Mutex::new(AppSettings::default()),
             startup_warning: Mutex::new(None),
