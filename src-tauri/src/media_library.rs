@@ -358,7 +358,7 @@ fn upsert_tags(connection: &Connection, entry_id: &str, tags: &[String]) -> Resu
     }
     Ok(())
 }
-fn reindex(connection: &Connection, id: &str) -> Result<(), String> {
+pub(crate) fn reindex(connection: &Connection, id: &str) -> Result<(), String> {
     connection
         .execute("DELETE FROM media_search WHERE entry_id=?1", [id])
         .map_err(|e| e.to_string())?;

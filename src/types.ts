@@ -1,6 +1,6 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
 export type MediaKind = "image" | "model" | "audio" | "video";
-export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
 export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
 export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
@@ -382,7 +382,7 @@ export interface MediaBatchUpdate { ids: string[]; folderId: string | null; clea
 
 export type TranslationProvider = "baidu" | "deepseek";
 export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
-export interface TranslationUsage { month: string; deepseekTokens: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
+export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
 export interface TranslationEstimate { characters: number; estimatedTokens: number }
 export interface TranslationSettings { provider: TranslationProvider; configured: boolean; baiduConfigured?: boolean; deepseekConfigured?: boolean; preferences?: TranslationPreferences; usage?: TranslationUsage; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }
