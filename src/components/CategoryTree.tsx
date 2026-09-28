@@ -93,6 +93,24 @@ export function CategoryTree(props: Props) {
     const parents = new Set(props.categories.filter(category => props.categories.some(child => child.parentId === category.id)).map(category => category.id));
     setCollapsed(parents);
   }, [props.defaultExpanded, tree.length]);
+  useEffect(() => {
+    if (!props.selected.length) return;
+    const byId = new Map(props.categories.map(category => [category.id, category]));
+    const ancestors = new Set<string>();
+    for (const id of props.selected) {
+      let parentId = byId.get(id)?.parentId;
+      while (parentId && !ancestors.has(parentId)) {
+        ancestors.add(parentId);
+        parentId = byId.get(parentId)?.parentId;
+      }
+    }
+    if (ancestors.size) setCollapsed(previous => {
+      if (![...ancestors].some(id => previous.has(id))) return previous;
+      const next = new Set(previous);
+      ancestors.forEach(id => next.delete(id));
+      return next;
+    });
+  }, [props.selected, props.categories]);
 
   const clearExpandTimer = () => {
     if (expandTimer.current !== null) window.clearTimeout(expandTimer.current);

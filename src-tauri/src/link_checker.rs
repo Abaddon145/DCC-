@@ -400,6 +400,13 @@ pub async fn check_all(
             }
         }
         progress.current_url = Some(normalized.clone());
+        state.tasks.progress(
+            "网盘链接检查",
+            progress.checked,
+            progress.total,
+            String::new(),
+            "检查官方分享页".into(),
+        );
         let _ = app.emit("share-link-check-progress", progress.clone());
         let outcome = probe_with_retry(&http, &assets[0].share_url, &cancel, false).await;
         if cancel.load(Ordering::SeqCst) {

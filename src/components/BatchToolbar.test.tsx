@@ -5,8 +5,17 @@ import { BatchToolbar } from "./BatchToolbar";
 describe("BatchToolbar", () => {
   it("selects the complete filtered result instead of only loaded cards", () => {
     const onSelectAll = vi.fn();
-    render(<BatchToolbar count={80} totalCount={20000} categories={[]} onSelectAll={onSelectAll} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onApply={vi.fn()} />);
+    render(<BatchToolbar count={80} totalCount={20000} categories={[]} onSelectAll={onSelectAll} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onTranslate={vi.fn()} onApply={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "全选当前结果 20000 项" }));
     expect(onSelectAll).toHaveBeenCalledOnce();
+  });
+
+  it("offers manual bilingual completion only for explicitly selected assets", () => {
+    const onTranslate = vi.fn();
+    const { rerender } = render(<BatchToolbar count={0} totalCount={12} categories={[]} onSelectAll={vi.fn()} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onTranslate={onTranslate} onApply={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "补齐双语" })).toBeDisabled();
+    rerender(<BatchToolbar count={2} totalCount={12} categories={[]} onSelectAll={vi.fn()} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onTranslate={onTranslate} onApply={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "补齐双语" }));
+    expect(onTranslate).toHaveBeenCalledOnce();
   });
 });

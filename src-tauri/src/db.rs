@@ -1099,6 +1099,45 @@ pub fn get_asset(
     })
 }
 
+pub fn fill_missing_localizations(
+    connection: &mut Connection,
+    asset_id: &str,
+    additions: HashMap<String, LocalizedAssetText>,
+) -> Result<HashMap<String, LocalizedAssetText>, String> {
+    let mut current = get_asset(connection, asset_id, false, "zh-CN")?.localizations;
+    let mut changed = false;
+    for (locale, value) in additions {
+        if !matches!(locale.as_str(), "zh-CN" | "en") {
+            continue;
+        }
+        changed |= crate::bilingual::fill_empty(current.entry(locale).or_default(), value);
+    }
+    if !changed {
+        return Ok(current);
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for (locale, value) in &current {
+        transaction.execute(
+            "INSERT INTO asset_localizations(asset_id,locale,name,description,license) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(asset_id,locale) DO UPDATE SET name=excluded.name,description=excluded.description,license=excluded.license",
+            params![asset_id, locale, value.name.trim(), value.description.trim(), value.license.trim()],
+        ).map_err(|error| error.to_string())?;
+        for tag in &value.tags {
+            insert_localized_tag(&transaction, asset_id, locale, tag)?;
+        }
+    }
+    transaction
+        .execute(
+            "UPDATE assets SET updated_at=?1 WHERE id=?2",
+            params![now(), asset_id],
+        )
+        .map_err(|error| error.to_string())?;
+    reindex_asset(&transaction, asset_id)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(current)
+}
+
 pub fn upsert_asset(
     connection: &mut Connection,
     base_dir: &Path,
@@ -2616,6 +2655,13 @@ fn health_issue_ids(
         "duplicateFab" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' AND fab_listing_id IN (SELECT fab_listing_id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' GROUP BY fab_listing_id HAVING COUNT(*)>1)"),
         "missingZh" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='zh-CN' AND trim(l.name)<>'')"),
         "missingEn" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
+        "translationPending" => Some("SELECT a.id FROM assets a LEFT JOIN asset_localizations en ON en.asset_id=a.id AND en.locale='en' LEFT JOIN asset_localizations zh ON zh.asset_id=a.id AND zh.locale='zh-CN' WHERE a.deleted_at IS NULL AND (
+          (trim(COALESCE(en.name,''))<>'' AND trim(COALESCE(zh.name,''))='') OR (trim(COALESCE(zh.name,''))<>'' AND trim(COALESCE(en.name,''))='') OR
+          (trim(COALESCE(en.description,''))<>'' AND trim(COALESCE(zh.description,''))='') OR (trim(COALESCE(zh.description,''))<>'' AND trim(COALESCE(en.description,''))='') OR
+          (trim(COALESCE(en.license,''))<>'' AND trim(COALESCE(zh.license,''))='') OR (trim(COALESCE(zh.license,''))<>'' AND trim(COALESCE(en.license,''))='') OR
+          (EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='en') AND NOT EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='zh-CN')) OR
+          (EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='zh-CN') AND NOT EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='en'))
+        )"),
         "invalidLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='invalid'"),
         "linkCheckError" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='error'"),
         "missingFiles" | "missingMediaFiles" => None,
@@ -2686,6 +2732,7 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
         ("duplicateFab", "重复 Fab 素材"),
         ("missingZh", "缺少中文版本"),
         ("missingEn", "缺少英文版本"),
+        ("translationPending", "双语待补译"),
         ("invalidLink", "网盘链接已失效"),
         ("linkCheckError", "网盘链接检查失败"),
     ];
@@ -2841,6 +2888,83 @@ mod tests {
         fs::create_dir_all(dir.path().join("images/thumbnails")).unwrap();
         let connection = open_database(&dir.path().join("test.db")).unwrap();
         (dir, connection)
+    }
+
+    #[test]
+    fn fills_only_missing_bilingual_fields_and_reindexes_search() {
+        let (dir, mut connection) = setup();
+        let input = AssetInput {
+            id: None,
+            name: "Skeletal Mesh".into(),
+            description: "A rigged model".into(),
+            category_id: None,
+            tags: Vec::new(),
+            dcc_tools: Vec::new(),
+            versions: Vec::new(),
+            formats: Vec::new(),
+            size_bytes: None,
+            author: String::new(),
+            source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
+            license: String::new(),
+            share_url: String::new(),
+            extraction_code: String::new(),
+            favorite: false,
+            images: Vec::new(),
+            content_language: "en".into(),
+            localizations: HashMap::from([
+                (
+                    "en".into(),
+                    LocalizedAssetText {
+                        name: "Skeletal Mesh".into(),
+                        description: "A rigged model".into(),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "zh-CN".into(),
+                    LocalizedAssetText {
+                        name: "手工骨骼网格体".into(),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        };
+        let asset = upsert_asset(&mut connection, dir.path(), input).unwrap();
+        assert!(
+            health_issue_ids(&connection, dir.path(), "translationPending")
+                .unwrap()
+                .contains(&asset.card.id)
+        );
+        let result = fill_missing_localizations(
+            &mut connection,
+            &asset.card.id,
+            HashMap::from([(
+                "zh-CN".into(),
+                LocalizedAssetText {
+                    name: "不能覆盖".into(),
+                    description: "带骨骼的模型".into(),
+                    ..Default::default()
+                },
+            )]),
+        )
+        .unwrap();
+        assert_eq!(result["zh-CN"].name, "手工骨骼网格体");
+        assert_eq!(result["zh-CN"].description, "带骨骼的模型");
+        assert!(
+            health_issue_ids(&connection, dir.path(), "translationPending")
+                .unwrap()
+                .is_empty()
+        );
+        let indexed: String = connection
+            .query_row(
+                "SELECT text FROM asset_search WHERE asset_id=?1",
+                [&asset.card.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(indexed.contains("带骨骼的模型"));
     }
 
     #[test]

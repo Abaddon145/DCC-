@@ -135,11 +135,89 @@ pub fn ffmpeg_paths(resource_dir: Option<&Path>) -> (Option<PathBuf>, Option<Pat
     (None, None)
 }
 
-fn run(command: &mut Command) -> Result<(), String> {
+thread_local! { static PROCESS_STOP: std::cell::RefCell<Option<Box<dyn Fn()->bool>>> = std::cell::RefCell::new(None); }
+pub struct ProcessControl {
+    previous: Option<Box<dyn Fn() -> bool>>,
+}
+impl ProcessControl {
+    pub fn new(check: impl Fn() -> bool + 'static) -> Self {
+        Self {
+            previous: PROCESS_STOP.with(|value| value.replace(Some(Box::new(check)))),
+        }
+    }
+}
+impl Drop for ProcessControl {
+    fn drop(&mut self) {
+        PROCESS_STOP.with(|value| {
+            value.replace(self.previous.take());
+        });
+    }
+}
+fn process_stopped() -> bool {
+    PROCESS_STOP.with(|value| value.borrow().as_ref().is_some_and(|check| check()))
+}
+fn read_process_stream(mut reader: impl std::io::Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        let Ok(count) = reader.read(&mut buffer) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let remaining = (1024usize * 1024).saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    bytes
+}
+fn process_output(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
     quiet(command);
-    let output = command
-        .output()
-        .map_err(|error| format!("启动媒体引擎失败：{error}"))?;
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动媒体引擎失败：{e}"))?;
+    let stdout = child.stdout.take().ok_or("无法读取媒体输出")?;
+    let stderr = child.stderr.take().ok_or("无法读取媒体错误")?;
+    let out = std::thread::spawn(move || read_process_stream(stdout));
+    let err = std::thread::spawn(move || read_process_stream(stderr));
+    let started = std::time::Instant::now();
+    let result = loop {
+        if process_stopped() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("媒体处理已安全停止".into());
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("媒体引擎处理超时，请检查文件后重试".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(e.to_string());
+            }
+        }
+    };
+    let stdout = out.join().map_err(|_| "读取媒体输出失败")?;
+    let stderr = err.join().map_err(|_| "读取媒体错误失败")?;
+    Ok(std::process::Output {
+        status: result?,
+        stdout,
+        stderr,
+    })
+}
+fn run(command: &mut Command) -> Result<(), String> {
+    let output = process_output(command, std::time::Duration::from_secs(1800))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -174,7 +252,7 @@ pub(crate) fn probe(
         ])
         .arg(input);
     quiet(&mut command);
-    let Ok(output) = command.output() else {
+    let Ok(output) = process_output(&mut command, std::time::Duration::from_secs(30)) else {
         return (None, None, None);
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
@@ -688,6 +766,37 @@ pub(crate) fn file_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subprocess_fixture() {
+        if std::env::var_os("STACK_DCC_CHILD_FIXTURE").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+    fn sleeper() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "media::tests::subprocess_fixture", "--nocapture"])
+            .env("STACK_DCC_CHILD_FIXTURE", "1");
+        command
+    }
+    #[test]
+    fn media_engine_timeout_reaps_child() {
+        let started = std::time::Instant::now();
+        let error =
+            process_output(&mut sleeper(), std::time::Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("超时"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+    #[test]
+    fn media_engine_stop_reaps_child() {
+        let started = std::time::Instant::now();
+        let _control =
+            ProcessControl::new(move || started.elapsed() > std::time::Duration::from_millis(100));
+        let error = process_output(&mut sleeper(), std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("安全停止"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     use crate::db::open_database;
     use std::fs;
     use tempfile::tempdir;

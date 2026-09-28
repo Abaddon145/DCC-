@@ -86,7 +86,7 @@ async fn get_json(client: &Client, url: &str, referer: &str) -> Result<Value, St
     let response = client
         .get(url)
         .header(header::ACCEPT, "application/json, text/plain, */*")
-        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.7")
+        .header(header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,zh-CN;q=0.5")
         .header(header::REFERER, referer)
         .header("X-Requested-With", "XMLHttpRequest")
         .header(

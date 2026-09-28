@@ -2,7 +2,6 @@ use crate::{db, glossary::GlossaryStore, models::*};
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -76,6 +75,7 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub tasks: crate::tasks::TaskRegistry,
     settings_path: PathBuf,
     settings: Mutex<AppSettings>,
     startup_warning: Mutex<Option<String>>,
@@ -128,6 +128,7 @@ impl AppState {
         touch_recent(&mut settings, &active.base_dir);
         write_settings(&settings_path, &settings)?;
         Ok(Self {
+            tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
             settings_path,
             settings: Mutex::new(settings),
             startup_warning: Mutex::new(warning),
@@ -448,6 +449,26 @@ impl AppState {
         f(connection, &base_dir)
     }
 
+    pub fn with_library_mut_if_id<T>(
+        &self,
+        library_id: &str,
+        f: impl FnOnce(&mut Connection, &Path) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let mut guard = self
+            .active
+            .lock()
+            .map_err(|_| "素材库锁已损坏".to_string())?;
+        if guard.marker.library_id != library_id {
+            return Ok(None);
+        }
+        let base_dir = guard.base_dir.clone();
+        let connection = guard
+            .connection
+            .as_mut()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        f(connection, &base_dir).map(Some)
+    }
+
     pub fn with_library_if_id<T>(
         &self,
         library_id: &str,
@@ -745,6 +766,7 @@ fn migrate_library(
             &active.base_dir.join("media-library"),
             &stage.join("media-library"),
         )?;
+        copy_tree_verified(&active.base_dir.join("media"), &stage.join("media"))?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {
             format_version: 1,
@@ -799,8 +821,7 @@ fn copy_tree_verified(source: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn digest_file(path: &Path) -> Result<String, String> {
-    let data = fs::read(path).map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(data)))
+    crate::file_digest::digest_file(path).map(|(_, digest)| digest)
 }
 
 fn require_empty_directory(path: &Path) -> Result<(), String> {
@@ -925,6 +946,7 @@ mod tests {
     fn test_state(path: &Path) -> AppState {
         ensure_library(path, "测试库", false).unwrap();
         AppState {
+            tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
             settings_path: path.join("settings.json"),
             settings: Mutex::new(AppSettings::default()),
             startup_warning: Mutex::new(None),

@@ -10,6 +10,19 @@ export type CardSize = "small" | "medium" | "large";
 export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection" | "selectAll" | "saveAsset" | "deleteSelected";
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
+export type LibraryTaskRequest =
+  | { kind: "modelThumbnail"; request: { entryId:string } }
+  | { kind: "mediaImport"; request: MediaImportRequest }
+  | { kind: "fabImport"; request: { path: string; mapping: ImportMapping; autoTranslate: boolean } }
+  | { kind: "translation"; request: { ids: string[] } }
+  | { kind: "links" }
+  | { kind: "backup" | "restore"; request: { path: string } }
+  | { kind: "migration"; request: StorageChangeRequest };
+export interface LibraryTask {
+  id: string; libraryId: string; label: string; status: "queued"|"running"|"completed"|"stopped"|"interrupted"|"failed";
+  phase: string; current: number; total: number; currentName: string; createdAt: string; updatedAt: string;
+  cancellable: boolean; message: string; result: unknown; payload: LibraryTaskRequest;
+}
 
 export interface LocalizedAssetText { name: string; description: string; tags: string[]; license: string }
 
@@ -86,6 +99,8 @@ export interface LibraryPreferences {
   collapsedContextPanes: string[];
   collapsedModuleGroups: string[];
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
+  workspaceContexts?: Record<string, unknown>;
+  rememberWorkspace?: boolean;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }
 
@@ -235,13 +250,17 @@ export interface ImportMapping {
 export interface ImportRowResult {
   row: number;
   name: string;
-  status: "valid" | "warning" | "error" | "duplicate" | "skipped" | "imported";
+  status: "valid" | "warning" | "error" | "duplicate" | "skipped" | "imported" | "translationPending";
   messages: string[];
   suggestedCategoryPath?: string | null;
   actualCategoryPath?: string | null;
   duplicateAssetId?: string | null;
   duplicateSource?: "file" | "library" | "trash" | null;
+  assetId?: string | null;
 }
+
+export interface BatchTranslationRow { assetId: string; name: string; status: "complete" | "pending" | "skipped"; messages: string[] }
+export interface BatchTranslationReport { completed: number; pending: number; skipped: number; rows: BatchTranslationRow[] }
 
 export interface ImportPreview {
   headers: string[];
@@ -353,6 +372,7 @@ export interface MediaFolder { id: string; kind: MediaKind; parentId: string | n
 export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null }
 export interface MediaEntry { id: string; kind: MediaKind; folderId: string | null; name: string; description: string; author: string; sourceUrl: string; license: string; favorite: boolean; processingStatus: string; processingMessage: string; format: string; fileSize: number; tags: string[]; thumbnailFileId: string | null; primaryFileId: string; createdAt: string; updatedAt: string }
 export interface MediaEntryDetail extends MediaEntry { files: MediaFile[]; assetIds: string[]; projectIds: string[] }
+export interface ModelThumbnailJob { id: string; logicalPath: string; originalName: string }
 export interface LinkedMediaPreview { id: string; kind: MediaKind; name: string; originalName: string; logicalPath: string; primaryFileId: string; streamFileId: string; thumbnailFileId: string | null; processingStatus: string }
 export interface MediaSearchRequest { kind: MediaKind; query: string; folderId: string | null; includeChildFolders: boolean; tags: string[]; formats: string[]; favoriteOnly: boolean; sort: "updated" | "name" | "created" | "favorite"; offset: number; limit: number }
 export interface MediaImportRequest { kind: MediaKind; paths: string[]; folderId: string | null; tags: string[]; favorite: boolean }

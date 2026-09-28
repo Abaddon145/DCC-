@@ -3,7 +3,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, CheckCircle2, Download, FileSpreadsheet, Upload, X } from "lucide-react";
 import { api } from "../lib/api";
 import { listen } from "@tauri-apps/api/event";
-import type { ImportMapping, ImportPreview, ImportProgress, ImportReport, TranslationSettings } from "../types";
+import type { BatchTranslationRow, ImportMapping, ImportPreview, ImportProgress, ImportReport, TranslationSettings } from "../types";
 
 interface Props { onClose: () => void; onImported: () => void; notify: (message: string, error?: boolean) => void }
 
@@ -26,6 +26,7 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
   const [report, setReport] = useState<ImportReport | null>(null);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [translationSettings, setTranslationSettings] = useState<TranslationSettings | null>(null);
+  const [autoTranslate, setAutoTranslate] = useState(true);
 
   const inspect = async (selectedPath: string, nextMapping: ImportMapping = {}) => {
     setBusy(true);
@@ -43,9 +44,30 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
     if (result) { await api.exportTemplate(result); notify("Excel 导入模板已保存"); }
   };
   const commit = async () => {
+    if (autoTranslate && !translationSettings?.configured && !window.confirm("尚未配置百度翻译凭据。继续导入会保存原文，并把缺失译文标记为待补译，是否继续？")) return;
     setBusy(true);
-    try { setProgress(null); const result = await api.commitImport(path, mapping); setReport(result); onImported(); notify(`成功导入 ${result.imported} 条素材`); }
+    try { setProgress(null); const result = await api.commitImport(path, mapping, autoTranslate); setReport(result); onImported(); const pending = result.rows.filter(row => row.status === "translationPending").length; notify(`已导入 ${result.imported} 条素材 · 双语完成 ${result.imported - pending} · 待补译 ${pending}`); }
     catch (error) { notify(String(error), true); } finally { setBusy(false); }
+  };
+  const retryPending = async () => {
+    const ids = report?.rows.filter(row => row.status === "translationPending" && row.assetId).map(row => row.assetId!) ?? [];
+    if (!ids.length) return;
+    setBusy(true);
+    try {
+      const settings = await api.getTranslationSettings(); setTranslationSettings(settings);
+      if (!settings.configured) { notify("请先在设置中心配置百度翻译凭据，再重试待补译素材", true); return; }
+      const byId = new Map<string, BatchTranslationRow>();
+      for (let start = 0; start < ids.length; start += 5000) {
+        const result = await api.batchTranslateMissingAssets(ids.slice(start, start + 5000));
+        for (const row of result.rows) byId.set(row.assetId, row);
+      }
+      setReport(previous => previous && ({ ...previous, rows: previous.rows.map(row => {
+        const update = row.assetId ? byId.get(row.assetId) : undefined;
+        return update ? { ...row, status: update.status === "complete" || update.status === "skipped" ? "imported" as const : "translationPending" as const, messages: update.messages } : row;
+      }) }));
+      onImported();
+    } catch (error) { notify(`重试补译失败：${String(error)}`, true); }
+    finally { setBusy(false); }
   };
 
   useEffect(() => { if (path && preview) { const timer = setTimeout(() => inspect(path, mapping), 250); return () => clearTimeout(timer); } }, [mapping]);
@@ -55,19 +77,21 @@ export function ImportDialog({ onClose, onImported, notify }: Props) {
   const fields = mapping.fab_url || preview?.suggestedMapping.fab_url ? simpleFields : legacyFields;
   const canCommit = Boolean(mapping.fab_url || mapping.name || mapping.name_zh || mapping.name_en);
   const visibleRows = report?.rows ?? preview?.rows ?? [];
+  const pendingCount = report?.rows.filter(row => row.status === "translationPending").length ?? 0;
 
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true">
     <header className="modal-header"><div><span className="eyebrow">批量录入</span><h2>导入 Excel / CSV</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
     <div className="import-body">
-      {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>支持直接 URL，也支持显示标题但链接到 Fab 页面的 Excel 超链接；启用 Fab 自动翻译后会逐条补齐中文。</p><div><button className="primary-button" onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载 Excel 模板</button></div></div> : <>
+      {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>支持 Fab 简化模板和旧版多列表格；导入时可独立选择自动补齐中英双语。</p><div><button className="primary-button" onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载 Excel 模板</button></div></div> : <>
         <div className="selected-file"><FileSpreadsheet size={20} /><span title={path}>{path.split(/[\\/]/).at(-1)}</span><button onClick={choose}>更换文件</button></div>
-        <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3>{fields === simpleFields && <p className="import-hint">Fab 单元格可填写完整 URL，也可使用网页标题作为显示文字并把真实地址设为 Excel 超链接。{translationSettings ? translationSettings.fabAutoTranslate ? translationSettings.configured ? "导入时将逐条在线翻译中文；失败原因会列在对应行。" : "自动翻译已开启，但尚未配置百度翻译凭据；导入后将保留英文并逐行提示。" : "Fab 自动翻译已在设置中关闭；导入后保留英文。" : "批量导入遵循设置中的 Fab 自动翻译开关。"}</p>}<div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select value={mapping[field.key] || ""} onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
+        <div className="import-translation-option"><label><input type="checkbox" checked={autoTranslate} onChange={event => setAutoTranslate(event.target.checked)} />自动补齐中英双语</label><span>{autoTranslate ? translationSettings?.configured ? "已配置百度翻译；仅补缺失字段，不覆盖已有译文。" : "尚未确认翻译凭据；继续前会提示，未完成的字段将标记待补译。" : "本次不请求翻译；缺失字段仍会标记待补译。"}</span></div>
+        <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3>{fields === simpleFields && <p className="import-hint">Fab 单元格可填写完整 URL，也可使用网页标题作为显示文字并把真实地址设为 Excel 超链接。</p>}<div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select value={mapping[field.key] || ""} onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value }))}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
         {preview && <><div className="import-summary"><span className="valid"><CheckCircle2 size={15} />有效 {preview.validCount}</span><span className="warning"><AlertCircle size={15} />警告 {preview.warningCount}</span><span className="warning"><AlertCircle size={15} />重复 {preview.duplicateCount}</span><span className="error"><AlertCircle size={15} />错误 {preview.errorCount}</span></div>
-          {report && <h3>逐行导入结果</h3>}<div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>行</th><th>名称</th><th>分类</th><th>状态</th><th>说明</th></tr></thead><tbody>{visibleRows.slice(0, 500).map(row => <tr key={row.row}><td>{row.row}</td><td>{row.name || "—"}</td><td>{row.actualCategoryPath || row.suggestedCategoryPath || "导入时识别"}</td><td><span className={`status ${row.status}`}>{row.status === "valid" ? "有效" : row.status === "warning" ? "警告" : row.status === "duplicate" ? "重复" : row.status === "imported" ? "已导入" : row.status === "skipped" ? "已跳过" : "错误"}</span></td><td>{row.messages.join("；") || "—"}</td></tr>)}</tbody></table></div>{visibleRows.length > 500 && <p className="import-hint">仅显示前 500 行，共 {visibleRows.length} 行。</p>}</>}
-        {report && <div className="report-banner">导入完成：新增 {report.imported}，跳过 {report.skipped}，失败 {report.failed}</div>}
+          {report && <h3>逐行导入结果</h3>}<div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>行</th><th>名称</th><th>分类</th><th>状态</th><th>说明</th></tr></thead><tbody>{visibleRows.slice(0, 500).map(row => <tr key={row.row}><td>{row.row}</td><td>{row.name || "—"}</td><td>{row.actualCategoryPath || row.suggestedCategoryPath || "导入时识别"}</td><td><span className={`status ${row.status}`}>{row.status === "valid" ? "有效" : row.status === "warning" ? "警告" : row.status === "duplicate" ? "重复" : row.status === "imported" ? "已导入" : row.status === "translationPending" ? "待补译" : row.status === "skipped" ? "已跳过" : "错误"}</span></td><td>{row.messages.join("；") || "—"}</td></tr>)}</tbody></table></div>{visibleRows.length > 500 && <p className="import-hint">仅显示前 500 行，共 {visibleRows.length} 行。</p>}</>}
+        {report && <div className="report-banner">导入完成：新增 {report.imported}，双语完成 {report.imported - pendingCount}，待补译 {pendingCount}，跳过 {report.skipped}，失败 {report.failed}</div>}
         {busy && progress && <div className="import-live-progress"><div><span style={{ width: `${progress.total ? progress.current / progress.total * 100 : 0}%` }} /></div><strong>{progress.current} / {progress.total} · {progress.phase}</strong><small>{progress.currentName || "正在完成导入"}</small><p>成功 {progress.imported} · 跳过 {progress.skipped} · 失败 {progress.failed}</p></div>}
       </>}
     </div>
-    <footer className="modal-footer"><button className="secondary-button" onClick={onClose}>{report ? "完成" : "取消"}</button>{path && !report && <button className="primary-button" disabled={busy || !canCommit || !preview?.validCount} onClick={commit}><Upload size={16} />{busy ? "正在逐条处理…" : `导入 ${preview?.validCount || 0} 条`}</button>}</footer>
+    <footer className="modal-footer">{report && pendingCount > 0 && <button className="secondary-button" disabled={busy} onClick={() => void retryPending()}>重试待补译 {pendingCount} 条</button>}<button className="secondary-button" disabled={busy} onClick={onClose}>{report ? "完成" : "取消"}</button>{path && !report && <button className="primary-button" disabled={busy || !canCommit || !preview?.validCount} onClick={commit}><Upload size={16} />{busy ? "正在逐条处理…" : `导入 ${preview?.validCount || 0} 条`}</button>}</footer>
   </section></div>;
 }
