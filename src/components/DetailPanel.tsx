@@ -8,6 +8,7 @@ import { MediaPreview } from "./MediaPreview";
 import { LibraryMediaPreview, MediaViewer, type PreviewItem } from "./MediaViewer";
 
 interface Props {
+  onAi?: (id: string) => void;
   asset: AssetDetail | null;
   contentLanguage: ContentLanguage;
   loading: boolean;
@@ -26,7 +27,7 @@ interface Props {
   onCollectMedia?: (assetId: string) => void;
 }
 
-export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
+export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
   const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
@@ -79,6 +80,7 @@ export function DetailPanel({ asset, contentLanguage, loading, onClose, onEdit, 
         <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
         {asset.extractionCode && <button className="secondary-button" onClick={onCopy} title="复制提取码"><Copy size={17} /></button>}
         {!!(asset.images.length + (asset.media?.length || 0)) && <button className="secondary-button" onClick={() => onCollectMedia?.(asset.id)} title="复制为独立媒体条目"><Images size={17} />收录到媒体库</button>}
+        {onAi && <button className="secondary-button" onClick={() => onAi(asset.id)}>AI 整理</button>}
         {onAddProject && <button className="secondary-button" onClick={() => onAddProject(asset.id)} title="加入创作项目"><BriefcaseBusiness size={17} /></button>}
         {!!asset.images.length && onAddReference && <button ref={referenceButton} className="secondary-button" title="加入参考板" onClick={() => { const rect = referenceButton.current?.getBoundingClientRect(); if (!rect) return; const height = 82; setReferenceMenu(current => current ? null : { left: Math.max(8, Math.min(window.innerWidth - 180, rect.right - 172)), top: rect.top > height + 8 ? rect.top - height - 6 : rect.bottom + 6 }); }}><Images size={17} /></button>}
         <button className="secondary-button" onClick={onEdit} title="编辑"><Edit3 size={17} /></button>

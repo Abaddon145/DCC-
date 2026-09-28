@@ -12,7 +12,7 @@ use std::{
 };
 
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
-const MODEL: &str = "deepseek-flash";
+pub(crate) const MODEL: &str = "deepseek-flash";
 const PROMPT_VERSION: &str = "dcc-translation-v1";
 const MAX_OUTPUT: u64 = 4096;
 
@@ -54,6 +54,8 @@ impl TranslationPreferences {
 pub struct TranslationUsage {
     pub month: String,
     pub deepseek_tokens: u64,
+    #[serde(default)]
+    pub creative_tokens: u64,
     pub baidu_characters: u64,
     pub cache_entries: u64,
     pub cache_hits: u64,
@@ -131,6 +133,7 @@ impl TranslationService {
         db.busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS usage(month TEXT NOT NULL,provider TEXT NOT NULL,used INTEGER NOT NULL DEFAULT 0,hits INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(month,provider));").map_err(|e| e.to_string())?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS creative_usage(month TEXT PRIMARY KEY,used INTEGER NOT NULL DEFAULT 0);").map_err(|e| e.to_string())?;
         Ok(Self {
             db: Mutex::new(db),
             blocked: Mutex::new(HashMap::new()),
@@ -170,6 +173,15 @@ impl TranslationService {
         Ok(TranslationUsage {
             month: month.clone(),
             deepseek_tokens: used("deepseek")?,
+            creative_tokens: db
+                .query_row(
+                    "SELECT used FROM creative_usage WHERE month=?1",
+                    [&month],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0),
             baidu_characters: used("baidu")?,
             cache_entries: db
                 .query_row("SELECT count(*) FROM cache", [], |r| r.get(0))
@@ -192,6 +204,16 @@ impl TranslationService {
         Ok(())
     }
     fn reserve(&self, provider: &str, amount: u64, limit: u64, month: &str) -> Result<(), Failure> {
+        self.reserve_for(provider, amount, limit, month, false)
+    }
+    fn reserve_for(
+        &self,
+        provider: &str,
+        amount: u64,
+        limit: u64,
+        month: &str,
+        creative: bool,
+    ) -> Result<(), Failure> {
         let mut db = self
             .db
             .lock()
@@ -212,20 +234,39 @@ impl TranslationService {
         // Reserve before sending. If a request times out or the app exits, retain
         // the reservation because the remote service may still have billed it.
         tx.execute("INSERT INTO usage(month,provider,used) VALUES(?1,?2,?3) ON CONFLICT(month,provider) DO UPDATE SET used=used+excluded.used",params![month,provider,amount]).map_err(db_failure)?;
+        if creative {
+            tx.execute("INSERT INTO creative_usage(month,used) VALUES(?1,?2) ON CONFLICT(month) DO UPDATE SET used=used+excluded.used",params![month,amount]).map_err(db_failure)?;
+        }
         tx.commit().map_err(db_failure)
     }
     fn settle(&self, provider: &str, reserved: u64, used: u64, month: &str) -> Result<(), String> {
-        self.db
-            .lock()
-            .map_err(|_| "翻译缓存锁已损坏")?
-            .execute(
-                "UPDATE usage SET used=max(0,used-?3)+?4 WHERE month=?1 AND provider=?2",
-                params![month, provider, reserved, used],
+        self.settle_for(provider, reserved, used, month, false)
+    }
+    fn settle_for(
+        &self,
+        provider: &str,
+        reserved: u64,
+        used: u64,
+        month: &str,
+        creative: bool,
+    ) -> Result<(), String> {
+        let mut connection = self.db.lock().map_err(|_| "翻译缓存锁已损坏")?;
+        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE usage SET used=max(0,used-?3)+?4 WHERE month=?1 AND provider=?2",
+            params![month, provider, reserved, used],
+        )
+        .map_err(|e| e.to_string())?;
+        if creative {
+            tx.execute(
+                "UPDATE creative_usage SET used=max(0,used-?2)+?3 WHERE month=?1",
+                params![month, reserved, used],
             )
             .map_err(|e| e.to_string())?;
-        Ok(())
+        }
+        tx.commit().map_err(|e| e.to_string())
     }
-    fn cached(&self, key: &str) -> Result<Option<String>, String> {
+    pub(crate) fn cached(&self, key: &str) -> Result<Option<String>, String> {
         self.db
             .lock()
             .map_err(|_| "翻译缓存锁已损坏")?
@@ -233,7 +274,7 @@ impl TranslationService {
             .optional()
             .map_err(|e| e.to_string())
     }
-    fn save_cached(&self, key: &str, value: &str) -> Result<(), String> {
+    pub(crate) fn save_cached(&self, key: &str, value: &str) -> Result<(), String> {
         self.db
             .lock()
             .map_err(|_| "翻译缓存锁已损坏")?
@@ -244,6 +285,115 @@ impl TranslationService {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+    pub(crate) async fn creative_json(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, String> {
+        let key = deepseek_key()?;
+        self.creative_exchange(body, limit, cancel, &key, DEEPSEEK_URL)
+            .await
+    }
+    // URL and key are private implementation inputs. The command surface never accepts them.
+    async fn creative_exchange(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        key: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        use std::sync::atomic::Ordering;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(150))
+            .build()
+            .map_err(|_| "初始化 AI 请求失败")?;
+        let month = month();
+        let reserved =
+            body.to_string().len() as u64 + 512 + body["max_tokens"].as_u64().unwrap_or(8192);
+        for attempt in 0..2 {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("已取消生成".into());
+            }
+            self.reserve_for("deepseek", reserved, limit, &month, true)
+                .map_err(|e| e.message)?;
+            let request = async {
+                let response = client
+                    .post(url)
+                    .bearer_auth(key)
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|_| "AI 连接失败或超时")?;
+                let status = response.status().as_u16();
+                let value = if (200..300).contains(&status) {
+                    Some(
+                        response
+                            .json::<serde_json::Value>()
+                            .await
+                            .map_err(|_| "AI 响应格式无效")?,
+                    )
+                } else {
+                    None
+                };
+                Ok::<_, String>((status, value))
+            };
+            let cancelled = async {
+                loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+            };
+            let result = tokio::select! { result=request=>result, _=cancelled=>return Err("已取消生成；已发送请求可能产生用量".into()) };
+            match result {
+                Ok((status, Some(value))) => {
+                    if let Some(used) = value
+                        .pointer("/usage/total_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        self.settle_for("deepseek", reserved, used, &month, true)?;
+                    }
+                    if value
+                        .pointer("/choices/0/finish_reason")
+                        .and_then(|v| v.as_str())
+                        != Some("stop")
+                    {
+                        return Err("AI 结果未完整生成，请缩小范围后重试".into());
+                    }
+                    return value
+                        .pointer("/choices/0/message/content")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("AI 未返回结果（{status}）"));
+                }
+                Ok((status, None)) => {
+                    self.settle_for("deepseek", reserved, 0, &month, true)?;
+                    if attempt == 0 && (status == 429 || status >= 500) {
+                        tokio::time::sleep(Duration::from_millis(750)).await;
+                        continue;
+                    }
+                    return Err(match status {
+                        401 => "DeepSeek 凭据无效，请重新配置",
+                        402 => "DeepSeek 账户余额不足",
+                        429 => "DeepSeek 请求过于频繁，请稍后重试",
+                        500..=599 => "DeepSeek 服务暂时不可用",
+                        _ => "DeepSeek 请求失败，请检查服务配置",
+                    }
+                    .into());
+                }
+                Err(error) => {
+                    if attempt == 1 {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Err("AI 请求失败".into())
+    }
+
     async fn send(
         &self,
         client: &Client,
@@ -817,5 +967,144 @@ mod tests {
             cache_key("deepseek", "en", "zh", "one"),
             cache_key("deepseek", "zh", "en", "one")
         );
+    }
+
+    fn fake_creative(
+        responses: Vec<(u16, serde_json::Value)>,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (String, std::thread::JoinHandle<usize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut count = 0;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            for (status, value) in responses {
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(_) if std::time::Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(_) => return count,
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = [0; 8192];
+                let _ = socket.read(&mut bytes);
+                count += 1;
+                if let Some(cancel) = &cancel {
+                    cancel.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(180));
+                }
+                let text = value.to_string();
+                let response=format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",text.len());
+                let _ = socket.write_all(response.as_bytes());
+            }
+            count
+        });
+        (url, handle)
+    }
+    #[test]
+    fn creative_and_translation_share_a_persistent_cap_and_separate_subtotals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let service = TranslationService::open(&path).unwrap();
+        let month = month();
+        service.reserve("deepseek", 60, 100, &month).unwrap();
+        assert!(service
+            .reserve_for("deepseek", 50, 100, &month, true)
+            .is_err());
+        service
+            .reserve_for("deepseek", 40, 100, &month, true)
+            .unwrap();
+        service
+            .settle_for("deepseek", 40, 15, &month, true)
+            .unwrap();
+        drop(service);
+        let service = TranslationService::open(&path).unwrap();
+        let usage = service.usage().unwrap();
+        assert_eq!(usage.deepseek_tokens, 75);
+        assert_eq!(usage.creative_tokens, 15);
+        assert!(service.reserve("deepseek", 26, 100, &month).is_err());
+    }
+    #[test]
+    fn creative_exchange_retries_service_errors_once_and_settles_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        let (url, server) = fake_creative(
+            vec![
+                (503, serde_json::json!({})),
+                (
+                    200,
+                    serde_json::json!({"usage":{"total_tokens":81},"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}),
+                ),
+            ],
+            None,
+        );
+        let value = tauri::async_runtime::block_on(service.creative_exchange(
+            &serde_json::json!({"max_tokens":20}),
+            10000,
+            &std::sync::atomic::AtomicBool::new(false),
+            "test-placeholder",
+            &url,
+        ))
+        .unwrap();
+        assert_eq!(value, "{}");
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(service.usage().unwrap().creative_tokens, 81);
+        assert_eq!(service.usage().unwrap().deepseek_tokens, 81);
+    }
+    #[test]
+    fn creative_auth_failure_is_safe_and_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        let (url, server) = fake_creative(
+            vec![(401, serde_json::json!({"error":"must-not-be-shown"}))],
+            None,
+        );
+        let error = tauri::async_runtime::block_on(service.creative_exchange(
+            &serde_json::json!({}),
+            10000,
+            &std::sync::atomic::AtomicBool::new(false),
+            "test-placeholder",
+            &url,
+        ))
+        .unwrap_err();
+        assert!(error.contains("凭据"));
+        assert!(!error.contains("must-not-be-shown"));
+        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(service.usage().unwrap().creative_tokens, 0);
+    }
+    #[test]
+    fn creative_cancellation_drops_request_and_keeps_conservative_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (url, server) = fake_creative(vec![(200, serde_json::json!({}))], Some(cancel.clone()));
+        let error = tauri::async_runtime::block_on(service.creative_exchange(
+            &serde_json::json!({}),
+            10000,
+            &cancel,
+            "test-placeholder",
+            &url,
+        ))
+        .unwrap_err();
+        assert!(error.contains("取消"));
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(service.usage().unwrap().creative_tokens > 0);
+        let before = service.usage().unwrap().creative_tokens;
+        assert!(tauri::async_runtime::block_on(service.creative_exchange(
+            &serde_json::json!({}),
+            10000,
+            &cancel,
+            "test-placeholder",
+            &url
+        ))
+        .is_err());
+        assert_eq!(service.usage().unwrap().creative_tokens, before);
     }
 }

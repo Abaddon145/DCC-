@@ -1,3 +1,5 @@
+mod ai;
+mod ai_store;
 mod backup;
 mod bilingual;
 mod commands;
@@ -37,6 +39,7 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
         "list_library_tasks"
             | "get_library_task"
             | "cancel_library_task"
+            | "cancel_ai_session"
             | "exit_when_tasks_idle"
             | "attach_reference_window"
             | "open_external_url"
@@ -141,6 +144,17 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    ai::prepare_ai_request,
+                    ai::get_ai_session,
+                    ai::list_ai_sessions,
+                    ai::rename_ai_session,
+                    ai::delete_ai_session,
+                    ai::generate_ai_session,
+                    ai::cancel_ai_session,
+                    ai::apply_ai_session,
+                    ai::undo_ai_application,
+                    ai::search_ai_candidates,
+                    ai::run_ai_search,
                     get_library_meta,
                     tasks::list_library_tasks,
                     tasks::get_library_task,

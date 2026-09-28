@@ -3,9 +3,9 @@ import { BriefcaseBusiness, CheckSquare, Images, Languages, X } from "lucide-rea
 import type { BatchAssetUpdate, Category } from "../types";
 import { splitValues } from "../lib/validation";
 
-interface Props { count: number; totalCount: number; selectingAll?: boolean; categories: Category[]; onSelectAll: () => void; onClear: () => void; onExit: () => void; onAddToReference: () => void; onAddToProject?: () => void; onTranslate: () => void; translating?: boolean; onApply: (update: Omit<BatchAssetUpdate, "ids" | "contentLanguage">) => Promise<void> }
+interface Props { onAi?: () => void; count: number; totalCount: number; selectingAll?: boolean; categories: Category[]; onSelectAll: () => void; onClear: () => void; onExit: () => void; onAddToReference: () => void; onAddToProject?: () => void; onTranslate: () => void; translating?: boolean; onApply: (update: Omit<BatchAssetUpdate, "ids" | "contentLanguage">) => Promise<void> }
 
-export function BatchToolbar({ count, totalCount, selectingAll = false, categories, onSelectAll, onClear, onExit, onAddToReference, onAddToProject = () => undefined, onTranslate, translating = false, onApply }: Props) {
+export function BatchToolbar({ onAi, count, totalCount, selectingAll = false, categories, onSelectAll, onClear, onExit, onAddToReference, onAddToProject = () => undefined, onTranslate, translating = false, onApply }: Props) {
   const [category, setCategory] = useState("unchanged");
   const [addTags, setAddTags] = useState("");
   const [removeTags, setRemoveTags] = useState("");
@@ -19,6 +19,7 @@ export function BatchToolbar({ count, totalCount, selectingAll = false, categori
     } finally { setBusy(false); }
   };
   return <div className="batch-toolbar">
+    {onAi && <button className="secondary-button compact" disabled={!count || busy} onClick={onAi}>AI 整理</button>}
     <div className="batch-count"><CheckSquare size={17} /><strong>{count}</strong> 项已选择</div>
     <button className="link-button" disabled={selectingAll} onClick={onSelectAll}>{selectingAll ? "正在全选…" : `全选当前结果 ${totalCount} 项`}</button><button className="link-button" onClick={onClear}>清空</button>
     <select value={category} onChange={event => setCategory(event.target.value)}><option value="unchanged">分类不变</option><option value="clear">清空分类</option>{options.map(item => <option key={item.id} value={`set:${item.id}`}>设为：{item.name}</option>)}</select>
