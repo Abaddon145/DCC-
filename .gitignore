@@ -18,4 +18,13 @@ library.sqlite*
 managed-images/
 reference-boards/
 release-artifacts/
+task-journal.json
+task-journal.tmp
+translation-glossary.json
+library.db*
+media-library/
+media/
+images/
+safety-backups/
+.tools/
 *.exe.sha256

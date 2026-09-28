@@ -434,6 +434,10 @@ pub struct LibraryPreferences {
     pub collapsed_module_groups: Vec<String>,
     #[serde(default)]
     pub last_context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub workspace_contexts: HashMap<String, serde_json::Value>,
+    #[serde(default = "default_true_value")]
+    pub remember_workspace: bool,
 }
 
 impl Default for LibraryPreferences {
@@ -455,6 +459,8 @@ impl Default for LibraryPreferences {
             collapsed_context_panes: vec![],
             collapsed_module_groups: default_collapsed_module_groups(),
             last_context: None,
+            workspace_contexts: HashMap::new(),
+            remember_workspace: true,
         }
     }
 }
@@ -939,6 +945,26 @@ pub struct ImportRowResult {
     pub duplicate_asset_id: Option<String>,
     #[serde(default)]
     pub duplicate_source: Option<String>,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTranslationReport {
+    pub completed: usize,
+    pub pending: usize,
+    pub skipped: usize,
+    pub rows: Vec<BatchTranslationRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTranslationRow {
+    pub asset_id: String,
+    pub name: String,
+    pub status: String,
+    pub messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

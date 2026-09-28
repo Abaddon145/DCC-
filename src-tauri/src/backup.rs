@@ -2,7 +2,6 @@ use crate::{db, state::ActiveLibrary};
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -33,6 +32,23 @@ pub fn export_library(
     base_dir: &Path,
     destination: &Path,
 ) -> Result<(), String> {
+    export_library_with_progress(connection, base_dir, destination, &|_, _, _, _| {})
+}
+
+pub fn export_library_with_progress(
+    connection: &Connection,
+    base_dir: &Path,
+    destination: &Path,
+    progress: &dyn Fn(usize, usize, String, String),
+) -> Result<(), String> {
+    if destination
+        .extension()
+        .and_then(|v| v.to_str())
+        .map(|v| v.eq_ignore_ascii_case("dccassetlib"))
+        != Some(true)
+    {
+        return Err("备份输出必须为 .dccassetlib 文件".into());
+    }
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -43,7 +59,7 @@ pub fn export_library(
         .execute("VACUUM INTO ?1", [snapshot_text])
         .map_err(|e| format!("创建数据库快照失败：{e}"))?;
     let mut sources: Vec<(PathBuf, String)> = vec![(snapshot, "library.db".into())];
-    for managed_dir in ["images", "reference-boards", "media-library"] {
+    for managed_dir in ["images", "reference-boards", "media-library", "media"] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
@@ -63,12 +79,13 @@ pub fn export_library(
         }
     }
     let mut entries = Vec::new();
-    for (source, name) in &sources {
-        let data = fs::read(source).map_err(|e| e.to_string())?;
+    for (index, (source, name)) in sources.iter().enumerate() {
+        progress(index, sources.len(), name.clone(), "生成校验清单".into());
+        let (size, sha256) = crate::file_digest::digest_file(source)?;
         entries.push(ManifestEntry {
             path: name.clone(),
-            size: data.len() as u64,
-            sha256: hex_digest(&data),
+            size,
+            sha256,
         });
     }
     let manifest = Manifest {
@@ -83,7 +100,8 @@ pub fn export_library(
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .unix_permissions(0o644);
-    for (source, name) in &sources {
+    for (index, (source, name)) in sources.iter().enumerate() {
+        progress(index, sources.len(), name.clone(), "压缩备份".into());
         zip.start_file(name, options).map_err(|e| e.to_string())?;
         let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
         std::io::copy(&mut input, &mut zip).map_err(|e| e.to_string())?;
@@ -97,10 +115,14 @@ pub fn export_library(
     )
     .map_err(|e| e.to_string())?;
     zip.finish().map_err(|e| e.to_string())?;
-    if destination.exists() {
-        fs::remove_file(destination).map_err(|e| e.to_string())?;
-    }
-    fs::rename(temp_output, destination).map_err(|e| e.to_string())
+    fs::rename(temp_output, destination).map_err(|e| e.to_string())?;
+    progress(
+        sources.len(),
+        sources.len(),
+        String::new(),
+        "备份已完成".into(),
+    );
+    Ok(())
 }
 
 pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), String> {
@@ -109,109 +131,103 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     }
     let stage = tempdir().map_err(|e| e.to_string())?;
     extract_and_verify(source, stage.path())?;
-    let staged_db = stage.path().join("library.db");
-    if !staged_db.is_file() {
-        return Err("备份中缺少数据库".into());
-    }
-    let check = Connection::open(&staged_db).map_err(|e| format!("备份数据库无效：{e}"))?;
+    let prepared = tempfile::Builder::new()
+        .prefix(".restore-new-")
+        .tempdir_in(&active.base_dir)
+        .map_err(|e| e.to_string())?;
+    let prepared_db = prepared.path().join("library.db");
+    fs::copy(stage.path().join("library.db"), &prepared_db)
+        .map_err(|e| format!("备份数据库缺失：{e}"))?;
+    let check = db::open_database(&prepared_db)?;
     let integrity: String = check
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     if integrity != "ok" {
         return Err(format!("备份数据库完整性检查失败：{integrity}"));
     }
+    check
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| e.to_string())?;
     drop(check);
-    let current = active.connection.as_ref().ok_or("数据库正在维护")?;
+    let directories = ["images", "reference-boards", "media-library", "media"];
+    for name in directories {
+        if stage.path().join(name).exists() {
+            copy_tree(&stage.path().join(name), &prepared.path().join(name))?;
+        } else {
+            fs::create_dir_all(prepared.path().join(name)).map_err(|e| e.to_string())?;
+        }
+    }
     let safety = active.base_dir.join("safety-backups").join(format!(
-        "恢复前-{}.dccassetlib",
-        Utc::now().format("%Y%m%d-%H%M%S")
+        "恢复前-{}-{}.dccassetlib",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4()
     ));
+    let current = active.connection.as_ref().ok_or("数据库正在维护")?;
     export_library(current, &active.base_dir, &safety)?;
-    let old_connection = active.connection.take();
-    drop(old_connection);
-    let rollback_db = active.base_dir.join("library.pre-restore.db");
-    let rollback_images = active.base_dir.join("images.pre-restore");
-    let rollback_boards = active.base_dir.join("reference-boards.pre-restore");
-    let rollback_media = active.base_dir.join("media-library.pre-restore");
-    remove_file_if_exists(&rollback_db)?;
-    remove_dir_if_exists(&rollback_images)?;
-    remove_dir_if_exists(&rollback_boards)?;
-    remove_dir_if_exists(&rollback_media)?;
-    for suffix in ["-wal", "-shm"] {
-        remove_file_if_exists(Path::new(&format!(
-            "{}{}",
-            active.db_path.display(),
-            suffix
-        )))?;
-    }
-    if active.db_path.exists() {
-        fs::rename(&active.db_path, &rollback_db)
-            .map_err(|e| format!("准备恢复数据库失败：{e}"))?;
-    }
-    let current_images = active.base_dir.join("images");
-    if current_images.exists() {
-        fs::rename(&current_images, &rollback_images)
-            .map_err(|e| format!("准备恢复图片失败：{e}"))?;
-    }
-    let current_boards = active.base_dir.join("reference-boards");
-    if current_boards.exists() {
-        fs::rename(&current_boards, &rollback_boards)
-            .map_err(|e| format!("准备恢复参考板图片失败：{e}"))?;
-    }
-    let current_media = active.base_dir.join("media-library");
-    if current_media.exists() {
-        fs::rename(&current_media, &rollback_media)
-            .map_err(|e| format!("准备恢复媒体库失败：{e}"))?;
-    }
+    current
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let rollback = tempfile::Builder::new()
+        .prefix(".restore-old-")
+        .tempdir_in(&active.base_dir)
+        .map_err(|e| e.to_string())?;
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut installed: Vec<PathBuf> = Vec::new();
+    drop(active.connection.take());
+    let targets = std::iter::once(("library.db", active.db_path.clone()))
+        .chain(
+            directories
+                .into_iter()
+                .map(|name| (name, active.base_dir.join(name))),
+        )
+        .collect::<Vec<_>>();
     let install = (|| -> Result<(), String> {
-        fs::copy(&staged_db, &active.db_path).map_err(|e| format!("恢复数据库失败：{e}"))?;
-        let staged_images = stage.path().join("images");
-        if staged_images.exists() {
-            copy_tree(&staged_images, &current_images)?
-        } else {
-            fs::create_dir_all(current_images.join("originals")).map_err(|e| e.to_string())?;
-            fs::create_dir_all(current_images.join("thumbnails")).map_err(|e| e.to_string())?;
+        for (name, target) in &targets {
+            if target.exists() {
+                let old = rollback.path().join(name);
+                fs::rename(target, &old).map_err(|e| format!("准备恢复 {name} 失败：{e}"))?;
+                moved.push((target.clone(), old));
+            }
+            fs::rename(prepared.path().join(name), target)
+                .map_err(|e| format!("安装恢复 {name} 失败：{e}"))?;
+            installed.push(target.clone());
         }
-        let staged_boards = stage.path().join("reference-boards");
-        if staged_boards.exists() {
-            copy_tree(&staged_boards, &current_boards)?;
-        } else {
-            fs::create_dir_all(&current_boards).map_err(|e| e.to_string())?;
-        }
-        let staged_media = stage.path().join("media-library");
-        if staged_media.exists() {
-            copy_tree(&staged_media, &current_media)?;
-        } else {
-            fs::create_dir_all(&current_media).map_err(|e| e.to_string())?;
-        }
-        let reopened = db::open_database(&active.db_path)?;
-        active.connection = Some(reopened);
+        active.connection = Some(db::open_database(&active.db_path)?);
         Ok(())
     })();
     if let Err(error) = install {
-        remove_file_if_exists(&active.db_path)?;
-        remove_dir_if_exists(&current_images)?;
-        remove_dir_if_exists(&current_boards)?;
-        remove_dir_if_exists(&current_media)?;
-        if rollback_db.exists() {
-            fs::rename(&rollback_db, &active.db_path).map_err(|e| e.to_string())?;
+        drop(active.connection.take());
+        let restore_old = (|| -> Result<(), String> {
+            for path in installed.iter().rev() {
+                if path.is_dir() {
+                    remove_dir_if_exists(path)?
+                } else {
+                    remove_file_if_exists(path)?
+                }
+            }
+            for (target, old) in moved.iter().rev() {
+                fs::rename(old, target).map_err(|e| e.to_string())?;
+            }
+            active.connection = Some(db::open_database(&active.db_path)?);
+            Ok(())
+        })();
+        if let Err(rollback_error) = restore_old {
+            let preserved = rollback.keep();
+            return Err(format!(
+                "{error}；回滚未完成：{rollback_error}。原库副本保留于 {}；完整安全备份：{}",
+                preserved.display(),
+                safety.display()
+            ));
         }
-        if rollback_images.exists() {
-            fs::rename(&rollback_images, &current_images).map_err(|e| e.to_string())?;
-        }
-        if rollback_boards.exists() {
-            fs::rename(&rollback_boards, &current_boards).map_err(|e| e.to_string())?;
-        }
-        if rollback_media.exists() {
-            fs::rename(&rollback_media, &current_media).map_err(|e| e.to_string())?;
-        }
-        active.connection = Some(db::open_database(&active.db_path)?);
-        return Err(error);
+        return Err(format!(
+            "{error}；已还原原库，安全备份：{}",
+            safety.display()
+        ));
     }
-    remove_file_if_exists(&rollback_db)?;
-    remove_dir_if_exists(&rollback_images)?;
-    remove_dir_if_exists(&rollback_boards)?;
-    remove_dir_if_exists(&rollback_media)?;
     Ok(())
 }
 
@@ -248,19 +264,40 @@ fn extract_and_verify(source: &Path, destination: &Path) -> Result<(), String> {
     if manifest.format != "dcc-asset-library" || manifest.schema_version != 1 {
         return Err("不支持的备份格式或版本".into());
     }
+    let mut listed = std::collections::HashSet::new();
     for expected in manifest.entries {
-        let data = fs::read(destination.join(&expected.path))
+        let path = Path::new(&expected.path);
+        if expected.path.contains("\\")
+            || path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || !listed.insert(expected.path.clone())
+        {
+            return Err("备份清单包含非法或重复路径".into());
+        }
+        let (size, digest) = crate::file_digest::digest_file(&destination.join(&expected.path))
             .map_err(|_| format!("备份文件缺失：{}", expected.path))?;
-        if data.len() as u64 != expected.size || hex_digest(&data) != expected.sha256 {
+        if size != expected.size || digest != expected.sha256 {
             return Err(format!("备份校验失败：{}", expected.path));
+        }
+    }
+    for entry in WalkDir::new(destination) {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().is_file() {
+            let name = entry
+                .path()
+                .strip_prefix(destination)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if name != "manifest.json" && !listed.contains(&name) {
+                return Err(format!("备份文件不在校验清单中：{name}"));
+            }
         }
     }
     Ok(())
 }
 
-fn hex_digest(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
-}
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
@@ -298,9 +335,83 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     #[test]
+    fn restore_keeps_all_preview_directories_and_safety_backup() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("library");
+        fs::create_dir_all(base.join("media/asset/originals")).unwrap();
+        fs::write(base.join("media/asset/originals/model.glb"), b"model").unwrap();
+        let db_path = base.join("library.db");
+        let connection = db::open_database(&db_path).unwrap();
+        connection.execute("INSERT INTO categories(id,name,sort_order,created_at) VALUES('test','环境',0,'now')",[]).unwrap();
+        let output = dir.path().join("backup.dccassetlib");
+        export_library(&connection, &base, &output).unwrap();
+        fs::write(base.join("media/asset/originals/model.glb"), b"changed").unwrap();
+        connection.execute("DELETE FROM categories", []).unwrap();
+        let marker = crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: "lib".into(),
+            name: "测试".into(),
+            created_at: "now".into(),
+        };
+        let mut active = ActiveLibrary {
+            base_dir: base.clone(),
+            db_path,
+            marker,
+            connection: Some(connection),
+        };
+        restore_library(&mut active, &output).unwrap();
+        assert_eq!(
+            fs::read(base.join("media/asset/originals/model.glb")).unwrap(),
+            b"model"
+        );
+        let count: i64 = active
+            .connection
+            .as_ref()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            fs::read_dir(base.join("safety-backups")).unwrap().count(),
+            1
+        );
+    }
+    #[test]
+    fn damaged_backup_does_not_replace_current_library() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("library");
+        fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("library.db");
+        let connection = db::open_database(&db_path).unwrap();
+        let marker = crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: "lib".into(),
+            name: "测试".into(),
+            created_at: "now".into(),
+        };
+        let mut active = ActiveLibrary {
+            base_dir: base.clone(),
+            db_path,
+            marker,
+            connection: Some(connection),
+        };
+        let damaged = dir.path().join("bad.dccassetlib");
+        fs::write(&damaged, b"bad zip").unwrap();
+        assert!(restore_library(&mut active, &damaged).is_err());
+        assert_eq!(
+            active
+                .connection
+                .as_ref()
+                .unwrap()
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+    #[test]
     fn digest_is_stable() {
         assert_eq!(
-            hex_digest(b"asset"),
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"asset")),
             "d59386e0ae435e292fbe0ebcdb954b75ed5fb3922091277cb19f798fc5d50718"
         );
     }
@@ -315,6 +426,12 @@ mod tests {
             b"preview",
         )
         .unwrap();
+        fs::create_dir_all(base.join("media/asset/originals")).unwrap();
+        fs::write(
+            base.join("media/asset/originals/model.glb"),
+            b"asset attachment",
+        )
+        .unwrap();
         let connection = db::open_database(&base.join("library.db")).unwrap();
         let output = directory.path().join("backup.dccassetlib");
         export_library(&connection, &base, &output).unwrap();
@@ -323,5 +440,6 @@ mod tests {
         assert!(archive
             .by_name("media-library/image/demo/original.png")
             .is_ok());
+        assert!(archive.by_name("media/asset/originals/model.glb").is_ok());
     }
 }

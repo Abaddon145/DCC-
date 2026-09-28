@@ -1,14 +1,159 @@
 use crate::{images, media, models::*};
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
     fs,
-    io::Read,
+    io::{Cursor, Read},
     path::{Component, Path, PathBuf},
 };
 use uuid::Uuid;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelThumbnailJob {
+    pub id: String,
+    pub logical_path: String,
+    pub original_name: String,
+}
+
+pub fn pending_model_thumbnails(connection: &Connection) -> Result<Vec<ModelThumbnailJob>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT e.id, m.logical_path, m.original_name FROM media_entries e \
+         JOIN media_files m ON m.id=e.primary_file_id \
+         WHERE e.kind='model' AND e.deleted_at IS NULL AND e.processing_message='' AND NOT EXISTS \
+         (SELECT 1 FROM media_files t WHERE t.entry_id=e.id AND t.role='thumbnail') \
+         ORDER BY e.created_at, e.id",
+        )
+        .map_err(|e| e.to_string())?;
+    let jobs = statement
+        .query_map([], |row| {
+            Ok(ModelThumbnailJob {
+                id: row.get(0)?,
+                logical_path: row.get(1)?,
+                original_name: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(jobs)
+}
+
+pub fn save_model_thumbnail(
+    connection: &mut Connection,
+    base_dir: &Path,
+    entry_id: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    Uuid::parse_str(entry_id).map_err(|_| "模型 ID 无效")?;
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+        return Err("模型缩略图大小无效".into());
+    }
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT kind FROM media_entries WHERE id=?1 AND deleted_at IS NULL",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if kind.as_deref() != Some("model") {
+        return Err("模型条目不存在".into());
+    }
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (width, height) = reader.into_dimensions().map_err(|_| "缩略图无法解析")?;
+    if width == 0
+        || height == 0
+        || width > 4096
+        || height > 4096
+        || u64::from(width) * u64::from(height) > 16_000_000
+    {
+        return Err("模型缩略图尺寸无效".into());
+    }
+    let picture = image::load_from_memory(bytes)
+        .map_err(|_| "缩略图无法解析")?
+        .resize(480, 480, image::imageops::FilterType::Lanczos3);
+    let file_id = Uuid::new_v4().to_string();
+    let rel_path = format!("media-library/model/{entry_id}/thumbnails/{file_id}.webp");
+    let final_path = media::safe_relative(base_dir, &rel_path)?;
+    let parent = final_path.parent().ok_or("缩略图路径无效")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temp_path = parent.join(format!("{file_id}.tmp"));
+    if let Err(error) = picture.save_with_format(&temp_path, image::ImageFormat::WebP) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("保存模型缩略图失败：{error}"));
+    }
+    if let Err(error) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("提交模型缩略图失败：{error}"));
+    }
+    let result = (|| -> Result<Vec<String>, String> {
+        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let previous = {
+            let mut stmt = tx
+                .prepare("SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'")
+                .map_err(|e| e.to_string())?;
+            let paths = stmt
+                .query_map([entry_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            paths
+        };
+        tx.execute(
+            "DELETE FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+            [entry_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,mime_type,file_size,checksum,width,height,sort_order,created_at) VALUES(?1,?2,'thumbnail','thumbnail.webp','thumbnail.webp',?3,'image/webp',?4,?5,?6,?7,100,?8)", params![file_id,entry_id,rel_path,fs::metadata(&final_path).map_err(|e|e.to_string())?.len() as i64,digest(&final_path)?,picture.width() as i64,picture.height() as i64,now()]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE media_entries SET processing_message='' WHERE id=?1",
+            [entry_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(previous)
+    })();
+    match result {
+        Ok(previous) => {
+            for old in previous {
+                if let Ok(path) = media::safe_relative(base_dir, &old) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+            Ok(file_id)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(final_path);
+            Err(error)
+        }
+    }
+}
+
+pub fn report_model_thumbnail_failure(
+    connection: &Connection,
+    entry_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    let detail = format!(
+        "缩略图生成失败：{}",
+        message.chars().take(250).collect::<String>()
+    );
+    let changed = connection.execute(
+        "UPDATE media_entries SET processing_message=?2 WHERE id=?1 AND kind='model' AND deleted_at IS NULL",
+        params![entry_id, detail],
+    ).map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("模型条目不存在".into());
+    }
+    Ok(())
+}
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"];
 
@@ -525,6 +670,24 @@ pub fn import(
     resource_dir: Option<&Path>,
     request: MediaImportRequest,
 ) -> Result<MediaImportReport, String> {
+    import_controlled(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        &|_, _, _, _| {},
+        &|| false,
+    )
+}
+
+pub fn import_controlled(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+) -> Result<MediaImportReport, String> {
     if request.paths.is_empty() {
         return Ok(MediaImportReport {
             imported: 0,
@@ -544,7 +707,21 @@ pub fn import(
         failed: 0,
         rows: vec![],
     };
-    for raw in request.paths.clone() {
+    let total = request.paths.len();
+    for (index, raw) in request.paths.clone().into_iter().enumerate() {
+        if stop() {
+            break;
+        }
+        progress(
+            index,
+            total,
+            Path::new(&raw)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            &report,
+        );
         let source = PathBuf::from(&raw);
         let mut staged_root: Option<PathBuf> = None;
         let result = (|| -> Result<(String, Option<String>), String> {
@@ -761,6 +938,7 @@ pub fn import(
             }
         }
     }
+    progress(report.rows.len(), total, String::new(), &report);
     Ok(report)
 }
 
@@ -1218,6 +1396,56 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn stores_and_replaces_a_model_cover_without_touching_its_original() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let source = dir.path().join("mesh.obj");
+        fs::write(&source, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let report = import(
+            &mut db,
+            dir.path(),
+            None,
+            MediaImportRequest {
+                kind: MediaKind::Model,
+                paths: vec![source.to_string_lossy().into_owned()],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+        )
+        .unwrap();
+        let id = report.rows[0].entry_id.as_ref().unwrap();
+        assert_eq!(pending_model_thumbnails(&db).unwrap().len(), 1);
+        let picture = dir.path().join("cover.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([20, 70, 120, 255]))
+            .save(&picture)
+            .unwrap();
+        let bytes = fs::read(picture).unwrap();
+        let first = save_model_thumbnail(&mut db, dir.path(), id, &bytes).unwrap();
+        assert_eq!(
+            get(&db, id).unwrap().entry.thumbnail_file_id.as_deref(),
+            Some(first.as_str())
+        );
+        assert!(pending_model_thumbnails(&db).unwrap().is_empty());
+        let second = save_model_thumbnail(&mut db, dir.path(), id, &bytes).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            get(&db, id).unwrap().entry.thumbnail_file_id.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(
+            get(&db, id)
+                .unwrap()
+                .files
+                .iter()
+                .filter(|file| file.role == "thumbnail")
+                .count(),
+            1
+        );
+        assert!(save_model_thumbnail(&mut db, dir.path(), id, b"not an image").is_err());
     }
 
     #[test]

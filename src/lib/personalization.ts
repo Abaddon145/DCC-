@@ -42,7 +42,7 @@ export const defaultLibraryPreferences: LibraryPreferences = {
   moduleOrder: moduleRegistry.map(module => module.id), disabledModules: [], startupModule: "library", rememberLastContext: false,
   assetView: "grid", cardSize: "medium", coverFit: "cover", coverAspectRatio: "standard",
   cardFields: { category: true, tags: true, software: true, version: true, format: true, linkStatus: true },
-  defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null,
+  defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null, workspaceContexts: {}, rememberWorkspace: true,
   contextPaneWidths: { library: 248, imageLibrary: 220, modelLibrary: 260, audioLibrary: 220, videoLibrary: 220 },
   collapsedContextPanes: [], collapsedModuleGroups: ["manage"],
 };

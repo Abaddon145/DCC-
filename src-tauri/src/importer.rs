@@ -1,4 +1,4 @@
-use crate::{db, fab, models::*};
+use crate::{bilingual, db, fab, models::*};
 use calamine::{open_workbook_auto, Reader};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
@@ -207,16 +207,13 @@ pub fn commit(
         {
             localizations.insert("en".into(), en);
         }
-        if localizations.is_empty() {
-            localizations.insert(
-                primary_locale.into(),
-                LocalizedAssetText {
-                    name: legacy_name.into(),
-                    description: value(&row, "description").into(),
-                    tags: split(value(&row, "tags")),
-                    license: value(&row, "license").into(),
-                },
-            );
+        for (locale, fields) in bilingual::fab_localizations(LocalizedAssetText {
+            name: legacy_name.into(),
+            description: value(&row, "description").into(),
+            tags: split(value(&row, "tags")),
+            license: value(&row, "license").into(),
+        }) {
+            bilingual::fill_empty(localizations.entry(locale).or_default(), fields);
         }
         let input = AssetInput {
             id: None,
@@ -241,8 +238,9 @@ pub fn commit(
             content_language: primary_locale.into(),
         };
         match db::upsert_asset(connection, base_dir, input) {
-            Ok(_) => {
+            Ok(asset) => {
                 validation.status = "imported".into();
+                validation.asset_id = Some(asset.card.id);
                 imported += 1;
             }
             Err(error) => {
@@ -633,6 +631,7 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
             actual_category_path: None,
             duplicate_asset_id: None,
             duplicate_source: None,
+            asset_id: None,
         });
     }
     let name = [
@@ -696,6 +695,7 @@ fn validate_row(connection: &Connection, row: &ParsedImportRow) -> Result<Import
         actual_category_path: None,
         duplicate_asset_id: None,
         duplicate_source: None,
+        asset_id: None,
     })
 }
 
@@ -811,6 +811,28 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ue_versions, vec!["5.4", "5.5"]);
         assert!(rows[0].baidu_text.contains("pwd=a1b2"));
+    }
+
+    #[test]
+    fn legacy_import_reports_saved_asset_id_for_bilingual_completion() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.csv");
+        std::fs::write(
+            &path,
+            "name_en,description_en,share_url\nDesert Dune,An environment,\n",
+        )
+        .unwrap();
+        let mut connection = db::open_database(&directory.path().join("library.db")).unwrap();
+        let report = commit(&mut connection, directory.path(), &path, HashMap::new()).unwrap();
+        assert_eq!(report.imported, 1);
+        let id = report.rows[0]
+            .asset_id
+            .as_ref()
+            .expect("the saved row must identify its asset");
+        let asset = db::get_asset(&connection, id, false, "en").unwrap();
+        assert_eq!(asset.localizations["en"].name, "Desert Dune");
+        assert!(crate::bilingual::pending_fields(&asset.localizations)
+            .contains(&"中文名称".to_string()));
     }
 
     #[test]
