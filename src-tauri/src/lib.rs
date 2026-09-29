@@ -9,6 +9,10 @@ mod file_digest;
 mod glossary;
 mod images;
 mod importer;
+mod knowledge;
+mod knowledge_ai;
+mod knowledge_commands;
+mod knowledge_files;
 mod link_checker;
 mod media;
 mod media_library;
@@ -43,6 +47,8 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "exit_when_tasks_idle"
             | "attach_reference_window"
             | "open_external_url"
+            | "set_knowledge_editing"
+            | "finish_knowledge_close"
     ) || (backup
         && (command.starts_with("get_")
             || command.starts_with("list_")
@@ -84,7 +90,9 @@ pub fn run() {
                     .unwrap();
             }
             match state.with_library(|connection, base_dir| {
-                if id == "library" && variant == "file" {
+                if id == "note" {
+                    knowledge_files::response(connection, base_dir, variant)
+                } else if id == "library" && variant == "file" {
                     media_library::protocol_response(
                         connection,
                         base_dir,
@@ -118,6 +126,18 @@ pub fn run() {
                 matches!(event, tauri::WindowEvent::CloseRequested { .. }),
             ) == MainWindowAction::ExitApplication
             {
+                if window
+                    .state::<AppState>()
+                    .knowledge_editing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                    }
+                    let _ =
+                        tauri::Emitter::emit(window.app_handle(), "knowledge-close-requested", ());
+                    return;
+                }
                 if window.state::<AppState>().tasks.busy() {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
@@ -144,6 +164,26 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    knowledge_ai::generate_note_ai,
+                    knowledge_commands::set_knowledge_editing,
+                    knowledge_commands::finish_knowledge_close,
+                    knowledge_commands::search_notes,
+                    knowledge_commands::search_note_reference_targets,
+                    knowledge_commands::get_journal_note,
+                    knowledge_commands::purge_note,
+                    knowledge_commands::get_note_references,
+                    knowledge_commands::get_note_backlinks,
+                    knowledge_commands::delete_empty_notebook,
+                    knowledge_commands::import_note_attachment,
+                    knowledge_commands::open_note_attachment,
+                    knowledge_commands::get_note,
+                    knowledge_commands::save_note,
+                    knowledge_commands::set_note_deleted,
+                    knowledge_commands::list_note_revisions,
+                    knowledge_commands::pin_note_revision,
+                    knowledge_commands::restore_note_revision,
+                    knowledge_commands::upsert_notebook,
+                    knowledge_commands::list_notebooks,
                     ai::prepare_ai_request,
                     ai::get_ai_session,
                     ai::list_ai_sessions,

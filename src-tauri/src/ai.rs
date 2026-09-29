@@ -33,7 +33,16 @@ static RUNNING: OnceLock<Mutex<Running>> = OnceLock::new();
 fn lane() -> &'static Mutex<Running> {
     RUNNING.get_or_init(|| Mutex::new(None))
 }
-struct Lease;
+pub(crate) struct Lease;
+pub(crate) fn acquire_request(id: &str) -> Result<(Lease, Arc<AtomicBool>), String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut slot = lane().lock().map_err(|_| "AI 状态锁失败")?;
+    if slot.is_some() {
+        return Err("已有 AI 请求运行中，请等待或取消".into());
+    }
+    *slot = Some((id.into(), cancel.clone()));
+    Ok((Lease, cancel))
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut r) = lane().lock() {

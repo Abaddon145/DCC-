@@ -78,6 +78,7 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub knowledge_editing: AtomicBool,
     pub tasks: crate::tasks::TaskRegistry,
     pub translation_service: crate::translation_service::TranslationService,
     settings_path: PathBuf,
@@ -136,6 +137,7 @@ impl AppState {
         write_settings(&settings_path, &settings)?;
         Ok(Self {
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
+            knowledge_editing: AtomicBool::new(false),
             translation_service: crate::translation_service::TranslationService::open(
                 &config_dir.join("translation-cache.sqlite"),
             )?,
@@ -802,6 +804,10 @@ fn migrate_library(
             &stage.join("media-library"),
         )?;
         copy_tree_verified(&active.base_dir.join("media"), &stage.join("media"))?;
+        copy_tree_verified(
+            &active.base_dir.join("note-attachments"),
+            &stage.join("note-attachments"),
+        )?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {
             format_version: 1,
@@ -980,6 +986,7 @@ mod tests {
     fn test_state(path: &Path) -> AppState {
         ensure_library(path, "测试库", false).unwrap();
         AppState {
+            knowledge_editing: AtomicBool::new(false),
             tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
             translation_service: crate::translation_service::TranslationService::open(
                 &path.join("translation-cache.sqlite"),

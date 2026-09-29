@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { withKnowledgeBarrier } from "./noteSaveGuard";
 import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, BatchTranslationReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate, ModelThumbnailJob } from "../types";
 import type { ProjectUnit } from "../types";
 import type { LibraryTask, LibraryTaskRequest } from "../types";
@@ -83,10 +84,10 @@ export const api = {
   commitImport: (path: string, mapping: ImportMapping, autoTranslate: boolean) => runLibraryTask<ImportReport>({kind:"fabImport",request:{path,mapping,autoTranslate}}),
   batchTranslateMissingAssets: (ids: string[]) => runLibraryTask<BatchTranslationReport>({kind:"translation",request:{ids}}),
   exportTemplate: (path: string) => invoke<void>("export_import_template", { path }),
-  exportBackup: (path: string) => runLibraryTask<void>({kind:"backup",request:{path}}),
-  restoreBackup: (path: string) => runLibraryTask<void>({kind:"restore",request:{path}}),
+  exportBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"backup",request:{path}})),
+  restoreBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"restore",request:{path}})),
   getLibraryLocations: () => invoke<LibraryLocationState>("get_library_locations"),
-  changeLibrary: (request: StorageChangeRequest) => request.mode === "migrate" ? runLibraryTask<LibraryLocationState>({kind:"migration",request}) : invoke<LibraryLocationState>("change_library", { request }),
+  changeLibrary: (request: StorageChangeRequest) => withKnowledgeBarrier(() => request.mode === "migrate" ? runLibraryTask<LibraryLocationState>({kind:"migration",request}) : invoke<LibraryLocationState>("change_library", { request })),
   forgetRecentLibrary: (path: string) => invoke<void>("forget_recent_library", { path }),
   readClipboard: () => invoke<string>("read_clipboard_text"),
   parseShareText: (text: string) => invoke<ParsedShareText>("parse_share_text", { text }),

@@ -46,7 +46,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
             "audioLibrary",
             "videoLibrary",
         ],
-        &["projects", "aiAssistant", "reference"],
+        &["projects", "knowledge", "aiAssistant", "reference"],
         &["smartCollections", "favorites", "recent"],
         &["tagManager", "health", "trash"],
     ];

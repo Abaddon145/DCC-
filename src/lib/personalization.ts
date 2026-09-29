@@ -7,6 +7,7 @@ export const moduleRegistry: Array<{ id: ModuleId; group: ModuleGroupId; label: 
   { id: "audioLibrary", group: "content", label: "音频库", description: "管理音效、音乐与波形预览" },
   { id: "videoLibrary", group: "content", label: "视频库", description: "管理视频参考与代理预览" },
   { id: "projects", group: "creation", label: "创作项目", description: "项目素材、镜头任务、参考板与工程入口" },
+  { id: "knowledge", group: "creation", label: "知识库", description: "学习笔记、知识沉淀与创作资料" },
   { id: "aiAssistant", group: "creation", label: "AI 创作助手", description: "创作方案、整理建议、自然语言检索与项目选材" },
   { id: "reference", group: "creation", label: "参考板", description: "PureRef 风格无限画布" },
   { id: "smartCollections", group: "libraryContext", label: "智能集合", description: "保存可动态更新的搜索条件" },
