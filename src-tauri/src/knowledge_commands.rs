@@ -5,6 +5,36 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub async fn duplicate_note(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    expected_revision: i64,
+) -> Result<Note, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_mut_if_id(&library_id, |db, base| {
+                    crate::note_package::duplicate(db, base, &id, expected_revision)
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn write_note_clipboard_text(text: String) -> Result<(), String> {
+    if text.len() > 4 * 1024 * 1024 {
+        return Err("剪贴板内容过大".into());
+    }
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|_| "无法写入剪贴板，请使用 Ctrl+C".into())
+}
+
+#[tauri::command]
 pub fn read_note_markdown(path: String) -> Result<crate::note_markdown::MarkdownSource, String> {
     crate::note_markdown::read(std::path::Path::new(&path))
 }

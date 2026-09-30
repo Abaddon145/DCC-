@@ -25,6 +25,8 @@ export function knowledgeApi(libraryId: string) {
   return {
     search: (request: NoteSearch) => invoke<{ items: NoteSummary[]; total: number }>("search_notes", { libraryId, ...request }),
     get: (id: string) => invoke<KnowledgeNote>("get_note", { libraryId, id }),
+    duplicate: (note: KnowledgeNote) => invoke<KnowledgeNote>("duplicate_note",{libraryId,id:note.id,expectedRevision:note.revision}),
+    writeClipboard: (text:string) => invoke<void>("write_note_clipboard_text",{text}),
     journal: (date: string) => invoke<KnowledgeNote | null>("get_journal_note", {libraryId,date}),
     purge: (note: KnowledgeNote) => invoke<void>("purge_note", {libraryId,id:note.id,expectedRevision:note.revision}),
     save: (input: NoteInput) => invoke<KnowledgeNote>("save_note", { libraryId, input: writableNoteInput(input) }),

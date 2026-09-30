@@ -220,6 +220,14 @@ fn export_snapshot(
     Ok(())
 }
 pub fn import(db: &mut Connection, base: &Path, source: &Path) -> Result<ImportResult, String> {
+    import_with_notebook(db, base, source, None)
+}
+fn import_with_notebook(
+    db: &mut Connection,
+    base: &Path,
+    source: &Path,
+    notebook: Option<Option<String>>,
+) -> Result<ImportResult, String> {
     let mut archive =
         ZipArchive::new(fs::File::open(source).map_err(err)?).map_err(|_| "不是有效的笔记包")?;
     if archive.len() > 1001 {
@@ -302,11 +310,14 @@ pub fn import(db: &mut Connection, base: &Path, source: &Path) -> Result<ImportR
     let tx = db.transaction().map_err(err)?;
     let mut parent: Option<String> = None;
     let mut warnings = vec![];
-    for name in &package.notebook_path {
+    for name in package.notebook_path.iter().filter(|_| notebook.is_none()) {
         let existing:Option<String>=tx.query_row("SELECT id FROM knowledge_notebooks WHERE parent_id IS ?1 AND lower(name)=lower(?2) ORDER BY sort_order,id LIMIT 1",params![parent,name],|r|r.get(0)).optional().map_err(err)?;
         let id = existing.unwrap_or_else(uuid);
         tx.execute("INSERT OR IGNORE INTO knowledge_notebooks(id,parent_id,name,sort_order) VALUES(?1,?2,?3,0)",params![id,parent,name]).map_err(err)?;
         parent = Some(id);
+    }
+    if let Some(notebook) = notebook {
+        parent = notebook;
     }
     let mut journal = package.note.journal_date.clone();
     if let Some(date) = &journal {
@@ -381,6 +392,27 @@ pub fn import(db: &mut Connection, base: &Path, source: &Path) -> Result<ImportR
         }
     }
     result
+}
+
+/// Reuse the validated package pipeline: attachments and self-references get new IDs.
+pub fn duplicate(
+    db: &mut Connection,
+    base: &Path,
+    id: &str,
+    revision: i64,
+) -> Result<Note, String> {
+    let mut note = knowledge::get(db, id)?;
+    if note.deleted_at.is_some() || note.revision != revision {
+        return Err("笔记已删除或版本已变化，请重新读取".into());
+    }
+    note.title = format!("{}（副本）", note.title);
+    note.favorite = false;
+    note.journal_date = None;
+    let notebook = note.notebook_id.clone();
+    let temporary = tempfile::tempdir().map_err(err)?;
+    let path = temporary.path().join("duplicate.dccnotes");
+    export_snapshot(db, base, note, &path)?;
+    Ok(import_with_notebook(db, base, &path, Some(notebook))?.note)
 }
 
 #[cfg(test)]
@@ -469,6 +501,23 @@ mod tests {
                 .unwrap()
                 .total,
             2
+        );
+        assert!(duplicate(&mut db, &base, &note.id, note.revision - 1).is_err());
+        let copy = duplicate(&mut db, &base, &note.id, note.revision).unwrap();
+        assert_eq!(copy.title, "技术学习（副本）");
+        assert!(!copy.favorite);
+        assert!(copy.journal_date.is_none());
+        assert!(knowledge::revisions(&db, &copy.id).unwrap().is_empty());
+        assert_eq!(copy.document["content"][1]["attrs"]["targetId"], copy.id);
+        let copied_file = copy.document["content"][0]["attrs"]["attachmentId"]
+            .as_str()
+            .unwrap();
+        assert_ne!(copied_file, attachment.id);
+        let deleted = knowledge::set_deleted(&mut db, &note.id, note.revision, true).unwrap();
+        knowledge_files::purge(&mut db, &base, &note.id, deleted.revision).unwrap();
+        assert_eq!(
+            fs::read(knowledge_files::path(&db, &base, copied_file).unwrap().0).unwrap(),
+            b"learning"
         );
     }
     #[test]
