@@ -275,6 +275,7 @@ pub(crate) fn inspect_document(
             "remoteImage",
             "reference",
             "attachment",
+            "mindMap",
         ]
         .contains(&kind)
         {
@@ -301,6 +302,52 @@ pub(crate) fn inspect_document(
                 .strip_prefix("http://dcc-media.localhost/note/")
                 .ok_or("图片必须先复制为笔记附件")?;
             Uuid::parse_str(attachment).map_err(|_| "笔记图片 ID 无效")?;
+        }
+        if kind == "mindMap" {
+            Uuid::parse_str(node["attrs"]["id"].as_str().unwrap_or(""))
+                .map_err(|_| "思维导图 ID 无效")?;
+            let data = &node["attrs"]["data"];
+            let object = data.as_object().ok_or("思维导图内容无效")?;
+            if object
+                .keys()
+                .any(|key| !["nodeData", "direction"].contains(&key.as_str()))
+            {
+                return Err("思维导图含不支持的内容".into());
+            }
+            let mut maps = vec![(&data["nodeData"], 0usize)];
+            let mut ids = std::collections::HashSet::new();
+            while let Some((entry, level)) = maps.pop() {
+                let object = entry.as_object().ok_or("思维导图节点无效")?;
+                if level > 32
+                    || ids.len() >= 1000
+                    || object.keys().any(|key| {
+                        !["id", "topic", "children", "root", "expanded", "direction"]
+                            .contains(&key.as_str())
+                    })
+                {
+                    return Err("思维导图过大或含不支持的节点属性".into());
+                }
+                let id = entry["id"].as_str().ok_or("思维导图节点缺少 ID")?;
+                if id.is_empty()
+                    || id.len() > 80
+                    || !id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                    || !ids.insert(id)
+                {
+                    return Err("思维导图节点 ID 无效或重复".into());
+                }
+                let topic = entry["topic"].as_str().ok_or("思维导图缺少文字")?;
+                if topic.chars().count() > 1000 {
+                    return Err("思维导图文字过长".into());
+                }
+                text.push_str(topic);
+                text.push('\n');
+                if let Some(children) = entry.get("children") {
+                    let children = children.as_array().ok_or("思维导图子节点无效")?;
+                    maps.extend(children.iter().rev().map(|child| (child, level + 1)));
+                }
+            }
         }
         if kind == "remoteImage" {
             let source = node["attrs"]["src"]
