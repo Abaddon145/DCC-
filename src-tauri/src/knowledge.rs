@@ -272,6 +272,7 @@ pub(crate) fn inspect_document(
             "tableCell",
             "tableHeader",
             "image",
+            "remoteImage",
             "reference",
             "attachment",
         ]
@@ -300,6 +301,20 @@ pub(crate) fn inspect_document(
                 .strip_prefix("http://dcc-media.localhost/note/")
                 .ok_or("图片必须先复制为笔记附件")?;
             Uuid::parse_str(attachment).map_err(|_| "笔记图片 ID 无效")?;
+        }
+        if kind == "remoteImage" {
+            let source = node["attrs"]["src"]
+                .as_str()
+                .ok_or("网络图片占位缺少地址")?;
+            let url = url::Url::parse(source).map_err(|_| "网络图片地址无效")?;
+            if !["http", "https"].contains(&url.scheme())
+                || source.len() > 8192
+                || node["attrs"]["alt"].as_str().unwrap_or("").len() > 4000
+                || node["attrs"]["error"].as_str().unwrap_or("").len() > 2000
+            {
+                return Err("网络图片占位内容无效".into());
+            }
+            text.push_str(node["attrs"]["alt"].as_str().unwrap_or("网络图片"));
         }
         if let Some(value) = node.get("text").and_then(Value::as_str) {
             text.push_str(value);

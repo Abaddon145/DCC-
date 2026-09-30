@@ -1,4 +1,4 @@
-//! Markdown portability: local dependencies are copied, never fetched from the network.
+//! Markdown portability: downloads are staged outside the database lock, then copied atomically.
 use crate::{
     file_digest,
     knowledge::{self, NoteInput},
@@ -87,6 +87,9 @@ fn collect(
     parent: &Path,
     dependencies: &mut HashMap<String, PathBuf>,
     extra: &mut Vec<Value>,
+    remote: &HashMap<String, PathBuf>,
+    failures: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
     depth: u32,
 ) -> Result<(), String> {
     if depth > 64 {
@@ -97,7 +100,30 @@ fn collect(
             .as_str()
             .ok_or("图片缺少路径")?
             .to_owned();
-        dependencies.insert(source.clone(), local_dependency(parent, &source)?);
+        if source.starts_with("http://") || source.starts_with("https://") {
+            if let Some(file) = remote.get(&source) {
+                dependencies.insert(source.clone(), file.clone());
+            } else {
+                let reason = failures
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or_else(|| "网络图片未下载，请点击重试".into());
+                let alt = document["attrs"]["alt"]
+                    .as_str()
+                    .unwrap_or("网络图片")
+                    .chars()
+                    .take(1000)
+                    .collect::<String>();
+                if url::Url::parse(&source).is_ok() && source.len() <= 8192 {
+                    *document = json!({"type":"remoteImage","attrs":{"src":source,"alt":alt,"error":reason}});
+                } else {
+                    *document = json!({"type":"paragraph","content":[{"type":"text","text":"图片地址无效，未下载"}]});
+                }
+                warnings.push(reason);
+            }
+        } else {
+            dependencies.insert(source.clone(), local_dependency(parent, &source)?);
+        }
     }
     let label = document["text"].as_str().unwrap_or("关联资料").to_owned();
     if let Some(marks) = document.get_mut("marks").and_then(Value::as_array_mut) {
@@ -136,7 +162,16 @@ fn collect(
     }
     if let Some(children) = document.get_mut("content").and_then(Value::as_array_mut) {
         for node in children {
-            collect(node, parent, dependencies, extra, depth + 1)?;
+            collect(
+                node,
+                parent,
+                dependencies,
+                extra,
+                remote,
+                failures,
+                warnings,
+                depth + 1,
+            )?;
         }
     }
     Ok(())
@@ -161,13 +196,35 @@ fn remap(document: &mut Value, map: &HashMap<String, String>) {
         }
     }
 }
+#[cfg(test)]
 pub fn import(
+    db: &mut Connection,
+    base: &Path,
+    source: &Path,
+    sha256: &str,
+    document: Value,
+    notebook_id: Option<String>,
+) -> Result<ImportResult, String> {
+    import_staged(
+        db,
+        base,
+        source,
+        sha256,
+        document,
+        notebook_id,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+pub fn import_staged(
     db: &mut Connection,
     base: &Path,
     source: &Path,
     sha256: &str,
     mut document: Value,
     notebook_id: Option<String>,
+    remote: &HashMap<String, PathBuf>,
+    failures: &HashMap<String, String>,
 ) -> Result<ImportResult, String> {
     let original = read(source)?;
     if original.sha256 != sha256 {
@@ -184,7 +241,17 @@ pub fn import(
         .to_path_buf();
     let mut dependencies = HashMap::new();
     let mut extra = vec![];
-    collect(&mut document, &parent, &mut dependencies, &mut extra, 0)?;
+    let mut warnings = vec![];
+    collect(
+        &mut document,
+        &parent,
+        &mut dependencies,
+        &mut extra,
+        remote,
+        failures,
+        &mut warnings,
+        0,
+    )?;
     if dependencies.len() > 1000 {
         return Err("附件过多".into());
     }
@@ -252,14 +319,20 @@ pub fn import(
         )
         .map_err(err)?;
         tx.commit().map_err(err)?;
-        Ok(ImportResult {
-            note,
-            warnings: if moved_links {
-                vec!["本地文件链接和应用引用已转换为正文末尾的附件/引用卡片".into()]
-            } else {
-                vec![]
-            },
-        })
+        if moved_links {
+            warnings.push("本地文件链接和应用引用已转换为正文末尾的附件/引用卡片".into());
+        }
+        if !failures.is_empty() {
+            warnings.insert(
+                0,
+                format!(
+                    "{} 张网络图片未下载，正文已保留；可在图片占位处重试",
+                    failures.len()
+                ),
+            );
+        }
+        warnings.dedup();
+        Ok(ImportResult { note, warnings })
     })();
     if result.is_err() && directory.exists() {
         let root = base.join("note-attachments").canonicalize().map_err(err)?;
@@ -348,6 +421,44 @@ pub fn export(
 mod tests {
     use super::*;
     #[test]
+    fn staged_remote_image_is_copied_and_survives_download_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("library");
+        fs::create_dir(&base).unwrap();
+        let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+        let source = temp.path().join("learn.md");
+        fs::write(&source, "![image](https://example.com/image.png)").unwrap();
+        let info = read(&source).unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let image = downloads.path().join("image.png");
+        image::RgbaImage::new(2, 2).save(&image).unwrap();
+        let remote = HashMap::from([("https://example.com/image.png".to_string(), image)]);
+        let result = import_staged(&mut db,&base,&source,&info.sha256,json!({"type":"doc","content":[{"type":"image","attrs":{"src":"https://example.com/image.png"}}]}),None,&remote,&HashMap::new()).unwrap();
+        drop(downloads);
+        let id = result.note.document["content"][0]["attrs"]["src"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("http://dcc-media.localhost/note/")
+            .unwrap();
+        let (path, _) = knowledge_files::path(&db, &base, id).unwrap();
+        assert!(image::open(path).is_ok());
+        assert!(result.warnings.is_empty());
+    }
+    #[test]
+    fn remote_failure_preserves_body_and_a_retryable_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("library");
+        fs::create_dir(&base).unwrap();
+        let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+        let source = temp.path().join("learn.md");
+        fs::write(&source, "body ![image](https://api2.mubu.com/image.png)").unwrap();
+        let info = read(&source).unwrap();
+        let result=import(&mut db,&base,&source,&info.sha256,json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"body"}]},{"type":"image","attrs":{"src":"https://api2.mubu.com/image.png","alt":"image"}}]}),None).unwrap();
+        assert_eq!(result.note.document["content"][1]["type"], "remoteImage");
+        assert!(result.note.plain_text.contains("body"));
+        assert!(!result.warnings.is_empty());
+    }
+    #[test]
     fn import_rejects_missing_and_traversing_dependencies_without_records() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().join("library");
@@ -356,12 +467,7 @@ mod tests {
         let source = temp.path().join("learn.md");
         fs::write(&source, "![test](missing.png)").unwrap();
         let info = read(&source).unwrap();
-        for path in [
-            "../secret.png",
-            "missing.png",
-            "https://example.com/a.png",
-            "%2e%2e/secret.png",
-        ] {
+        for path in ["../secret.png", "missing.png", "%2e%2e/secret.png"] {
             let doc = json!({"type":"doc","content":[{"type":"image","attrs":{"src":path}}]});
             assert!(import(&mut db, &base, &source, &info.sha256, doc, None).is_err());
         }

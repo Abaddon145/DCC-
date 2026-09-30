@@ -40,6 +40,7 @@ export function knowledgeApi(libraryId: string) {
     restore: (note: KnowledgeNote, revisionId: string) => invoke<KnowledgeNote>("restore_note_revision", { libraryId, id: note.id, expectedRevision: note.revision, revisionId }),
     importAttachment: (id: string, path: string) => invoke<{id:string;filename:string;mime:string}>("import_note_attachment", {libraryId,id,path}),
     pasteImage: (id: string) => invoke<{id:string;filename:string;mime:string}>("paste_note_clipboard_image", {libraryId,id}),
+    retryImage: (note:KnowledgeNote,url:string) => invoke<{id:string;filename:string;mime:string}>("retry_note_remote_image",{libraryId,id:note.id,expectedRevision:note.revision,url}),
     exportPackage: (id: string, path: string) => invoke<void>("export_note_package", {libraryId,id,path}),
     exportDraft: (input:NoteInput,path:string)=>invoke<void>("export_note_draft",{libraryId,input: writableNoteInput(input),path}),
     importPackage: (path: string) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_package", {libraryId,path}),

@@ -2,6 +2,12 @@ import {describe,expect,it} from "vitest";
 import {parseNoteMarkdown,serializeNoteMarkdown} from "./noteMarkdown";
 
 describe("portable note Markdown",()=>{
+  it("retains retryable remote images in Markdown without embedding HTML",()=>{
+    const document={type:"doc",content:[{type:"remoteImage",attrs:{src:"https://example.com/image.png",alt:"模型示例",error:"下载失败"}}]};
+    expect(serializeNoteMarkdown(document)).toContain("![模型示例](https://example.com/image.png)");
+    const nested=parseNoteMarkdown("# 教程\n\n- 步骤\n  - 操作\n\n    ![示例](https://example.com/image.png)");
+    expect(JSON.stringify(nested)).toContain("https://example.com/image.png");
+  });
   it("parses headings, tasks, code and relative images without resolving files",()=>{
     const document=parseNoteMarkdown("## 材质学习\n\n- [ ] 练习\n\n```hlsl\nfloat x = 1;\n```\n\n![预览](assets/preview.png)");
     const json=JSON.stringify(document);expect(json).toContain('"heading"');expect(json).toContain('"taskList"');expect(json).toContain('"codeBlock"');expect(json).toContain("assets/preview.png");
