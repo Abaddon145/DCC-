@@ -322,6 +322,147 @@ pub fn get_project(
     })
 }
 
+pub fn get_project_workspace(
+    connection: &Connection,
+    id: &str,
+    mark_opened: bool,
+) -> Result<CreativeProject, String> {
+    if mark_opened {
+        connection
+            .execute(
+                "UPDATE projects SET last_opened_at=?1 WHERE id=?2",
+                params![now(), id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(CreativeProject {
+        summary: get_summary(connection, id)?,
+        units: list_units(connection, id)?,
+        tasks: task_page(connection, id, None, 0, 5)?.items,
+        assets: vec![],
+        media: list_project_media(connection, id)?,
+        boards: list_boards(connection, id)?,
+        paths: list_paths(connection, id)?,
+    })
+}
+pub fn task_page(
+    connection: &Connection,
+    id: &str,
+    status: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectTask>, String> {
+    get_summary(connection, id)?;
+    if status.is_some_and(|v| !["todo", "in_progress", "review", "done"].contains(&v)) {
+        return Err("任务状态无效".into());
+    }
+    let offset = offset.max(0);
+    let limit = limit.clamp(1, 100);
+    let total = connection
+        .query_row(
+            "SELECT count(*) FROM project_tasks WHERE project_id=?1 AND (?2 IS NULL OR status=?2)",
+            params![id, status],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut statement=connection.prepare("SELECT id,project_id,unit_id,title,description,status,priority,due_date,sort_order,created_at,updated_at FROM project_tasks WHERE project_id=?1 AND (?2 IS NULL OR status=?2) ORDER BY CASE WHEN status='done' THEN 1 ELSE 0 END,sort_order,created_at,id LIMIT ?3 OFFSET ?4").map_err(|e|e.to_string())?;
+    let items = statement
+        .query_map(params![id, status, limit, offset], |row| {
+            task_from_row(connection, row)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
+pub fn asset_page(
+    connection: &Connection,
+    id: &str,
+    language: &str,
+    query: &str,
+    status: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectAssetLink>, String> {
+    get_summary(connection, id)?;
+    if query.len() > 2000
+        || status.is_some_and(|v| !["candidate", "selected", "used", "rejected"].contains(&v))
+    {
+        return Err("素材筛选条件无效".into());
+    }
+    let locale = if language == "en" { "en" } else { "zh-CN" };
+    let fallback = if locale == "en" { "zh-CN" } else { "en" };
+    let filter = format!(
+        "%{}%",
+        query
+            .trim()
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_")
+    );
+    let from="FROM project_assets pa JOIN assets a ON a.id=pa.asset_id LEFT JOIN categories c ON c.id=a.category_id LEFT JOIN asset_localizations lr ON lr.asset_id=a.id AND lr.locale=?2 LEFT JOIN asset_localizations lf ON lf.asset_id=a.id AND lf.locale=?3 WHERE pa.project_id=?1 AND (?4 IS NULL OR pa.status=?4) AND (COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name) LIKE ?5 ESCAPE '!' OR c.name LIKE ?5 ESCAPE '!' OR pa.purpose LIKE ?5 ESCAPE '!' OR pa.note LIKE ?5 ESCAPE '!')";
+    let total = connection
+        .query_row(
+            &format!("SELECT count(*) {from}"),
+            params![id, locale, fallback, status, filter],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+    let mut statement=connection.prepare(&format!("SELECT pa.asset_id,COALESCE(NULLIF(lr.name,''),NULLIF(lf.name,''),a.name),(SELECT i.id FROM images i WHERE i.asset_id=a.id ORDER BY i.is_cover DESC,i.sort_order LIMIT 1),c.name,pa.status,pa.purpose,pa.note,COALESCE((SELECT json_group_array(unit_id) FROM project_asset_units pau WHERE pau.project_id=pa.project_id AND pau.asset_id=pa.asset_id),'[]'),a.deleted_at IS NOT NULL,pa.updated_at {from} ORDER BY pa.updated_at DESC,pa.asset_id LIMIT ?6 OFFSET ?7")).map_err(|e|e.to_string())?;
+    let items = statement
+        .query_map(
+            params![id, locale, fallback, status, filter, limit, offset],
+            |row| {
+                Ok(ProjectAssetLink {
+                    asset_id: row.get(0)?,
+                    name: row.get(1)?,
+                    cover_image_id: row.get(2)?,
+                    category_name: row.get(3)?,
+                    status: row.get(4)?,
+                    purpose: row.get(5)?,
+                    note: row.get(6)?,
+                    unit_ids: json_vec(row.get(7)?),
+                    unavailable: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
+pub fn unit_impact(connection: &Connection, id: &str) -> Result<serde_json::Value, String> {
+    let project: String = connection
+        .query_row(
+            "SELECT project_id FROM project_units WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "场景或镜头不存在")?;
+    let shots: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM project_units WHERE parent_id=?1 AND project_id=?2",
+            params![id, project],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let tasks:i64=connection.query_row("SELECT count(*) FROM project_tasks WHERE project_id=?2 AND (unit_id=?1 OR unit_id IN (SELECT id FROM project_units WHERE parent_id=?1 AND project_id=?2))",params![id,project],|r|r.get(0)).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"shots":shots,"tasks":tasks}))
+}
+
 pub fn upsert_project(
     connection: &mut Connection,
     input: ProjectInput,
@@ -1259,5 +1400,46 @@ mod tests {
             .unwrap()
             .assets
             .is_empty());
+    }
+
+    #[test]
+    fn workspace_pages_filter_without_loading_full_project() {
+        let dir = tempdir().unwrap();
+        let mut db = db::open_database(&dir.path().join("library.sqlite3")).unwrap();
+        let id = upsert_project(&mut db, project()).unwrap().summary.id;
+        for index in 0..125 {
+            let asset = format!("asset-{index:03}");
+            db.execute("INSERT INTO assets(id,name,share_url,created_at,updated_at) VALUES(?1,?2,'','now','now')", params![asset,format!("石头 {index}")]).unwrap();
+            db.execute("INSERT INTO project_assets(project_id,asset_id,status,purpose,note,created_at,updated_at) VALUES(?1,?2,?3,'布景','50%_完成','now','now')",params![id,asset,if index%2==0{"used"}else{"candidate"}]).unwrap();
+            db.execute("INSERT INTO project_tasks(id,project_id,title,status,priority,sort_order,created_at,updated_at) VALUES(?1,?2,?1,'todo','normal',?3,'now','now')",params![format!("task-{index:03}"),id,index]).unwrap();
+        }
+        let workspace = get_project_workspace(&db, &id, false).unwrap();
+        assert!(workspace.assets.is_empty());
+        assert_eq!(workspace.tasks.len(), 5);
+        assert_eq!(workspace.summary.asset_count, 125);
+        let first = asset_page(&db, &id, "zh-CN", "", None, 0, 60).unwrap();
+        let second = asset_page(&db, &id, "zh-CN", "", None, 60, 60).unwrap();
+        assert_eq!(first.total, 125);
+        assert_eq!(first.items.len(), 60);
+        assert_eq!(second.items.len(), 60);
+        assert_ne!(first.items[0].asset_id, second.items[0].asset_id);
+        assert_eq!(
+            asset_page(&db, &id, "en", "50%_", Some("used"), 0, 60)
+                .unwrap()
+                .total,
+            63
+        );
+        assert_eq!(
+            asset_page(&db, &id, "zh-CN", "50%X", None, 0, 60)
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(asset_page(&db, &id, "zh-CN", "", Some("invalid"), 0, 60).is_err());
+        let tasks = task_page(&db, &id, Some("todo"), 40, 40).unwrap();
+        assert_eq!(tasks.total, 125);
+        assert_eq!(tasks.items[0].sort_order, 40);
+        assert_eq!(tasks.items.len(), 40);
+        assert!(task_page(&db, &id, Some("invalid"), 0, 40).is_err());
     }
 }

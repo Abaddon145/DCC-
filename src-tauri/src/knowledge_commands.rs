@@ -5,6 +5,147 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub fn read_note_markdown(path: String) -> Result<crate::note_markdown::MarkdownSource, String> {
+    crate::note_markdown::read(std::path::Path::new(&path))
+}
+#[tauri::command]
+pub async fn import_note_markdown(
+    app: tauri::AppHandle,
+    library_id: String,
+    path: String,
+    sha256: String,
+    document: serde_json::Value,
+    notebook_id: Option<String>,
+) -> Result<crate::note_package::ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_mut_if_id(&library_id, |db, base| {
+                    crate::note_markdown::import(
+                        db,
+                        base,
+                        std::path::Path::new(&path),
+                        &sha256,
+                        document,
+                        notebook_id,
+                    )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn export_note_markdown(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    revision: i64,
+    markdown: String,
+    path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    crate::note_markdown::export(
+                        db,
+                        base,
+                        &id,
+                        revision,
+                        &markdown,
+                        std::path::Path::new(&path),
+                    )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn export_note_draft(
+    app: tauri::AppHandle,
+    library_id: String,
+    input: NoteInput,
+    path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    crate::note_package::export_draft(db, base, input, std::path::Path::new(&path))
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn export_note_package(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    crate::note_package::export(db, base, &id, std::path::Path::new(&path))
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn import_note_package(
+    app: tauri::AppHandle,
+    library_id: String,
+    path: String,
+) -> Result<crate::note_package::ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_mut_if_id(&library_id, |db, base| {
+                    crate::note_package::import(db, base, std::path::Path::new(&path))
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn paste_note_clipboard_image(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+) -> Result<crate::knowledge_files::Attachment, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let mut clipboard = arboard::Clipboard::new().map_err(|_| "无法打开剪贴板")?;
+        let image = clipboard
+            .get_image()
+            .map_err(|_| "剪贴板没有可用图片，请先复制截图")?;
+        let staging =
+            crate::knowledge_files::stage_clipboard_rgba(image.width, image.height, &image.bytes)?;
+        active(state.with_library_if_id(&library_id, |db, base| {
+            crate::knowledge_files::import(db, base, &id, &staging.path().join("剪贴板截图.png"))
+        })?)
+    })
+    .await
+    .map_err(|e| format!("截图导入任务失败：{e}"))?
+}
+
+#[tauri::command]
 pub fn search_note_reference_targets(
     state: State<AppState>,
     library_id: String,
@@ -88,7 +229,7 @@ pub fn get_note_backlinks(
     state: State<AppState>,
     library_id: String,
     id: String,
-) -> Result<Vec<Note>, String> {
+) -> Result<Vec<knowledge::NoteSummary>, String> {
     active(state.with_library_if_id(&library_id, |db, _| knowledge::backlinks(db, &id))?)
 }
 #[tauri::command]
@@ -200,8 +341,22 @@ pub fn list_note_revisions(
     state: State<AppState>,
     library_id: String,
     id: String,
-) -> Result<Vec<Revision>, String> {
-    active(state.with_library_if_id(&library_id, |db, _| knowledge::revisions(db, &id))?)
+    offset: Option<u32>,
+) -> Result<Vec<knowledge::RevisionSummary>, String> {
+    active(state.with_library_if_id(&library_id, |db, _| {
+        knowledge::revision_summaries(db, &id, offset.unwrap_or(0))
+    })?)
+}
+#[tauri::command]
+pub fn get_note_revision(
+    state: State<AppState>,
+    library_id: String,
+    id: String,
+    revision_id: String,
+) -> Result<Revision, String> {
+    active(state.with_library_if_id(&library_id, |db, _| {
+        knowledge::revision(db, &id, &revision_id)
+    })?)
 }
 #[tauri::command]
 pub fn pin_note_revision(

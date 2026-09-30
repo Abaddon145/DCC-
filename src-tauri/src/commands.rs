@@ -233,8 +233,12 @@ pub fn get_project(
     id: String,
     content_language: Option<String>,
     mark_opened: Option<bool>,
+    paged: Option<bool>,
 ) -> Result<CreativeProject, String> {
     state.with_library(|connection, _| {
+        if paged.unwrap_or(false) {
+            return projects::get_project_workspace(connection, &id, mark_opened.unwrap_or(true));
+        }
         projects::get_project(
             connection,
             &id,
@@ -242,6 +246,46 @@ pub fn get_project(
             mark_opened.unwrap_or(true),
         )
     })
+}
+
+#[tauri::command]
+pub fn list_project_assets(
+    state: State<AppState>,
+    id: String,
+    content_language: String,
+    query: String,
+    status: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectAssetLink>, String> {
+    state.with_library(|db, _| {
+        projects::asset_page(
+            db,
+            &id,
+            &content_language,
+            &query,
+            status.as_deref(),
+            offset,
+            limit,
+        )
+    })
+}
+#[tauri::command]
+pub fn list_project_tasks(
+    state: State<AppState>,
+    id: String,
+    status: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectTask>, String> {
+    state.with_library(|db, _| projects::task_page(db, &id, status.as_deref(), offset, limit))
+}
+#[tauri::command]
+pub fn get_project_unit_impact(
+    state: State<AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    state.with_library(|db, _| projects::unit_impact(db, &id))
 }
 
 #[tauri::command]

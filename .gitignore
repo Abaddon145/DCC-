@@ -8,6 +8,8 @@ src-tauri/target/
 .vscode/
 coverage/
 *.dccassetlib
+*.dccnotes
+note-attachments/
 *.tsbuildinfo
 .env
 .env.*

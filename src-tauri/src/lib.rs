@@ -18,6 +18,8 @@ mod media;
 mod media_library;
 mod model_access;
 mod models;
+mod note_markdown;
+mod note_package;
 mod organization;
 mod projects;
 mod reference_boards;
@@ -168,6 +170,12 @@ pub fn run() {
                     knowledge_commands::set_knowledge_editing,
                     knowledge_commands::finish_knowledge_close,
                     knowledge_commands::search_notes,
+                    knowledge_commands::export_note_package,
+                    knowledge_commands::export_note_draft,
+                    knowledge_commands::read_note_markdown,
+                    knowledge_commands::import_note_markdown,
+                    knowledge_commands::export_note_markdown,
+                    knowledge_commands::import_note_package,
                     knowledge_commands::search_note_reference_targets,
                     knowledge_commands::get_journal_note,
                     knowledge_commands::purge_note,
@@ -175,11 +183,13 @@ pub fn run() {
                     knowledge_commands::get_note_backlinks,
                     knowledge_commands::delete_empty_notebook,
                     knowledge_commands::import_note_attachment,
+                    knowledge_commands::paste_note_clipboard_image,
                     knowledge_commands::open_note_attachment,
                     knowledge_commands::get_note,
                     knowledge_commands::save_note,
                     knowledge_commands::set_note_deleted,
                     knowledge_commands::list_note_revisions,
+                    knowledge_commands::get_note_revision,
                     knowledge_commands::pin_note_revision,
                     knowledge_commands::restore_note_revision,
                     knowledge_commands::upsert_notebook,
@@ -333,6 +343,9 @@ pub fn run() {
                     delete_unused_tags,
                     list_projects,
                     get_project,
+                    list_project_assets,
+                    list_project_tasks,
+                    get_project_unit_impact,
                     upsert_project,
                     archive_project,
                     delete_project,

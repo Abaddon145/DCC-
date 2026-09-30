@@ -70,6 +70,40 @@ pub struct Revision {
     pub pinned: bool,
     pub created_at: String,
 }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionSummary {
+    pub id: String,
+    pub note_id: String,
+    pub title: String,
+    pub pinned: bool,
+    pub created_at: String,
+}
+pub fn revision_summaries(
+    db: &Connection,
+    note_id: &str,
+    offset: u32,
+) -> Result<Vec<RevisionSummary>> {
+    get(db, note_id)?;
+    let mut statement=db.prepare("SELECT id,note_id,json_extract(snapshot_json,'$.title'),pinned,created_at FROM knowledge_revisions WHERE note_id=?1 ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?2").map_err(error)?;
+    let rows = statement
+        .query_map(params![note_id, offset], |r| {
+            Ok(RevisionSummary {
+                id: r.get(0)?,
+                note_id: r.get(1)?,
+                title: r.get(2)?,
+                pinned: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })
+        .map_err(error)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(error)?;
+    Ok(rows)
+}
+pub fn revision(db: &Connection, note_id: &str, id: &str) -> Result<Revision> {
+    db.query_row("SELECT id,note_id,snapshot_json,pinned,created_at FROM knowledge_revisions WHERE id=?1 AND note_id=?2",params![id,note_id],|r|{let json:String=r.get(2)?;Ok(Revision{id:r.get(0)?,note_id:r.get(1)?,snapshot:serde_json::from_str(&json).map_err(|e|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(e)))?,pinned:r.get(3)?,created_at:r.get(4)?})}).map_err(error)
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotePage {
@@ -123,10 +157,26 @@ pub fn references(db: &Connection, note_id: &str) -> Result<Vec<NoteReference>> 
     }).collect()
 }
 
-pub fn backlinks(db: &Connection, note_id: &str) -> Result<Vec<Note>> {
-    let mut statement=db.prepare(&format!("SELECT {COLUMNS} FROM knowledge_notes n JOIN knowledge_references r ON r.note_id=n.id WHERE r.target_kind='note' AND r.target_id=?1 AND n.deleted_at IS NULL ORDER BY n.updated_at DESC LIMIT 100")).map_err(error)?;
+pub fn backlinks(db: &Connection, note_id: &str) -> Result<Vec<NoteSummary>> {
+    let mut statement=db.prepare("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at FROM knowledge_notes n JOIN knowledge_references r ON r.note_id=n.id WHERE r.target_kind='note' AND r.target_id=?1 AND n.deleted_at IS NULL ORDER BY n.updated_at DESC LIMIT 100").map_err(error)?;
     let notes = statement
-        .query_map([note_id], read_note)
+        .query_map([note_id], |row| {
+            let tags: String = row.get(3)?;
+            Ok(NoteSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                plain_text: row.get(2)?,
+                tags: serde_json::from_str(&tags).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+                favorite: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
         .map_err(error)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(error)?;
@@ -179,7 +229,9 @@ pub fn get(db: &Connection, id: &str) -> Result<Note> {
 }
 
 // Extract text and references from the same document that is persisted; never trust a separate index payload.
-fn inspect_document(document: &Value) -> Result<(String, Vec<(String, String, String)>)> {
+pub(crate) fn inspect_document(
+    document: &Value,
+) -> Result<(String, Vec<(String, String, String)>)> {
     if document.get("type").and_then(Value::as_str) != Some("doc") {
         return Err("笔记文档格式无效".into());
     }
@@ -304,7 +356,7 @@ pub fn save(db: &mut Connection, input: NoteInput) -> Result<Note> {
     tx.commit().map_err(error)?;
     Ok(note)
 }
-fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool) -> Result<Note> {
+pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool) -> Result<Note> {
     let (plain, references) = inspect_document(&input.document)?;
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 300 {
@@ -496,6 +548,7 @@ pub fn set_deleted(
     tx.commit().map_err(error)?;
     Ok(note)
 }
+#[cfg(test)]
 pub fn revisions(db: &Connection, id: &str) -> Result<Vec<Revision>> {
     get(db, id)?;
     let mut statement=db.prepare("SELECT id,note_id,snapshot_json,pinned,created_at FROM knowledge_revisions WHERE note_id=?1 ORDER BY created_at DESC,id DESC").map_err(error)?;
@@ -768,5 +821,132 @@ mod tests {
                 .unwrap(),
             "旧模型"
         );
+    }
+
+    #[test]
+    fn full_library_backup_restores_notes_history_and_managed_attachments() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("library");
+        std::fs::create_dir(&base).unwrap();
+        let path = base.join("library.db");
+        let mut db = crate::db::open_database(&path).unwrap();
+        let notebook = upsert_notebook(&mut db, None, None, "学习资料", 0).unwrap();
+        let mut value = input("初始笔记");
+        value.notebook_id = Some(notebook.id.clone());
+        let first = save(&mut db, value).unwrap();
+        let source = temp.path().join("notes.txt");
+        std::fs::write(&source, "本地学习内容").unwrap();
+        let attachment = crate::knowledge_files::import(&db, &base, &first.id, &source).unwrap();
+        let mut value = edit(&first);
+        value.title = "更新后的笔记".into();
+        value.document = json!({"type":"doc","content":[{"type":"attachment","attrs":{"attachmentId":attachment.id,"label":"学习附件"}}]});
+        let current = save(&mut db, value).unwrap();
+        let history = revisions(&db, &current.id).unwrap();
+        pin_revision(&db, &history[0].id, true).unwrap();
+        let package = temp.path().join("backup.dccassetlib");
+        crate::backup::export_library(&db, &base, &package).unwrap();
+        let deleted = set_deleted(&mut db, &current.id, current.revision, true).unwrap();
+        crate::knowledge_files::purge(&mut db, &base, &current.id, deleted.revision).unwrap();
+        let marker = crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: uid(),
+            name: "测试".into(),
+            created_at: now(),
+        };
+        let mut active = crate::state::ActiveLibrary {
+            base_dir: base.clone(),
+            db_path: path,
+            marker,
+            connection: Some(db),
+        };
+        crate::backup::restore_library(&mut active, &package).unwrap();
+        let db = active.connection.as_ref().unwrap();
+        let restored = get(db, &current.id).unwrap();
+        assert_eq!(restored.document, current.document);
+        assert_eq!(restored.notebook_id, Some(notebook.id));
+        assert!(revisions(db, &current.id).unwrap()[0].pinned);
+        assert_eq!(
+            std::fs::read_to_string(
+                crate::knowledge_files::path(db, &base, &attachment.id)
+                    .unwrap()
+                    .0
+            )
+            .unwrap(),
+            "本地学习内容"
+        );
+        assert!(search(db, "更新", None, false, false, 0, 10)
+            .unwrap()
+            .items
+            .iter()
+            .any(|v| v.id == current.id));
+    }
+
+    #[test]
+    #[ignore = "generated large-data benchmark; run explicitly"]
+    fn benchmark_twenty_thousand_notes_and_project_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&temp.path().join("benchmark.db")).unwrap();
+        let tx = db.transaction().unwrap();
+        for index in 0..20000 {
+            save_in(&tx, input(&format!("材质学习 {index}")), false).unwrap();
+        }
+        tx.commit().unwrap();
+        for query in ["材质", "Unreal", "材质学习 19999"] {
+            let start = std::time::Instant::now();
+            let result = search(&db, query, None, false, false, 0, 40).unwrap();
+            let elapsed = start.elapsed();
+            println!(
+                "knowledge query={query:?} rows={} first_page={} elapsed_ms={:.2}",
+                result.total,
+                result.items.len(),
+                elapsed.as_secs_f64() * 1000.0
+            );
+            assert!(elapsed < std::time::Duration::from_secs(2));
+            assert!(result.items.len() <= 40);
+        }
+        let project = crate::projects::upsert_project(
+            &mut db,
+            crate::models::ProjectInput {
+                id: None,
+                name: "大项目".into(),
+                description: String::new(),
+                project_type: "scene".into(),
+                status: "active".into(),
+                target_tools: vec![],
+                versions: vec![],
+                resolution_width: None,
+                resolution_height: None,
+                frame_rate: None,
+                cover_asset_id: None,
+                cover_media_entry_id: None,
+            },
+        )
+        .unwrap()
+        .summary
+        .id;
+        let tx = db.transaction().unwrap();
+        for index in 0..5000 {
+            let asset = format!("asset-{index}");
+            tx.execute("INSERT INTO assets(id,name,share_url,created_at,updated_at) VALUES(?1,?1,'','now','now')",[&asset]).unwrap();
+            tx.execute("INSERT INTO project_assets(project_id,asset_id,created_at,updated_at) VALUES(?1,?2,'now','now')",params![project,asset]).unwrap();
+        }
+        for index in 0..1000 {
+            tx.execute("INSERT INTO project_tasks(id,project_id,title,status,priority,sort_order,created_at,updated_at) VALUES(?1,?2,?1,'todo','normal',?3,'now','now')",params![format!("task-{index}"),project,index]).unwrap();
+        }
+        tx.commit().unwrap();
+        let start = std::time::Instant::now();
+        let workspace = crate::projects::get_project_workspace(&db, &project, false).unwrap();
+        let assets = crate::projects::asset_page(&db, &project, "zh-CN", "", None, 0, 60).unwrap();
+        let tasks = crate::projects::task_page(&db, &project, Some("todo"), 0, 40).unwrap();
+        println!(
+            "project assets={} tasks={} bounded_items={} elapsed_ms={:.2}",
+            assets.total,
+            tasks.total,
+            workspace.tasks.len() + assets.items.len() + tasks.items.len(),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        assert_eq!(assets.items.len(), 60);
+        assert_eq!(tasks.items.len(), 40);
+        assert!(workspace.assets.is_empty());
     }
 }

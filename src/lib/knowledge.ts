@@ -9,6 +9,7 @@ export interface KnowledgeNote {
 export type NoteInput = Pick<KnowledgeNote, "notebookId" | "title" | "document" | "tags" | "favorite" | "journalDate"> & { id: string | null; expectedRevision: number | null };
 export interface KnowledgeNotebook { id: string; parentId: string | null; name: string; sortOrder: number }
 export interface NoteRevision { id: string; noteId: string; snapshot: KnowledgeNote; pinned: boolean; createdAt: string }
+export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string};
 export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number }
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
@@ -23,14 +24,23 @@ export function knowledgeApi(libraryId: string) {
     save: (input: NoteInput) => invoke<KnowledgeNote>("save_note", { libraryId, input }),
     setDeleted: (note: KnowledgeNote, deleted: boolean) => invoke<KnowledgeNote>("set_note_deleted", { libraryId, id: note.id, expectedRevision: note.revision, deleted }),
     notebooks: () => invoke<KnowledgeNotebook[]>("list_notebooks", { libraryId }),
+    deleteNotebook: (id:string) => invoke<void>("delete_empty_notebook",{libraryId,id}),
     upsertNotebook: (name: string, parentId: string | null = null, id: string | null = null, sortOrder = 0) => invoke<KnowledgeNotebook>("upsert_notebook", { libraryId, name, parentId, id, sortOrder }),
-    revisions: (id: string) => invoke<NoteRevision[]>("list_note_revisions", { libraryId, id }),
+    revisions: (id: string, offset=0) => invoke<NoteRevisionSummary[]>("list_note_revisions", { libraryId, id, offset }),
+    revision: (id:string,revisionId:string)=>invoke<NoteRevision>("get_note_revision",{libraryId,id,revisionId}),
     pin: (id: string, pinned: boolean) => invoke<void>("pin_note_revision", { libraryId, id, pinned }),
     restore: (note: KnowledgeNote, revisionId: string) => invoke<KnowledgeNote>("restore_note_revision", { libraryId, id: note.id, expectedRevision: note.revision, revisionId }),
     importAttachment: (id: string, path: string) => invoke<{id:string;filename:string;mime:string}>("import_note_attachment", {libraryId,id,path}),
+    pasteImage: (id: string) => invoke<{id:string;filename:string;mime:string}>("paste_note_clipboard_image", {libraryId,id}),
+    exportPackage: (id: string, path: string) => invoke<void>("export_note_package", {libraryId,id,path}),
+    exportDraft: (input:NoteInput,path:string)=>invoke<void>("export_note_draft",{libraryId,input,path}),
+    importPackage: (path: string) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_package", {libraryId,path}),
+    readMarkdown: (path: string) => invoke<{text:string;title:string;sha256:string}>("read_note_markdown", {path}),
+    importMarkdown: (path:string,sha256:string,document:JSONContent,notebookId:string|null) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_markdown", {libraryId,path,sha256,document,notebookId}),
+    exportMarkdown: (note:KnowledgeNote,markdown:string,path:string) => invoke<void>("export_note_markdown",{libraryId,id:note.id,revision:note.revision,markdown,path}),
     openAttachment: (id: string) => invoke<void>("open_note_attachment", {libraryId,id}),
     referenceTargets: (kind: string, query: string) => invoke<KnowledgeReference[]>("search_note_reference_targets", {libraryId,kind,query}),
-    backlinks: (id: string) => invoke<KnowledgeNote[]>("get_note_backlinks", {libraryId,id}),
+    backlinks: (id: string) => invoke<NoteSummary[]>("get_note_backlinks", {libraryId,id}),
     references: (id: string) => invoke<Array<{kind:string;targetId:string;label:string;available:boolean}>>("get_note_references", {libraryId,id}),
   };
 }
@@ -59,6 +69,7 @@ export class NoteSaveQueue {
   constructor(note: KnowledgeNote, private persist: (input: NoteInput) => Promise<KnowledgeNote>, private accepted: (note: KnowledgeNote) => void) { this.current = note; }
   enqueue(input: NoteInput) { this.pending = input; }
   isDirty() { return this.pending !== null || this.running !== null; }
+  reset(note:KnowledgeNote) { if(this.running)throw new Error("请等待当前保存结束");this.pending=null;this.current=note; }
   flush(): Promise<void> {
     if (this.running) return this.running;
     const drain = async () => {

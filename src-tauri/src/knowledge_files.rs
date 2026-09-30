@@ -30,6 +30,25 @@ fn content_type(extension: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+pub fn stage_clipboard_rgba(
+    width: usize,
+    height: usize,
+    bytes: &[u8],
+) -> Result<tempfile::TempDir, String> {
+    let pixels = width.checked_mul(height).ok_or("截图尺寸无效")?;
+    if pixels == 0 || pixels > 25_000_000 || pixels.checked_mul(4) != Some(bytes.len()) {
+        return Err("截图尺寸无效或超过 2500 万像素，请先缩小截图".into());
+    }
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, bytes.to_vec())
+        .ok_or("无法解析剪贴板图片")?;
+    let staging = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let file = staging.path().join("剪贴板截图.png");
+    image
+        .save(&file)
+        .map_err(|e| format!("保存截图失败：{e}"))?;
+    Ok(staging)
+}
 pub fn import(
     db: &Connection,
     base: &Path,
@@ -217,6 +236,20 @@ pub fn purge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn screenshot_staging_validates_pixels_and_cleans_temporary_file() {
+        assert!(stage_clipboard_rgba(0, 1, &[]).is_err());
+        assert!(stage_clipboard_rgba(1, 1, &[0, 0, 0]).is_err());
+        assert!(stage_clipboard_rgba(usize::MAX, 2, &[]).is_err());
+        let staged = stage_clipboard_rgba(1, 1, &[20, 40, 60, 255]).unwrap();
+        let path = staged.path().join("剪贴板截图.png");
+        assert_eq!(
+            image::open(&path).unwrap().to_rgba8().get_pixel(0, 0).0,
+            [20, 40, 60, 255]
+        );
+        drop(staged);
+        assert!(!path.exists());
+    }
     #[test]
     fn trash_retains_files_until_explicit_purge() {
         let temp = tempfile::tempdir().unwrap();

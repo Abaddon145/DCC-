@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "./KnowledgeWorkspace";
 import { templateDocument, type KnowledgeNote } from "../lib/knowledge";
+import { withKnowledgeBarrier } from "../lib/noteSaveGuard";
 
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),notify:vi.fn()}));
 vi.mock("@tauri-apps/api/core",()=>({invoke:mocks.invoke}));
@@ -16,7 +17,8 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
   if(command==="get_note_references")return [];
   if(command==="get_note")return note;
   if(command==="save_note")return {...note,...args?.input as object,revision:2};
-  if(command==="list_note_revisions")return [{id:"history",noteId:note.id,snapshot:{...note,title:"旧版标题"},pinned:false,createdAt:note.createdAt}];
+  if(command==="list_note_revisions")return [{id:"history",noteId:note.id,title:"旧版标题",pinned:false,createdAt:note.createdAt}];
+  if(command==="get_note_revision")return {id:"history",noteId:note.id,snapshot:{...note,title:"旧版标题"},pinned:false,createdAt:note.createdAt};
   return null;
 });});
 afterEach(cleanup);
@@ -38,8 +40,21 @@ describe("knowledge editing",()=>{
   it("previews history without saving or silently restoring it",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
     fireEvent.click(await screen.findByRole("button",{name:"历史"}));fireEvent.click(await screen.findByRole("button",{name:/旧版标题/}));
-    expect(screen.getByRole("textbox",{name:"笔记标题"})).toHaveValue("旧版标题");expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeDisabled();
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toHaveValue("旧版标题"));expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeDisabled();
     expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note"||cmd==="restore_note_revision")).toBe(false);
     fireEvent.click(screen.getByRole("button",{name:"返回当前版本"}));expect(screen.getByRole("textbox",{name:"笔记标题"})).toHaveValue(note.title);
+  });
+  it("waits for admitted screenshot imports before a library backup and saves the inserted image",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let finish!:(value:unknown)=>void;
+    mocks.invoke.mockImplementation((command:string,args?:Record<string,unknown>)=>command==="paste_note_clipboard_image"?new Promise(resolve=>{finish=resolve}):original(command,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    fireEvent.click(await screen.findByRole("button",{name:"粘贴截图"}));
+    const backup=vi.fn();let barrier!:Promise<void>;
+    act(()=>{barrier=withKnowledgeBarrier(async()=>{backup()})});
+    expect(backup).not.toHaveBeenCalled();
+    await act(async()=>{finish({id:"22222222-2222-4222-8222-222222222222",filename:"截图.png",mime:"image/png"});await barrier});
+    expect(backup).toHaveBeenCalledOnce();
+    const saved=mocks.invoke.mock.calls.find(([command])=>command==="save_note");
+    expect(JSON.stringify(saved?.[1].input.document)).toContain("http://dcc-media.localhost/note/22222222-2222-4222-8222-222222222222");
   });
 });

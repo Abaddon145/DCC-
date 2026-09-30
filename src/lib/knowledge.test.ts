@@ -35,4 +35,10 @@ describe("knowledge workspace", () => {
     await expect(queue.flush()).rejects.toThrow("磁盘已满"); expect(queue.isDirty()).toBe(true);
     await queue.flush(); expect(persist.mock.calls[1][0].title).toBe("不可丢失"); expect(queue.isDirty()).toBe(false);
   });
+  it("resumes edits from a freshly loaded revision after preserving a conflicting draft",async()=>{
+    const persist=vi.fn().mockRejectedValueOnce(new Error("版本冲突")).mockResolvedValueOnce({...note,revision:5});
+    const queue=new NoteSaveQueue(note,persist,vi.fn());queue.enqueue(input("草稿"));await expect(queue.flush()).rejects.toThrow("版本冲突");
+    queue.reset({...note,title:"另一窗口的修改",revision:4});expect(queue.isDirty()).toBe(false);
+    queue.enqueue(input("合并后的内容"));await queue.flush();expect(persist.mock.calls[1][0].expectedRevision).toBe(4);
+  });
 });

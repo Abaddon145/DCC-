@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { ProjectHub } from "./ProjectHub";
 
 vi.mock("../lib/api", () => ({ mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`, api: {
-  listProjects: vi.fn(), getProject: vi.fn(), moveProjectTask: vi.fn(), listReferenceBoards: vi.fn(),
+  listProjectAssets: vi.fn(), listProjectTasks: vi.fn(), updateProjectAssets: vi.fn(), getProjectUnitImpact: vi.fn(), listProjects: vi.fn(), getProject: vi.fn(), moveProjectTask: vi.fn(), listReferenceBoards: vi.fn(),
   unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(),
 } }));
 vi.mock("./DetailPanel", () => ({ DetailPanel: ({ asset }: { asset: AssetDetail }) => <aside className="detail-panel" aria-label="项目素材详情">{asset.name}</aside> }));
@@ -33,6 +33,9 @@ describe("ProjectHub", () => {
   beforeEach(() => {
     vi.mocked(api.listProjects).mockResolvedValue([summary]);
     vi.mocked(api.getProject).mockResolvedValue(detail);
+    vi.mocked(api.listProjectAssets).mockImplementation(async(id,language,query,status,offset=0,limit=60)=>{const project=await api.getProject(id,language,false);const rows=project.assets.filter(row=>(!status||row.status===status)&&(!query||[row.name,row.categoryName,row.note,row.purpose].some(value=>value?.includes(query))));return {items:rows.slice(offset,offset+limit),total:rows.length,offset,limit}});
+    vi.mocked(api.listProjectTasks).mockImplementation(async(id,status,offset=0,limit=40)=>{const project=await api.getProject(id,"zh-CN",false);const rows=project.tasks.filter(row=>!status||row.status===status);return {items:rows.slice(offset,offset+limit),total:rows.length,offset,limit}});
+    vi.mocked(api.updateProjectAssets).mockResolvedValue(1);
     vi.mocked(api.moveProjectTask).mockResolvedValue();
     vi.mocked(api.listReferenceBoards).mockResolvedValue([]);
     vi.mocked(api.searchMediaEntries).mockResolvedValue({ items: [image], total: 1, offset: 0, limit: 100 });
@@ -87,13 +90,13 @@ describe("ProjectHub", () => {
     render(<ProjectHub contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
     fireEvent.click(await screen.findByRole("button", { name: /项目素材 2/ }));
-    fireEvent.click(screen.getByText("沙漠", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("沙漠", { selector: ".project-asset-grid strong" }));
     expect(await screen.findByLabelText("项目素材详情")).toHaveTextContent("沙漠");
-    fireEvent.click(screen.getByText("古城", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("古城", { selector: ".project-asset-grid strong" }));
     expect(await screen.findByLabelText("项目素材详情")).toHaveTextContent("古城");
     fireEvent.pointerDown(screen.getByPlaceholderText("搜索项目素材、分类、用途或备注…"));
     await waitFor(() => expect(screen.queryByLabelText("项目素材详情")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByText("沙漠", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("沙漠", { selector: ".project-asset-grid strong" }));
     expect(await screen.findByLabelText("项目素材详情")).toHaveTextContent("沙漠");
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByLabelText("项目素材详情")).not.toBeInTheDocument());
@@ -109,14 +112,52 @@ describe("ProjectHub", () => {
     render(<ProjectHub contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
     fireEvent.click(await screen.findByRole("button", { name: /项目素材 2/ }));
-    fireEvent.click(screen.getByText("沙漠", { selector: ".project-asset-grid strong" }));
-    fireEvent.click(screen.getByText("古城", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("沙漠", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("古城", { selector: ".project-asset-grid strong" }));
     expect(await screen.findByLabelText("项目素材详情")).toHaveTextContent("古城");
     await act(async () => { finish({ id: "asset-a", name: "沙漠" } as AssetDetail); });
     await waitFor(() => expect(screen.getByLabelText("项目素材详情")).toHaveTextContent("古城"));
-    fireEvent.click(screen.getByText("沙漠", { selector: ".project-asset-grid strong" }));
+    fireEvent.click(await screen.findByText("沙漠", { selector: ".project-asset-grid strong" }));
     fireEvent.pointerDown(screen.getByPlaceholderText("搜索项目素材、分类、用途或备注…"));
     await act(async () => { finish({ id: "asset-a", name: "沙漠" } as AssetDetail); });
     await waitFor(() => expect(screen.queryByLabelText("项目素材详情")).not.toBeInTheDocument());
+  });
+
+  it("keeps cross-page selections and preserves long notes after a failed save", async () => {
+    const assets = Array.from({length:61},(_,index)=>({assetId:`asset-${index}`,name:`素材 ${index}`,coverImageId:null,categoryName:null,status:"candidate" as const,purpose:"用途",note:"原备注",unitIds:[],unavailable:false,updatedAt:"now"}));
+    vi.mocked(api.getProject).mockResolvedValue({...detail,assets,assetCount:61});
+    vi.mocked(api.updateProjectAssets).mockRejectedValueOnce(new Error("磁盘写入失败")).mockResolvedValueOnce(2);
+    render(<ProjectHub contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));
+    fireEvent.click(await screen.findByRole("button",{name:/项目素材 61/}));
+    await screen.findByText("素材 0",{selector:".project-asset-grid strong"});
+    expect(screen.queryByText("素材 60",{selector:".project-asset-grid strong"})).toBeNull();
+    fireEvent.click(screen.getAllByRole("button",{name:"选择项目素材"})[0]);
+    fireEvent.click(screen.getByRole("button",{name:"下一页"}));
+    await screen.findByText("素材 60",{selector:".project-asset-grid strong"});
+    fireEvent.click(screen.getByRole("button",{name:"选择项目素材"}));
+    fireEvent.click(screen.getByRole("button",{name:"用途与备注"}));
+    const text="用于沙漠镜头\n需要调整材质与灯光";
+    fireEvent.click(screen.getByRole("checkbox",{name:"修改备注"}));
+    fireEvent.change(screen.getByRole("textbox",{name:"修改备注"}),{target:{value:text}});
+    fireEvent.click(screen.getByRole("button",{name:"保存"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("磁盘写入失败");
+    expect(screen.getByRole("textbox",{name:"修改备注"})).toHaveValue(text);
+    fireEvent.click(screen.getByRole("button",{name:"保存"}));
+    await waitFor(()=>expect(screen.queryByRole("dialog",{name:"编辑项目用途与备注"})).toBeNull());
+    expect(api.updateProjectAssets).toHaveBeenLastCalledWith({projectId:"project-1",assetIds:["asset-0","asset-60"],note:text});
+  });
+
+  it("uses whole-column positions when dragging a task on a later page",async()=>{
+    vi.mocked(api.getProject).mockResolvedValue({...detail,taskCount:42,tasks:Array.from({length:42},(_,index)=>({...detail.tasks[0],id:`task-${index}`,title:`任务 ${index}`,sortOrder:index}))});
+    render(<ProjectHub contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));
+    fireEvent.click(await screen.findByRole("button",{name:/任务 42/}));
+    await screen.findByText("任务 0");
+    fireEvent.click(screen.getAllByRole("button",{name:"下一页"})[0]);
+    const task=await screen.findByText("任务 40");
+    fireEvent.dragStart(task.closest("article")!);
+    fireEvent.drop(screen.getByText("任务 41").closest("article")!);
+    await waitFor(()=>expect(api.moveProjectTask).toHaveBeenCalledWith("task-40","todo",41));
   });
 });
