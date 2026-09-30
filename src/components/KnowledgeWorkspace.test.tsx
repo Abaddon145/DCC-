@@ -38,6 +38,8 @@ describe("knowledge editing",()=>{
     const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
     fireEvent.change(title,{target:{value:"材质实例学习"}});fireEvent.click(screen.getByRole("button",{name:/^保存$/}));
     await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_note",expect.objectContaining({libraryId:"test-library",input:expect.objectContaining({id:note.id,title:"材质实例学习",expectedRevision:1})})));
+    const savedInput=mocks.invoke.mock.calls.find(([cmd])=>cmd==="save_note")?.[1].input;
+    expect(Object.keys(savedInput).sort()).toEqual(["id","expectedRevision","notebookId","title","document","tags","favorite","journalDate"].sort());
     await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("已保存"));
   });
   it("retains content and exposes retry when saving fails",async()=>{
