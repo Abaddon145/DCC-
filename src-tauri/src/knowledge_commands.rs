@@ -47,19 +47,95 @@ pub async fn import_note_markdown(
     document: serde_json::Value,
     notebook_id: Option<String>,
 ) -> Result<crate::note_package::ImportResult, String> {
+    use tauri::Manager;
+    let valid = app
+        .state::<AppState>()
+        .with_library_if_id(&library_id, |_, _| Ok(()))?;
+    active(valid)?;
+    let original = crate::note_markdown::read(std::path::Path::new(&path))?;
+    if original.sha256 != sha256 {
+        return Err("Markdown 文件已变化，请重新选择".into());
+    }
+    if document.to_string().len() > 4 * 1024 * 1024 {
+        return Err("Markdown 解析结果过大".into());
+    }
+    let staged = crate::note_remote_images::stage(&document).await?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _staging_guard = staged.directory;
         use tauri::Manager;
         active(
             app.state::<AppState>()
                 .with_library_mut_if_id(&library_id, |db, base| {
-                    crate::note_markdown::import(
+                    crate::note_markdown::import_staged(
                         db,
                         base,
                         std::path::Path::new(&path),
                         &sha256,
                         document,
                         notebook_id,
+                        &staged.files,
+                        &staged.failures,
                     )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn retry_note_remote_image(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    expected_revision: i64,
+    url: String,
+) -> Result<crate::knowledge_files::Attachment, String> {
+    use tauri::Manager;
+    let document = active(
+        app.state::<AppState>()
+            .with_library_if_id(&library_id, |db, _| {
+                let note = knowledge::get(db, &id)?;
+                if note.deleted_at.is_some() || note.revision != expected_revision {
+                    return Err("笔记已变化或删除，请保存后重试".into());
+                }
+                let mut nodes = vec![&note.document];
+                let mut matched = false;
+                while let Some(node) = nodes.pop() {
+                    if node["type"] == "remoteImage" && node["attrs"]["src"] == url {
+                        matched = true;
+                    }
+                    if let Some(children) = node["content"].as_array() {
+                        nodes.extend(children);
+                    }
+                }
+                if !matched {
+                    return Err("图片不在当前笔记的待重试列表中".into());
+                }
+                Ok(serde_json::json!({"type":"image","attrs":{"src":url}}))
+            })?,
+    )?;
+    let staged = crate::note_remote_images::stage(&document).await?;
+    let source = staged
+        .files
+        .get(&url)
+        .ok_or_else(|| {
+            staged
+                .failures
+                .get(&url)
+                .cloned()
+                .unwrap_or("图片下载失败".into())
+        })?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _keep = staged;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    let note = knowledge::get(db, &id)?;
+                    if note.revision != expected_revision || note.deleted_at.is_some() {
+                        return Err("下载期间笔记已变化，请重试".into());
+                    }
+                    crate::knowledge_files::import(db, base, &id, &source)
                 })?,
         )
     })

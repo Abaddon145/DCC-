@@ -20,6 +20,7 @@ mod model_access;
 mod models;
 mod note_markdown;
 mod note_package;
+mod note_remote_images;
 mod organization;
 mod projects;
 mod reference_boards;
@@ -188,6 +189,7 @@ pub fn run() {
                     knowledge_commands::get_note,
                     knowledge_commands::save_note,
                     knowledge_commands::duplicate_note,
+                    knowledge_commands::retry_note_remote_image,
                     knowledge_commands::write_note_clipboard_text,
                     knowledge_commands::set_note_deleted,
                     knowledge_commands::list_note_revisions,
