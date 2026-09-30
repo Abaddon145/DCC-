@@ -5,6 +5,152 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub async fn get_note_export_html(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    revision: i64,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    crate::note_export::html(db, base, &id, revision)
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn export_note_map(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    revision: i64,
+    map_id: String,
+    format: String,
+    png: Option<Vec<u8>>,
+    path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, _| {
+                    crate::note_export::export_map(
+                        db,
+                        &id,
+                        revision,
+                        &map_id,
+                        &format,
+                        png,
+                        std::path::Path::new(&path),
+                    )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn export_note_document(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    revision: i64,
+    format: String,
+    path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_if_id(&library_id, |db, base| {
+                    crate::note_export::export(
+                        db,
+                        base,
+                        &id,
+                        revision,
+                        &format,
+                        std::path::Path::new(&path),
+                    )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn move_note_item(
+    state: State<AppState>,
+    library_id: String,
+    kind: String,
+    id: String,
+    parent: Option<String>,
+    index: usize,
+) -> Result<String, String> {
+    active(state.with_library_mut_if_id(&library_id, |db, _| {
+        crate::note_moves::move_item(db, &library_id, &kind, &id, parent, index)
+    })?)
+}
+#[tauri::command]
+pub fn undo_note_move(
+    state: State<AppState>,
+    library_id: String,
+    token: String,
+) -> Result<(), String> {
+    active(state.with_library_mut_if_id(&library_id, |db, _| {
+        crate::note_moves::undo(db, &library_id, &token)
+    })?)
+}
+
+#[tauri::command]
+pub fn get_note_appearance(state: State<AppState>) -> Result<serde_json::Value, String> {
+    state.note_appearance()
+}
+#[tauri::command]
+pub fn save_note_appearance(
+    state: State<AppState>,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    state.save_note_appearance(value)
+}
+
+#[tauri::command]
+pub fn write_note_clipboard_fragment(
+    state: State<AppState>,
+    library_id: String,
+    id: String,
+    slice: serde_json::Value,
+) -> Result<(), String> {
+    active(state.with_library_if_id(&library_id, |db, _| {
+        crate::note_clipboard::write(db, &library_id, &id, slice)
+    })?)
+}
+#[tauri::command]
+pub async fn read_note_clipboard_fragment(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_mut_if_id(&library_id, |db, base| {
+                    crate::note_clipboard::read(db, base, &library_id, &id)
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn duplicate_note(
     app: tauri::AppHandle,
     library_id: String,

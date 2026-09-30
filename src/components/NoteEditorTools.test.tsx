@@ -6,6 +6,7 @@ import {TableKit} from "@tiptap/extension-table";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import {NoteEditorTools} from "./NoteEditorTools";
+import {ManagedNoteImage} from "../lib/noteExtensions";
 const invoke=vi.hoisted(()=>vi.fn().mockResolvedValue(null));
 vi.mock("@tauri-apps/api/core",()=>({invoke}));
 Object.defineProperty(Range.prototype,"getClientRects",{configurable:true,value:()=>[]});
@@ -18,11 +19,19 @@ function setup(disabled=false,table=false){
   return{ai,insert};
 }
 describe("editing selection and contextual commands",()=>{
+  it("cuts and pastes an image node without reducing it to empty text",async()=>{
+    editor=new Editor({extensions:[StarterKit,ManagedNoteImage],content:{type:"doc",content:[{type:"image",attrs:{src:"http://dcc-media.localhost/note/11111111-1111-4111-8111-111111111111"}},{type:"paragraph"}]}});
+    render(<section className="knowledge-editor"><NoteEditorTools editor={editor} libraryId="library" disabled={false} onAi={()=>{}} onInsert={()=>{}}/><EditorContent editor={editor}/></section>);
+    act(()=>editor.commands.setNodeSelection(0));vi.spyOn(editor.view,"posAtCoords").mockReturnValue(null);
+    let slice:unknown=null;invoke.mockImplementation(async(cmd:string,args?:Record<string,unknown>)=>{if(cmd==="write_note_clipboard_fragment"){slice=args?.slice;return null;}if(cmd==="read_note_clipboard_fragment")return slice;return null;});
+    fireEvent.contextMenu(editor.view.dom);fireEvent.click(screen.getByRole("menuitem",{name:"剪切"}));await waitFor(()=>expect(editor.getJSON().content?.some(n=>n.type==="image")).toBe(false));
+    fireEvent.contextMenu(editor.view.dom);fireEvent.click(screen.getByRole("menuitem",{name:"粘贴"}));await waitFor(()=>expect(editor.getJSON().content?.some(n=>n.type==="image")).toBe(true));
+  });
   it("keeps a selected range when right-clicking inside it and copies only selected text",async()=>{
     setup();act(()=>editor.commands.setTextSelection({from:1,to:3}));vi.spyOn(editor.view,"posAtCoords").mockReturnValue({pos:2,inside:0});
     fireEvent.mouseDown(editor.view.dom,{button:2});fireEvent.contextMenu(editor.view.dom,{clientX:20,clientY:20});
     expect(editor.state.selection.from).toBe(1);expect(editor.state.selection.to).toBe(3);
-    fireEvent.click(screen.getByRole("menuitem",{name:"复制"}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith("write_note_clipboard_text",{text:"一级"}));
+    fireEvent.click(screen.getByRole("menuitem",{name:"复制"}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith("write_note_clipboard_fragment",expect.objectContaining({libraryId:"library",slice:expect.any(Object)})));
     expect(editor.state.selection.to).toBe(3);
   });
   it("positions the caret outside a selection before applying a format",()=>{

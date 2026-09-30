@@ -18,7 +18,10 @@ mod media;
 mod media_library;
 mod model_access;
 mod models;
+mod note_clipboard;
+mod note_export;
 mod note_markdown;
+mod note_moves;
 mod note_package;
 mod note_remote_images;
 mod organization;
@@ -176,6 +179,9 @@ pub fn run() {
                     knowledge_commands::read_note_markdown,
                     knowledge_commands::import_note_markdown,
                     knowledge_commands::export_note_markdown,
+                    knowledge_commands::export_note_document,
+                    knowledge_commands::get_note_export_html,
+                    knowledge_commands::export_note_map,
                     knowledge_commands::import_note_package,
                     knowledge_commands::search_note_reference_targets,
                     knowledge_commands::get_journal_note,
@@ -191,6 +197,12 @@ pub fn run() {
                     knowledge_commands::duplicate_note,
                     knowledge_commands::retry_note_remote_image,
                     knowledge_commands::write_note_clipboard_text,
+                    knowledge_commands::get_note_appearance,
+                    knowledge_commands::move_note_item,
+                    knowledge_commands::undo_note_move,
+                    knowledge_commands::save_note_appearance,
+                    knowledge_commands::write_note_clipboard_fragment,
+                    knowledge_commands::read_note_clipboard_fragment,
                     knowledge_commands::set_note_deleted,
                     knowledge_commands::list_note_revisions,
                     knowledge_commands::get_note_revision,

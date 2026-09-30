@@ -26,6 +26,20 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(cleanup);
 describe("knowledge editing",()=>{
+  it("switches to reading without changing the document and locks editing controls",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"阅读"}));await waitFor(()=>expect(title).toBeDisabled());
+    expect(screen.getByRole("textbox",{name:"笔记正文"})).toHaveAttribute("contenteditable","false");
+    expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button",{name:"编辑"}));await waitFor(()=>expect(title).toBeEnabled());
+  });
+  it("opens each note in one tab and retains tabs when switching",async()=>{
+    const second={...note,id:"22222222-2222-4222-8222-222222222222",title:"材质学习"};const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>cmd==="search_notes"?Promise.resolve({items:[note,second],total:2}):cmd==="get_note"?Promise.resolve(args?.id===second.id?second:note):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));fireEvent.click(await screen.findByRole("button",{name:/材质学习/}));
+    await waitFor(()=>expect(screen.getAllByRole("tab")).toHaveLength(2));fireEvent.click(screen.getByRole("tab",{name:"UE 学习笔记"}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toHaveValue(note.title));expect(screen.getAllByRole("tab")).toHaveLength(2);
+  });
   it("does not reopen history after a slow request finishes outside the dismissed panel",async()=>{
     const original=mocks.invoke.getMockImplementation()!;let finish!:(value:unknown)=>void;
     mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>cmd==="list_note_revisions"?new Promise(resolve=>{finish=resolve}):original(cmd,args));

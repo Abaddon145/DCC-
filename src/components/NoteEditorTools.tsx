@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import { KnowledgeMenu, type KnowledgeMenuState, type KnowledgeMenuAction } from "./KnowledgeMenu";
 import { api } from "../lib/api";
-import { knowledgeApi } from "../lib/knowledge";
+import {copyNoteSelection,pasteNoteSelection} from "../lib/noteClipboard";
 
-export function NoteEditorTools({editor,libraryId,disabled,onAi,onInsert}:{editor:Editor|null;libraryId:string;disabled:boolean;onAi:()=>void;onInsert:(kind:"attachment"|"reference"|"screenshot")=>void}) {
+export function NoteEditorTools({editor,libraryId,noteId="",disabled,onAi,onInsert}:{editor:Editor|null;libraryId:string;noteId?:string;disabled:boolean;onAi:()=>void;onInsert:(kind:"attachment"|"reference"|"screenshot")=>void}) {
   const [menu,setMenu]=useState<KnowledgeMenuState|null>(null);
   const [outline,setOutline]=useState(false);
   const [headings,setHeadings]=useState<Array<{position:number;level:number;text:string}>>([]);
@@ -12,7 +12,6 @@ export function NoteEditorTools({editor,libraryId,disabled,onAi,onInsert}:{edito
   const [link,setLink]=useState<string|null>(null);
   const [linkText,setLinkText]=useState("");
   const root=useRef<HTMLDivElement>(null);
-  const clipboard=knowledgeApi(libraryId);
   const [error,setError]=useState("");
   useEffect(()=>{if(disabled){setMenu(null);setLink(null);}},[disabled]);
   const act=(work:()=>Promise<void>|void)=>{void Promise.resolve().then(work).catch(()=>setError("操作失败。剪贴板请使用 Ctrl+C / Ctrl+V；链接仅支持 http/https。"));};
@@ -36,15 +35,18 @@ export function NoteEditorTools({editor,libraryId,disabled,onAi,onInsert}:{edito
       event.preventDefault();event.stopPropagation();
       const selection=selected||{from:editor.state.selection.from,to:editor.state.selection.to};selected=null;
       const position=editor.view.posAtCoords({left:event.clientX,top:event.clientY})?.pos;
-      if(position!==undefined){if(selection.from!==selection.to&&position>=selection.from&&position<=selection.to)editor.commands.setTextSelection(selection);else editor.commands.setTextSelection(position);}
+      const image=(event.target as Element).closest("img,.knowledge-reference-card,.knowledge-mind-map");
+      let nodePosition:number|undefined;if(image)editor.state.doc.descendants((node,pos)=>{const dom=editor.view.nodeDOM(pos);if(dom===image)nodePosition=pos;});
+      if(nodePosition!==undefined){const node=editor.state.doc.nodeAt(nodePosition);if(selection.from<selection.to&&selection.from<=nodePosition&&selection.to>=nodePosition+(node?.nodeSize||1))editor.commands.setTextSelection(selection);else editor.commands.setNodeSelection(nodePosition);}
+      else if(position!==undefined){if(selection.from!==selection.to&&position>=selection.from&&position<=selection.to)editor.commands.setTextSelection(selection);else editor.commands.setTextSelection(position);}
       const hasSelection=!editor.state.selection.empty;
       const text=()=>editor.state.doc.textBetween(editor.state.selection.from,editor.state.selection.to,"\n");
       const actions:KnowledgeMenuAction[]=[
         {label:"撤销",disabled:disabled||!editor.can().undo(),run:()=>editor.chain().focus().undo().run()},
         {label:"重做",disabled:disabled||!editor.can().redo(),run:()=>editor.chain().focus().redo().run()},
-        {label:"复制",disabled:!hasSelection,run:()=>act(()=>clipboard.writeClipboard(text()))},
-        {label:"剪切",disabled:disabled||!hasSelection,run:()=>act(async()=>{const selection=editor.state.selection;const original=text();await clipboard.writeClipboard(original);if(editor.state.selection.from===selection.from&&editor.state.selection.to===selection.to&&text()===original)editor.chain().focus().deleteSelection().run();})},
-        {label:"粘贴",disabled,run:()=>act(async()=>{editor.commands.focus();if(!document.execCommand("paste")){const value=await api.readClipboard();editor.chain().focus().insertContent(value.split(/\r?\n/).map(text=>({type:"paragraph",content:text?[{type:"text",text}]:[]}))).run();}})},
+        {label:"复制",disabled:!hasSelection,run:()=>act(()=>copyNoteSelection(editor,libraryId,noteId,false))},
+        {label:"剪切",disabled:disabled||!hasSelection,run:()=>act(()=>copyNoteSelection(editor,libraryId,noteId,true))},
+        {label:"粘贴",disabled,run:()=>act(async()=>{editor.commands.focus();if(await pasteNoteSelection(editor,libraryId,noteId))return;if(!document.execCommand?.("paste")){const value=await api.readClipboard();editor.chain().focus().insertContent(value.split(/\r?\n/).map(text=>({type:"paragraph",content:text?[{type:"text",text}]:[]}))).run();}})},
         {label:"粘贴为纯文本",disabled,run:()=>act(async()=>{const value=await api.readClipboard();editor.chain().focus().insertContent(value.split(/\r?\n/).map(text=>({type:"paragraph",content:text?[{type:"text",text}]:[]}))).run();})},
         {label:"正文",disabled,run:()=>editor.chain().focus().setParagraph().run()},
         ...([1,2,3] as const).map(level=>({label:`${["","一级","二级","三级"][level]}标题`,disabled,run:()=>editor.chain().focus().setHeading({level}).run()})),
@@ -73,7 +75,7 @@ export function NoteEditorTools({editor,libraryId,disabled,onAi,onInsert}:{edito
     };
     dom.addEventListener("mousedown",remember,true);dom.addEventListener("contextmenu",context);
     return()=>{dom.removeEventListener("mousedown",remember,true);dom.removeEventListener("contextmenu",context);};
-  },[editor,disabled,libraryId,onAi,onInsert]);
+  },[editor,disabled,libraryId,noteId,onAi,onInsert]);
   return <div ref={root} className="knowledge-editor-tools">
     <label>段落格式 <select aria-label="段落格式" disabled={disabled} value={level} onChange={e=>{const level=Number(e.target.value);if(level===0)editor?.chain().focus().setParagraph().run();else editor?.chain().focus().setHeading({level:level as 1|2|3}).run();}}><option value={0}>正文</option><option value={1}>一级标题</option><option value={2}>二级标题</option><option value={3}>三级标题</option>{level>3&&<option value={level}>{level} 级标题（已有内容）</option>}</select></label>
     <button aria-expanded={outline} onClick={()=>setOutline(v=>!v)}>标题大纲</button>

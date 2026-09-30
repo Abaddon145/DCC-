@@ -30,6 +30,13 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 
 ## 产品参考
 
+## Mind Elixir 5.15.1
+
+- 上游：https://github.com/SSShooter/mind-elixir-core
+- 许可证：MIT，Copyright (c) 2019 DjZhou。
+- 用途：笔记中独立可编辑思维导图，按需加载，不连接在线服务。
+- 完整许可证随安装包以 `MIND-ELIXIR-LICENSE.txt` 分发。
+
 Markdown 解析使用 Marked 17.0.6（MIT，MarkedJS / Christopher Jeffrey），许可证见随包 `MARKED-LICENSE.md`。
 
 知识库设计参考 Trilium、Joplin 和 Logseq 的产品交互，独立实现持久化、历史、附件和 AI；未复制其 GPL/AGPL 代码。

@@ -1,5 +1,17 @@
 import { Node, mergeAttributes } from "@tiptap/react";
 import Image from "@tiptap/extension-image";
+import {noteMapSvg} from "./noteMindMap";
+
+export const NoteMindMapNode=Node.create({
+  name:"mindMap",group:"block",atom:true,draggable:true,
+  addAttributes(){return {id:{default:""},data:{default:null}};},
+  parseHTML(){return [];},
+  renderMarkdown(node){return `![思维导图](dccmap://${node.attrs?.id})`;},
+  renderHTML({node}){
+    let preview="";try{preview=`data:image/svg+xml;charset=utf-8,${encodeURIComponent(noteMapSvg(node.attrs.data))}`;}catch{/* Invalid persisted maps remain visible as an error, never active HTML. */}
+    return ["div",{class:"knowledge-mind-map","data-note-map":node.attrs.id},["button",{type:"button"},"打开思维导图"],...(preview?[["img",{src:preview,alt:"思维导图预览"}]]:[["p",{},"导图格式无效"]])];
+  },
+});
 
 export const ManagedNoteImage = Image.extend({
   parseHTML() { return [{ tag: 'img[src^="http://dcc-media.localhost/note/"]' }]; },

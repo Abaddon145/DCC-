@@ -370,6 +370,21 @@ pub fn export(
     let mut copied = HashSet::new();
     let mut total = 0u64;
     while let Some(node) = nodes.pop() {
+        if node["type"] == "mindMap" {
+            let map_id = node["attrs"]["id"].as_str().ok_or("导图 ID 无效")?;
+            Uuid::parse_str(map_id).map_err(|_| "导图 ID 无效")?;
+            fs::create_dir_all(&stage_files).map_err(err)?;
+            let filename = format!("mind-map-{map_id}.svg");
+            fs::write(
+                stage_files.join(&filename),
+                crate::note_export::map_svg(&node["attrs"]["data"])?,
+            )
+            .map_err(err)?;
+            text = text.replace(
+                &format!("dccmap://{map_id}"),
+                &format!("{folder}/{filename}"),
+            );
+        }
         let id = match node["type"].as_str() {
             Some("image") => node["attrs"]["src"]
                 .as_str()
