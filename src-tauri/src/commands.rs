@@ -554,6 +554,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "audio",
         "video",
         "projects",
+        "knowledge",
     ]
     .contains(&module_id)
     {
@@ -2068,6 +2069,14 @@ pub fn is_reference_window_open(app: AppHandle, state: State<AppState>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn knowledge_workspace_context_is_a_registered_browsing_module() {
+        assert_eq!(validate_workspace_module("knowledge"), Ok(()));
+        assert_eq!(
+            validate_workspace_module("not-a-module"),
+            Err("未知的浏览模块".into())
+        );
+    }
     #[test]
     fn parses_baidu_share_text() {
         let parsed =

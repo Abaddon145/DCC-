@@ -23,6 +23,15 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(cleanup);
 describe("knowledge editing",()=>{
+  it("shows a recoverable context error instead of remaining on the loading screen",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let fail=true;
+    mocks.invoke.mockImplementation((command:string,args?:Record<string,unknown>)=>command==="get_workspace_context"&&fail?Promise.reject("未知的浏览模块"):original(command,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("未知的浏览模块");
+    expect(screen.queryByText("正在打开知识库…")).not.toBeInTheDocument();
+    fail=false;fireEvent.click(screen.getByRole("button",{name:"重新打开知识库"}));
+    expect(await screen.findByRole("button",{name:/UE 学习笔记/})).toBeInTheDocument();
+  });
   it("opens a note and saves title with library and revision guards",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);
     fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));

@@ -21,8 +21,10 @@ import { NoteReferencePicker } from "./NoteReferencePicker";
 interface Props { onOpenProject?:(id:string)=>void; initialNoteId?: string | null; notify: (message: string, error?: boolean) => void }
 export default function KnowledgeWorkspace({ notify, initialNoteId,onOpenProject }: Props) {
   const [libraryId, setLibraryId] = useState("");
-  useEffect(() => { let active = true; void api.getWorkspaceContext("knowledge").then(v => { if (active) setLibraryId(v.libraryId); }).catch(e => notify(String(e), true)); return () => { active = false; }; }, [notify]);
-  return libraryId ? <Workspace key={libraryId} libraryId={libraryId} initialNoteId={initialNoteId} onOpenProject={onOpenProject} notify={notify} /> : <div className="knowledge-loading">正在打开知识库…</div>;
+  const [openError, setOpenError] = useState("");
+  const [openAttempt, setOpenAttempt] = useState(0);
+  useEffect(() => { let active = true; setOpenError(""); void api.getWorkspaceContext("knowledge").then(v => { if (active) setLibraryId(v.libraryId); }).catch(e => { if(active){setOpenError(String(e));notify(String(e), true);} }); return () => { active = false; }; }, [notify, openAttempt]);
+  return libraryId ? <Workspace key={libraryId} libraryId={libraryId} initialNoteId={initialNoteId} onOpenProject={onOpenProject} notify={notify} /> : openError ? <div className="knowledge-loading"><p role="alert">知识库打开失败：{openError}</p><button className="secondary-button" onClick={()=>setOpenAttempt(v=>v+1)}>重新打开知识库</button></div> : <div className="knowledge-loading">正在打开知识库…</div>;
 }
 
 function Workspace({ libraryId, notify, initialNoteId,onOpenProject }: Props & { libraryId: string }) {
