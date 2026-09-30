@@ -14,6 +14,12 @@ export interface NoteSearch { query: string; notebookId: string | null; trash: b
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
 
+/** TypeScript structural types do not remove extra runtime fields from note snapshots. */
+function writableNoteInput(input: NoteInput): NoteInput {
+  const { id, expectedRevision, notebookId, title, document, tags, favorite, journalDate } = input;
+  return { id, expectedRevision, notebookId, title, document, tags, favorite, journalDate };
+}
+
 /** A client is permanently bound to one library, including delayed autosaves. */
 export function knowledgeApi(libraryId: string) {
   return {
@@ -21,7 +27,7 @@ export function knowledgeApi(libraryId: string) {
     get: (id: string) => invoke<KnowledgeNote>("get_note", { libraryId, id }),
     journal: (date: string) => invoke<KnowledgeNote | null>("get_journal_note", {libraryId,date}),
     purge: (note: KnowledgeNote) => invoke<void>("purge_note", {libraryId,id:note.id,expectedRevision:note.revision}),
-    save: (input: NoteInput) => invoke<KnowledgeNote>("save_note", { libraryId, input }),
+    save: (input: NoteInput) => invoke<KnowledgeNote>("save_note", { libraryId, input: writableNoteInput(input) }),
     setDeleted: (note: KnowledgeNote, deleted: boolean) => invoke<KnowledgeNote>("set_note_deleted", { libraryId, id: note.id, expectedRevision: note.revision, deleted }),
     notebooks: () => invoke<KnowledgeNotebook[]>("list_notebooks", { libraryId }),
     deleteNotebook: (id:string) => invoke<void>("delete_empty_notebook",{libraryId,id}),
@@ -33,7 +39,7 @@ export function knowledgeApi(libraryId: string) {
     importAttachment: (id: string, path: string) => invoke<{id:string;filename:string;mime:string}>("import_note_attachment", {libraryId,id,path}),
     pasteImage: (id: string) => invoke<{id:string;filename:string;mime:string}>("paste_note_clipboard_image", {libraryId,id}),
     exportPackage: (id: string, path: string) => invoke<void>("export_note_package", {libraryId,id,path}),
-    exportDraft: (input:NoteInput,path:string)=>invoke<void>("export_note_draft",{libraryId,input,path}),
+    exportDraft: (input:NoteInput,path:string)=>invoke<void>("export_note_draft",{libraryId,input: writableNoteInput(input),path}),
     importPackage: (path: string) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_package", {libraryId,path}),
     readMarkdown: (path: string) => invoke<{text:string;title:string;sha256:string}>("read_note_markdown", {path}),
     importMarkdown: (path:string,sha256:string,document:JSONContent,notebookId:string|null) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_markdown", {libraryId,path,sha256,document,notebookId}),

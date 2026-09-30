@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { NoteSaveQueue, templateDocument, noteTemplates, type KnowledgeNote, type NoteInput } from "./knowledge";
+import { knowledgeApi, NoteSaveQueue, templateDocument, noteTemplates, type KnowledgeNote, type NoteInput } from "./knowledge";
 import { registerNoteSaveGuard, withKnowledgeBarrier, knowledgeChangesPaused } from "./noteSaveGuard";
 
 const note: KnowledgeNote = { id: "note", notebookId: null, title: "学习", document: templateDocument("blank"), plainText: "", tags: [], favorite: false, revision: 1, journalDate: null, deletedAt: null, createdAt: "", updatedAt: "" };
 const input = (title: string): NoteInput => ({ ...note, title, expectedRevision: 1 });
+const mockedInvoke = vi.hoisted(()=>vi.fn().mockResolvedValue(null));
+vi.mock("@tauri-apps/api/core",()=>({invoke:mockedInvoke}));
 describe("knowledge workspace", () => {
+  it("projects full runtime note snapshots into the strict save and draft export contract",async()=>{
+    mockedInvoke.mockClear();const client=knowledgeApi("library");
+    await client.save(input("编辑"));await client.exportDraft(input("未保存草稿"),"draft.dccnotes");
+    for(const [command,args] of mockedInvoke.mock.calls){
+      expect(["save_note","export_note_draft"]).toContain(command);
+      expect(args.libraryId).toBe("library");
+      expect(Object.keys(args.input).sort()).toEqual(["id","expectedRevision","notebookId","title","document","tags","favorite","journalDate"].sort());
+      expect(args.input.expectedRevision).toBe(1);
+    }
+  });
   it("blocks maintenance when the draft cannot be saved and releases its editing barrier", async()=>{
     const remove=registerNoteSaveGuard(async()=>{throw new Error("保存失败");});const mutation=vi.fn();
     try {await expect(withKnowledgeBarrier(mutation)).rejects.toThrow("保存失败");expect(mutation).not.toHaveBeenCalled();expect(knowledgeChangesPaused()).toBe(false);}finally{remove();}
