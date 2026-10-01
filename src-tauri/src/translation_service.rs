@@ -316,7 +316,11 @@ impl TranslationService {
         url: &str,
     ) -> Result<String, String> {
         use std::sync::atomic::Ordering;
-        let client = Client::builder()
+        let builder = Client::builder();
+        // Local test servers must not pass through Windows system proxies.
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let client = builder
             .timeout(Duration::from_secs(150))
             .build()
             .map_err(|_| "初始化 AI 请求失败")?;
@@ -1005,7 +1009,29 @@ mod tests {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 let mut bytes = [0; 8192];
-                let _ = socket.read(&mut bytes);
+                let mut request = Vec::new();
+                loop {
+                    let size = socket.read(&mut bytes).unwrap_or(0);
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&bytes[..size]);
+                    if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    assert!(request.len() < 128 * 1024, "test request too large");
+                }
                 count += 1;
                 if let Some(cancel) = &cancel {
                     cancel.store(true, Ordering::SeqCst);
@@ -1013,7 +1039,8 @@ mod tests {
                 }
                 let text = value.to_string();
                 let response=format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",text.len());
-                let _ = socket.write_all(response.as_bytes());
+                socket.write_all(response.as_bytes()).unwrap();
+                socket.shutdown(std::net::Shutdown::Write).unwrap();
             }
             count
         });

@@ -131,7 +131,84 @@ pub fn export_library_with_progress(
     Ok(())
 }
 
+pub const RESTORE_MARKER: &str = ".restore-pending.json";
+const RESTORE_TARGETS: [&str; 6] = [
+    "library.db",
+    "images",
+    "reference-boards",
+    "media-library",
+    "media",
+    "note-attachments",
+];
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreCheckpoint {
+    rollback: String,
+    originals: Vec<String>,
+}
+
+pub fn recover_interrupted_restore(active: &mut ActiveLibrary) -> Result<(), String> {
+    let marker = active.base_dir.join(RESTORE_MARKER);
+    let value: RestoreCheckpoint =
+        serde_json::from_slice(&fs::read(&marker).map_err(|_| "没有可恢复的中断记录")?)
+            .map_err(|_| "恢复记录损坏，未修改文件；请使用恢复前安全备份")?;
+    if !value.rollback.starts_with(".restore-old-")
+        || Path::new(&value.rollback).components().count() != 1
+        || !value.originals.iter().any(|name| name == "library.db")
+        || value
+            .originals
+            .iter()
+            .any(|n| !RESTORE_TARGETS.contains(&n.as_str()))
+    {
+        return Err("恢复记录路径无效，未修改文件".into());
+    }
+    let old = active.base_dir.join(&value.rollback);
+    if !old.is_dir()
+        || fs::symlink_metadata(&old)
+            .map_err(|_| "原库副本不可用")?
+            .file_type()
+            .is_symlink()
+    {
+        return Err("原库副本不可用，请使用恢复前安全备份".into());
+    }
+    if value
+        .originals
+        .iter()
+        .any(|name| !old.join(name).exists() && !active.base_dir.join(name).exists())
+    {
+        return Err("原库文件缺失，未继续恢复；请使用恢复前安全备份".into());
+    }
+    drop(active.connection.take());
+    if old.join("library.db").exists() {
+        remove_file_if_exists(&active.base_dir.join("library.db-wal"))?;
+        remove_file_if_exists(&active.base_dir.join("library.db-shm"))?;
+    }
+    for name in RESTORE_TARGETS {
+        let target = active.base_dir.join(name);
+        let original = old.join(name);
+        if original.exists() || !value.originals.iter().any(|v| v == name) {
+            if target.is_dir() {
+                remove_dir_if_exists(&target)?
+            } else {
+                remove_file_if_exists(&target)?
+            }
+            if original.exists() {
+                fs::rename(original, target).map_err(|_| "恢复原库文件失败，已保留中断记录")?
+            }
+        }
+    }
+    if !active.db_path.is_file() {
+        return Err("原库数据库缺失，已保留中断记录".into());
+    }
+    active.connection = Some(db::open_database(&active.db_path)?);
+    fs::remove_file(marker).map_err(|_| "原库已恢复，但中断标记未能清除")?;
+    Ok(())
+}
+
 pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), String> {
+    if active.base_dir.join(RESTORE_MARKER).exists() {
+        return Err("上次恢复中断，请先恢复原库".into());
+    }
     if !source.is_file() {
         return Err("备份文件不存在".into());
     }
@@ -187,6 +264,20 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         .prefix(".restore-old-")
         .tempdir_in(&active.base_dir)
         .map_err(|e| e.to_string())?;
+    let checkpoint = RestoreCheckpoint {
+        rollback: rollback
+            .path()
+            .file_name()
+            .ok_or("恢复路径无效")?
+            .to_string_lossy()
+            .into_owned(),
+        originals: RESTORE_TARGETS
+            .iter()
+            .filter(|name| active.base_dir.join(name).exists())
+            .map(|name| name.to_string())
+            .collect(),
+    };
+    crate::reliability::write_json(&active.base_dir.join(RESTORE_MARKER), &checkpoint)?;
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut installed: Vec<PathBuf> = Vec::new();
     drop(active.connection.take());
@@ -235,10 +326,18 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
                 safety.display()
             ));
         }
+        if fs::remove_file(active.base_dir.join(RESTORE_MARKER)).is_err() {
+            let _ = rollback.keep();
+            return Err("原库已还原，但恢复中断标记未清除；原库副本仍保留".into());
+        }
         return Err(format!(
             "{error}；已还原原库，安全备份：{}",
             safety.display()
         ));
+    }
+    if fs::remove_file(active.base_dir.join(RESTORE_MARKER)).is_err() {
+        let _ = rollback.keep();
+        return Err("恢复完成，但中断标记未清除；原库副本仍保留".into());
     }
     Ok(())
 }
@@ -346,6 +445,45 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    #[test]
+    fn interrupted_restore_requires_explicit_recovery_and_keeps_original_files() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        let db_path = base.join("library.db");
+        drop(db::open_database(&db_path).unwrap());
+        fs::create_dir(base.join("images")).unwrap();
+        fs::write(base.join("images/original.txt"), b"original").unwrap();
+        let old = base.join(".restore-old-test");
+        fs::create_dir(&old).unwrap();
+        let checkpoint = RestoreCheckpoint {
+            rollback: ".restore-old-test".into(),
+            originals: vec!["library.db".into(), "images".into()],
+        };
+        crate::reliability::write_json(&base.join(RESTORE_MARKER), &checkpoint).unwrap();
+        fs::rename(base.join("images"), old.join("images")).unwrap();
+        fs::create_dir(base.join("images")).unwrap();
+        fs::write(base.join("images/new.txt"), b"partial").unwrap();
+        let mut active = ActiveLibrary {
+            base_dir: base.to_path_buf(),
+            db_path,
+            marker: crate::state::LibraryMarker {
+                format_version: 1,
+                library_id: "test".into(),
+                name: "test".into(),
+                created_at: "now".into(),
+            },
+            connection: None,
+        };
+        assert!(base.join("images/new.txt").exists());
+        recover_interrupted_restore(&mut active).unwrap();
+        assert_eq!(
+            fs::read(base.join("images/original.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!base.join("images/new.txt").exists());
+        assert!(!base.join(RESTORE_MARKER).exists());
+        assert!(active.connection.is_some());
+    }
     #[test]
     fn restore_keeps_all_preview_directories_and_safety_backup() {
         let dir = tempdir().unwrap();

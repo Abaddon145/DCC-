@@ -7,6 +7,13 @@ const input = (title: string): NoteInput => ({ ...note, title, expectedRevision:
 const mockedInvoke = vi.hoisted(()=>vi.fn().mockResolvedValue(null));
 vi.mock("@tauri-apps/api/core",()=>({invoke:mockedInvoke}));
 describe("knowledge workspace", () => {
+  it("writes recovery before saving and preserves it on failure",async()=>{
+    const order:string[]=[];const stash=vi.fn(async()=>{order.push("recovery")});const clear=vi.fn(async()=>{order.push("clear")});const persist=vi.fn(async()=>{order.push("database");throw new Error("full")});
+    const queue=new NoteSaveQueue(note,persist,vi.fn(),{stash,clear,failed:vi.fn()});queue.enqueue(input("draft"));await expect(queue.flush()).rejects.toThrow("full");expect(order).toEqual(["recovery","database"]);expect(clear).not.toHaveBeenCalled();expect(queue.isDirty()).toBe(true);
+  });
+  it("does not repeat a successful save when recovery cleanup fails",async()=>{
+    const persist=vi.fn().mockResolvedValue({...note,revision:2});const failed=vi.fn();const queue=new NoteSaveQueue(note,persist,vi.fn(),{stash:vi.fn().mockResolvedValue(undefined),clear:vi.fn().mockRejectedValue(new Error("denied")),failed});queue.enqueue(input("draft"));await queue.flush();await queue.flush();expect(persist).toHaveBeenCalledTimes(1);expect(queue.isDirty()).toBe(false);expect(failed).toHaveBeenCalledTimes(1);
+  });
   it("projects full runtime note snapshots into the strict save and draft export contract",async()=>{
     mockedInvoke.mockClear();const client=knowledgeApi("library");
     await client.save(input("编辑"));await client.exportDraft(input("未保存草稿"),"draft.dccnotes");

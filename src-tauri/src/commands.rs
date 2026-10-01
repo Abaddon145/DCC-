@@ -843,22 +843,19 @@ pub fn get_image_data(
 }
 
 #[tauri::command]
-pub fn import_asset_media(
+pub async fn import_asset_media(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     asset_id: String,
     paths: Vec<String>,
 ) -> Result<Vec<AssetMedia>, String> {
-    let resource_dir = app.path().resource_dir().ok();
-    state.with_library_mut(|connection, base_dir| {
-        media::import(
-            connection,
-            base_dir,
-            resource_dir.as_deref(),
-            &asset_id,
-            paths,
-        )
-    })
+    let task = crate::tasks::start_library_task(
+        app.clone(),
+        state,
+        crate::tasks::TaskRequest::AssetMediaImport { asset_id, paths },
+    )?;
+    serde_json::from_value(crate::tasks::await_task_result(&app, &task.id).await?)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -867,15 +864,18 @@ pub fn delete_asset_media(state: State<AppState>, id: String) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub fn retry_asset_media(
+pub async fn retry_asset_media(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     id: String,
 ) -> Result<AssetMedia, String> {
-    let resource_dir = app.path().resource_dir().ok();
-    state.with_library_mut(|connection, base_dir| {
-        media::retry(connection, base_dir, resource_dir.as_deref(), &id)
-    })
+    let task = crate::tasks::start_library_task(
+        app.clone(),
+        state,
+        crate::tasks::TaskRequest::AssetMediaRetry { id },
+    )?;
+    serde_json::from_value(crate::tasks::await_task_result(&app, &task.id).await?)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

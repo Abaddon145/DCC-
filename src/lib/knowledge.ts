@@ -14,6 +14,7 @@ export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string}
 export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean }
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt"|"color">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
+export interface RecoveryDraft { input:NoteInput; savedAt:string }
 
 /** TypeScript structural types do not remove extra runtime fields from note snapshots. */
 function writableNoteInput(input: NoteInput): NoteInput {
@@ -24,6 +25,11 @@ function writableNoteInput(input: NoteInput): NoteInput {
 /** A client is permanently bound to one library, including delayed autosaves. */
 export function knowledgeApi(libraryId: string) {
   return {
+    stashRecovery: (input:NoteInput)=>invoke<void>("stash_note_recovery",{libraryId,input:writableNoteInput(input)}),
+    recovery: (id:string)=>invoke<RecoveryDraft|null>("get_note_recovery",{libraryId,id}),
+    clearRecovery: (id:string)=>invoke<void>("clear_note_recovery",{libraryId,id}),
+    recoveryNotes: ()=>invoke<string[]>("list_recovery_notes",{libraryId}),
+    restoreRecoveryCopy: (id:string)=>invoke<KnowledgeNote>("restore_note_recovery_copy",{libraryId,id}),
     search: (request: NoteSearch) => invoke<{ items: NoteSummary[]; total: number }>("search_notes", { libraryId, ...request }),
     reorder: (source:string,target:string,after:boolean,notebookId:string|null,query:string,favorite:boolean) => invoke<void>("reorder_notes",{libraryId,source,target,after,notebookId,query,favorite}),
     get: (id: string) => invoke<KnowledgeNote>("get_note", { libraryId, id }),
@@ -80,23 +86,36 @@ export function templateDocument(template: NoteTemplate): JSONContent {
 
 /** Serializes updates; a response can never erase edits made while its request was in flight. */
 export class NoteSaveQueue {
+  private recoveryWrites:Promise<void>=Promise.resolve();
+  private recoveryTimer:ReturnType<typeof setTimeout>|null=null;
   private current: KnowledgeNote;
   private pending: NoteInput | null = null;
   private running: Promise<void> | null = null;
-  constructor(note: KnowledgeNote, private persist: (input: NoteInput) => Promise<KnowledgeNote>, private accepted: (note: KnowledgeNote) => void) { this.current = note; }
-  enqueue(input: NoteInput) { this.pending = input; }
+  constructor(note: KnowledgeNote, private persist: (input: NoteInput) => Promise<KnowledgeNote>, private accepted: (note: KnowledgeNote) => void,private recovery?:{stash:(input:NoteInput)=>Promise<void>;clear:(id:string)=>Promise<void>;failed:(error:unknown)=>void}) { this.current = note; }
+  enqueue(input: NoteInput) {
+    this.pending = input;
+    if(this.recovery){if(this.recoveryTimer)clearTimeout(this.recoveryTimer);this.recoveryTimer=setTimeout(()=>{this.recoveryTimer=null;if(this.pending)void this.stash(this.pending).catch(error=>this.recovery?.failed(error));},250);}
+  }
+  private stash(input:NoteInput){
+    const value={...input,id:this.current.id,expectedRevision:this.current.revision};
+    this.recoveryWrites=this.recoveryWrites.catch(()=>{}).then(()=>this.recovery!.stash(value));
+    return this.recoveryWrites;
+  }
   isDirty() { return this.pending !== null || this.running !== null; }
   reset(note:KnowledgeNote) { if(this.running)throw new Error("请等待当前保存结束");this.pending=null;this.current=note; }
   flush(): Promise<void> {
     if (this.running) return this.running;
+    if(this.recoveryTimer){clearTimeout(this.recoveryTimer);this.recoveryTimer=null;}
     const drain = async () => {
       while (this.pending) {
         const input = this.pending;
         this.pending = null;
         try {
+          if(this.recovery)await this.stash(input);
           const saved = await this.persist({ ...input, id: this.current.id, expectedRevision: this.current.revision });
           this.current = saved;
           this.accepted(saved);
+          if(this.recovery&&!this.pending){this.recoveryWrites=this.recoveryWrites.catch(()=>{}).then(()=>this.recovery!.clear(this.current.id));await this.recoveryWrites.catch(error=>this.recovery?.failed(error));}
         } catch (error) {
           // Retain the newest unsaved draft, not the older failed request.
           this.pending ??= input;

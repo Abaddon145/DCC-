@@ -15,6 +15,14 @@ use uuid::Uuid;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    AssetMediaImport {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        paths: Vec<String>,
+    },
+    AssetMediaRetry {
+        id: String,
+    },
     MediaImport(MediaImportRequest),
     ModelThumbnail {
         #[serde(rename = "entryId")]
@@ -41,6 +49,8 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::AssetMediaImport { .. } => "素材预览附件导入",
+            Self::AssetMediaRetry { .. } => "素材预览附件重试",
             Self::MediaImport(_) => "媒体导入",
             Self::ModelThumbnail { .. } => "模型缩略图",
             Self::FabImport { .. } => "Fab / 表格导入",
@@ -59,6 +69,9 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::AssetMediaImport { paths, .. } if paths.len() > 100 => {
+                Err("单次预览附件导入最多 100 项".into())
+            }
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
             Self::Translation { ids } if ids.len() > 5000 => Err("单次翻译最多 5000 项".into()),
             Self::Migration(r) if r.mode != "migrate" => Err("任务中心只接受复制迁移操作".into()),
@@ -91,6 +104,7 @@ fn active(status: &str) -> bool {
     matches!(status, "queued" | "running")
 }
 struct TaskStore {
+    persistence_warning: Option<String>,
     entries: Vec<LibraryTask>,
     dispatching: bool,
     external: HashMap<String, Result<Value, String>>,
@@ -101,10 +115,23 @@ pub struct TaskRegistry {
 }
 impl TaskRegistry {
     pub fn load(path: PathBuf) -> Self {
-        let mut entries: Vec<LibraryTask> = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let (mut entries, warning): (Vec<LibraryTask>, Option<String>) = match fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(entries) => (entries, None),
+                Err(_) => (
+                    Vec::new(),
+                    Some(
+                        "任务记录损坏，原文件已保留；请导出诊断并检查备份，未自动重新执行任务"
+                            .into(),
+                    ),
+                ),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+            Err(_) => (
+                Vec::new(),
+                Some("无法读取任务记录，未自动重新执行任务".into()),
+            ),
+        };
         for task in &mut entries {
             if active(&task.status) {
                 task.status = "interrupted".into();
@@ -115,6 +142,7 @@ impl TaskRegistry {
         Self {
             path,
             store: Mutex::new(TaskStore {
+                persistence_warning: warning,
                 entries,
                 dispatching: false,
                 external: HashMap::new(),
@@ -126,12 +154,29 @@ impl TaskRegistry {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let temp = self.path.with_extension("tmp");
-        fs::write(
-            &temp,
-            serde_json::to_vec(&store.entries).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        use std::io::Write;
+        let mut file = fs::File::create(&temp).map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(&store.entries).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
         fs::rename(temp, &self.path).map_err(|e| e.to_string())
+    }
+    pub fn warning(&self) -> Option<String> {
+        self.store.lock().ok()?.persistence_warning.clone()
+    }
+
+    fn persist_checked(&self, store: &mut TaskStore) {
+        if self.persist(store).is_err() {
+            store.persistence_warning=Some("任务记录无法保存，可能磁盘空间不足；可取消的任务将安全停止，结果请勿仅依赖任务历史".into());
+            for task in store
+                .entries
+                .iter_mut()
+                .filter(|t| t.status == "running" && t.cancellable)
+            {
+                task.stop_requested = true;
+            }
+        }
     }
     pub fn complete_external(&self, id: &str, value: Result<Value, String>) -> Result<(), String> {
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
@@ -247,6 +292,9 @@ impl TaskRegistry {
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
             if let Some(existing)=store.entries.iter().find(|value|active(&value.status)&&matches!(&value.payload,TaskRequest::ModelThumbnail{entry_id:id} if id==entry_id)){return Ok((existing.clone(),false))}
         }
+        if let Some(warning) = &store.persistence_warning {
+            return Err(warning.clone());
+        }
         if store
             .entries
             .iter()
@@ -273,7 +321,14 @@ impl TaskRegistry {
         task.status = "running".into();
         task.phase = "开始处理".into();
         let task = task.clone();
-        let _ = self.persist(&store);
+        if self.persist(&store).is_err() {
+            for task in store.entries.iter_mut().filter(|t| active(&t.status)) {
+                task.status = "interrupted".into();
+            }
+            store.persistence_warning = Some("无法保存任务开始状态，未执行任务".into());
+            store.dispatching = false;
+            return None;
+        }
         Some(task)
     }
     pub fn update(
@@ -296,7 +351,7 @@ impl TaskRegistry {
                     task.result = result;
                 }
             }
-            let _ = self.persist(&store);
+            self.persist_checked(&mut store);
         }
     }
     pub fn progress(&self, label: &str, current: usize, total: usize, name: String, phase: String) {
@@ -320,7 +375,7 @@ impl TaskRegistry {
             {
                 task.result = Some(result);
             }
-            let _ = self.persist(&store);
+            self.persist_checked(&mut store);
         }
     }
     pub fn should_stop(&self, id: &str) -> bool {
@@ -375,9 +430,14 @@ impl TaskRegistry {
                     Err(error) => task.message = error,
                 };
             }
-            let _ = self.persist(&store);
+            self.persist_checked(&mut store);
         }
     }
+}
+
+#[tauri::command]
+pub fn get_task_warning(state: tauri::State<AppState>) -> Option<String> {
+    state.tasks.warning()
 }
 
 #[tauri::command]
@@ -529,6 +589,12 @@ pub fn retry_library_task(
     if active(&previous.status) {
         return Err("任务仍在执行".into());
     }
+    if matches!(previous.payload, TaskRequest::AssetMediaImport { .. }) {
+        return Err(
+            "请先在素材详情检查已导入附件，再仅导入缺少的文件；为避免重复附件，不重放中断批次"
+                .into(),
+        );
+    }
     let mut payload = previous.payload;
     if let TaskRequest::MediaImport(request) = &mut payload {
         if let Some(rows) = previous
@@ -559,6 +625,17 @@ async fn dispatch(app: AppHandle) {
         }
     }
 }
+
+pub async fn await_task_result(app: &AppHandle, id: &str) -> Result<Value, String> {
+    loop {
+        let task = app.state::<AppState>().tasks.get(id)?;
+        match task.status.as_str() {
+            "completed" => return task.result.ok_or("任务缺少结果".into()),
+            "failed" | "stopped" | "interrupted" => return Err(task.message),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
+}
 fn open_media_worker_connection(path: &Path) -> Result<rusqlite::Connection, String> {
     let connection = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
     connection
@@ -577,6 +654,55 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        payload @ (TaskRequest::AssetMediaImport { .. } | TaskRequest::AssetMediaRetry { .. }) => {
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<AppState>();
+                let (base, path) = state.with_active_mut(|active| {
+                    Ok((active.base_dir.clone(), active.db_path.clone()))
+                })?;
+                let mut connection = open_media_worker_connection(&path)?;
+                let resource = app.path().resource_dir().ok();
+                let stop_app = app.clone();
+                let stop_id = task.id.clone();
+                let _control = crate::media::ProcessControl::new(move || {
+                    stop_app.state::<AppState>().tasks.should_stop(&stop_id)
+                });
+                match payload {
+                    TaskRequest::AssetMediaImport { asset_id, paths } => {
+                        let mut imported = Vec::new();
+                        let total = paths.len();
+                        for (index, path) in paths.into_iter().enumerate() {
+                            if state.tasks.should_stop(&task.id) {
+                                break;
+                            }
+                            imported.extend(crate::media::import(
+                                &mut connection,
+                                &base,
+                                resource.as_deref(),
+                                &asset_id,
+                                vec![path],
+                            )?);
+                            state.tasks.update(
+                                &task.id,
+                                index + 1,
+                                total,
+                                String::new(),
+                                "复制 / 生成预览".into(),
+                                serde_json::to_value(&imported).ok(),
+                            );
+                        }
+                        serde_json::to_value(imported).map_err(|e| e.to_string())
+                    }
+                    TaskRequest::AssetMediaRetry { id } => serde_json::to_value(
+                        crate::media::retry(&mut connection, &base, resource.as_deref(), &id)?,
+                    )
+                    .map_err(|e| e.to_string()),
+                    _ => unreachable!(),
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
         TaskRequest::ModelThumbnail { entry_id } => {
             let started = std::time::Instant::now();
             loop {
@@ -928,6 +1054,33 @@ mod tests {
         assert_eq!(restored.get(&task.id).unwrap().status, "interrupted");
         assert!(!restored.busy());
         assert!(restored.list("other").unwrap().is_empty());
+    }
+    #[test]
+    fn corrupt_journal_is_preserved_and_blocks_new_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        fs::write(&path, b"broken journal").unwrap();
+        let registry = TaskRegistry::load(path.clone());
+        assert!(registry.warning().is_some());
+        assert!(registry
+            .submit("library".into(), TaskRequest::Links)
+            .is_err());
+        assert_eq!(fs::read(path).unwrap(), b"broken journal");
+    }
+    #[test]
+    fn failed_checkpoint_stops_cancellable_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (task, _) = registry
+            .submit("library".into(), TaskRequest::Links)
+            .unwrap();
+        registry.claim().unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        registry.update(&task.id, 1, 2, "".into(), "检查".into(), None);
+        assert!(registry.warning().is_some());
+        assert!(registry.should_stop(&task.id));
     }
     #[test]
     fn stopped_queue_is_not_claimed_and_maintenance_cannot_be_cancelled() {
