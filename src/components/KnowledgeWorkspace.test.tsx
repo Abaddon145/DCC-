@@ -4,6 +4,9 @@ import KnowledgeWorkspace from "./KnowledgeWorkspace";
 import { templateDocument, type KnowledgeNote } from "../lib/knowledge";
 import { withKnowledgeBarrier } from "../lib/noteSaveGuard";
 import MindElixir from "mind-elixir";
+import App from "../App";
+import { StrictMode } from "react";
+import {defaultGlobalPreferences,defaultLibraryPreferences} from "../lib/personalization";
 
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),notify:vi.fn()}));
 Object.defineProperty(window,"matchMedia",{configurable:true,value:()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}})});
@@ -28,6 +31,38 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(cleanup);
 describe("knowledge editing",()=>{
+  it("restores the knowledge workspace through the real application startup",async()=>{
+    vi.stubGlobal("ResizeObserver",class {observe(){}unobserve(){}disconnect(){}});
+    const original=mocks.invoke.getMockImplementation()!;
+    const context={activeId:note.id,tabs:[{id:note.id,title:note.title,layout:"document",view:"edit",from:1,to:1,scroll:0}]};
+    mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>{
+      if(cmd==="get_workspace_context")return Promise.resolve({libraryId:"test-library",enabled:true,value:args?.moduleId==="navigation"?{view:"knowledge"}:args?.moduleId==="knowledge"?context:null});
+      if(cmd==="get_personalization_settings")return Promise.resolve({global:defaultGlobalPreferences,library:{...defaultLibraryPreferences,workspaceContexts:{navigation:{view:"knowledge"},knowledge:context}}});
+      if(cmd==="get_translation_settings")return Promise.resolve({contentLanguage:"zh-CN"});
+      if(cmd==="get_library_meta")return Promise.resolve({categories:[],filters:{tags:[],dccTools:[],versions:[],formats:[],licenses:[]},totalAssets:723});
+      if(cmd==="list_smart_collections"||cmd==="list_library_tasks")return Promise.resolve([]);
+      if(cmd==="search_assets")return Promise.resolve({items:[],total:0});
+      return original(cmd,args);
+    });
+    render(<StrictMode><App/></StrictMode>);
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,800));});
+    expect(mocks.invoke.mock.calls.length).toBeLessThan(60);
+    fireEvent.click(screen.getByRole("button",{name:"阅读"}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeDisabled());
+    fireEvent.click(screen.getByRole("button",{name:/^素材库$/}));
+    await waitFor(()=>expect(screen.queryByRole("textbox",{name:"笔记标题"})).not.toBeInTheDocument());
+  });
+  it.each(["document","outline","mindMap"])("keeps restored %s startup responsive without repeated IPC or writes",async layout=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>cmd==="get_workspace_context"?Promise.resolve({libraryId:"test-library",enabled:true,value:{activeId:note.id,tabs:[{id:note.id,title:note.title,layout,view:"edit",from:1,to:1,scroll:0}]}}):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    if(layout!=="document")await screen.findByRole("region",{name:"整篇笔记结构"});
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,800));});
+    expect(mocks.invoke.mock.calls.length).toBeLessThan(30);
+    expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button",{name:"阅读"}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeDisabled());
+  });
   it("writes real mind-map branch moves back to canonical headings and can undo them",async()=>{
     const original=MindElixir.prototype.init;let mind:MindElixir|null=null;
     const init=vi.spyOn(MindElixir.prototype,"init").mockImplementation(function(this:MindElixir,data){mind=this;return original.call(this,data);});
