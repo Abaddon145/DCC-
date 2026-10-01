@@ -8,6 +8,11 @@ import { api } from "./lib/api";
 import { applyGlobalPreferences, defaultGlobalPreferences } from "./lib/personalization";
 import { listen } from "@tauri-apps/api/event";
 import type { GlobalPreferences } from "./types";
+import { WorkspaceBoundary } from "./components/LoadFeedback";
+import { recordDiagnostic } from "./lib/diagnostics";
+
+window.addEventListener("error",()=>recordDiagnostic("unhandled-error"));
+window.addEventListener("unhandledrejection",()=>recordDiagnostic("unhandled-error"));
 
 applyGlobalPreferences(defaultGlobalPreferences);
 if ("__TAURI_INTERNALS__" in window) {
@@ -18,6 +23,6 @@ if ("__TAURI_INTERNALS__" in window) {
 const referenceWindow = "__TAURI_INTERNALS__" in window && getCurrentWebviewWindow().label === "reference-board";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {referenceWindow ? <ReferenceWindowApp /> : <App />}
+    <WorkspaceBoundary>{referenceWindow ? <ReferenceWindowApp /> : <App />}</WorkspaceBoundary>
   </StrictMode>
 );

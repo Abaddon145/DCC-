@@ -1,0 +1,19 @@
+import { useEffect,useRef,useState } from "react";
+import { open,save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { api } from "../lib/api";
+import { readDiagnostics,recordDiagnostic } from "../lib/diagnostics";
+type Policy={enabled:boolean;directory:string;intervalHours:number;keep:number};
+export function AutomaticBackupService({notify}:{notify:(text:string,error?:boolean)=>void}){
+ const notifyRef=useRef(notify);notifyRef.current=notify;
+ useEffect(()=>{if(!("__TAURI_INTERNALS__" in window))return;let alive=true;let running=false;let retryAfter=0;
+ const check=async()=>{if(!alive||running||Date.now()<retryAfter)return;running=true;try{const path=await invoke<string|null>("get_automatic_backup_due");if(path&&alive){await api.exportBackup(path);await invoke("finish_automatic_backup",{path});notifyRef.current("自动备份已完成，仅轮换本软件生成的自动备份")}}catch{recordDiagnostic("save-failure");notifyRef.current("自动备份未完成，请检查备份目录、磁盘空间或任务中心；10 分钟后再检查",true);retryAfter=Date.now()+600000}finally{running=false}};
+ const timer=setInterval(()=>void check(),60000);void check();return()=>{alive=false;clearInterval(timer)}},[]);return null;
+}
+export function ReliabilitySettings({notify,libraryId}:{libraryId:string;notify:(text:string,error?:boolean)=>void}){
+ const [interrupted,setInterrupted]=useState(false);
+ const [policy,setPolicy]=useState<Policy|null>(null),[error,setError]=useState(false),[busy,setBusy]=useState(false);
+ const load=()=>{setError(false);void invoke<Policy>("get_automatic_backup_policy",{libraryId}).then(setPolicy).catch(()=>setError(true))};useEffect(load,[]);useEffect(()=>{void invoke<boolean>("get_interrupted_restore").then(setInterrupted).catch(()=>{})},[]);
+ const exportLog=async()=>{if(busy)return;setBusy(true);try{const path=await save({defaultPath:"栈藏-脱敏诊断.json",filters:[{name:"JSON",extensions:["json"]}]});if(path){await invoke("export_diagnostics",{path,events:readDiagnostics()});notify("诊断已导出，不包含正文、文件路径、原始异常或凭据")}}catch(e){notify(String(e),true)}finally{setBusy(false)}};
+ return <section><h3>稳定性与恢复</h3>{interrupted&&<div className="read-failure"><span>检测到恢复中断。库内修改已暂停，原库副本仍保留。</span><button disabled={busy} onClick={()=>{if(!window.confirm("恢复到开始恢复备份之前的原库？中断操作安装的内容将被替换。"))return;setBusy(true);void invoke("recover_interrupted_restore").then(()=>window.location.reload()).catch(e=>notify(String(e),true)).finally(()=>setBusy(false))}}>确认恢复原库</button></div>}<p>未保存笔记提供独立恢复副本；中断在线任务需手动继续。</p><button className="secondary-button" disabled={busy} onClick={()=>void exportLog()}>导出脱敏诊断</button><h3>自动完整备份</h3>{error?<button onClick={load}>重新读取备份设置</button>:!policy?<p role="status">正在读取备份设置…</p>:<><label className="setting-row check"><span>启用自动备份（默认关闭）</span><input type="checkbox" checked={policy.enabled} onChange={e=>setPolicy({...policy,enabled:e.target.checked})}/></label><button className="secondary-button" disabled={busy} onClick={()=>void open({directory:true,multiple:false}).then(path=>{if(typeof path==="string")setPolicy({...policy,directory:path})})}>选择备份目录</button><p>{policy.directory||"尚未设置目录"}</p><label className="setting-row"><span>间隔（小时）</span><input type="number" min={1} max={168} value={policy.intervalHours} onChange={e=>setPolicy({...policy,intervalHours:Number(e.target.value)})}/></label><label className="setting-row"><span>保留自动备份数量</span><input type="number" min={1} max={20} value={policy.keep} onChange={e=>setPolicy({...policy,keep:Number(e.target.value)})}/></label><p>仅在应用打开、素材库有变化且没有任务执行时备份；悬浮参考板打开时跳过。完整备份含媒体原件，仅清理当前库的旧自动备份，不清理手动备份。</p><button className="primary-button" disabled={busy||(policy.enabled&&!policy.directory)} onClick={()=>{if(busy)return;setBusy(true);void invoke<Policy>("save_automatic_backup_policy",{...policy,libraryId}).then(value=>{setPolicy(value);notify("自动备份设置已保存")}).catch(e=>notify(String(e),true)).finally(()=>setBusy(false))}}>保存自动备份设置（立即生效）</button></>}</section>;
+}

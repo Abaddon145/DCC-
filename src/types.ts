@@ -11,6 +11,8 @@ export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAd
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | { kind: "assetMediaImport"; request: { assetId: string; paths: string[] } }
+  | { kind: "assetMediaRetry"; request: { id: string } }
   | { kind: "modelThumbnail"; request: { entryId:string } }
   | { kind: "mediaImport"; request: MediaImportRequest }
   | { kind: "fabImport"; request: { path: string; mapping: ImportMapping; autoTranslate: boolean } }

@@ -1,3 +1,6 @@
+import { AutomaticBackupService } from "./components/ReliabilitySettings";
+import { LoadFeedback, ReadFailure, WorkspaceBoundary } from "./components/LoadFeedback";
+import { recordDiagnostic } from "./lib/diagnostics";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -54,6 +57,7 @@ export default function App() {
   const [queryInput, setQueryInput] = useState("");
   const [items, setItems] = useState<AssetCard[]>([]);
   const [total, setTotal] = useState(0);
+  const [searchFailed,setSearchFailed]=useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssetDetail | null>(null);
@@ -143,13 +147,13 @@ export default function App() {
   const refreshSmartCollections = useCallback(async () => { try { setSmartCollections(await api.listSmartCollections()); } catch (error) { notify(`读取智能集合失败：${String(error)}`, true); } }, [notify]);
 
   const runSearch = useCallback(async (next: SearchRequest, append = false) => {
-    const version = ++requestVersion.current; setLoading(true);
+    const version = ++requestVersion.current; setLoading(true);setSearchFailed(false);
     try {
       const page = append ? await api.search(next) : await readContextPage(api.search,{...next,limit:Math.min(next.limit,200)},next.limit,()=>version===requestVersion.current);
       if (version !== requestVersion.current) return;
       setItems(prev => append ? [...prev, ...page.items.filter(item => !prev.some(old => old.id === item.id))] : page.items);
       setTotal(page.total);
-    } catch (error) { if (version === requestVersion.current) notify(`搜索失败：${String(error)}`, true); }
+    } catch (error) { if (version === requestVersion.current) {setSearchFailed(true);recordDiagnostic("read-failure");notify(`搜索失败：${String(error)}`, true);} }
     finally { if (version === requestVersion.current) setLoading(false); }
   }, [notify]);
 
@@ -241,9 +245,9 @@ export default function App() {
     if (next === "health") refreshHealth();
   };
   const loadMore = useCallback(() => {
-    if (loading || items.length >= total) return;
+    if (searchFailed || loading || items.length >= total) return;
     runSearch({ ...request, offset: items.length }, true);
-  }, [loading, items.length, total, request, runSearch]);
+  }, [searchFailed,loading, items.length, total, request, runSearch]);
 
   const refreshHealth = async () => { setHealthLoading(true); try { setHealth(await api.getHealth()); } catch (error) { notify(String(error), true); } finally { setHealthLoading(false); } };
 
@@ -692,8 +696,8 @@ export default function App() {
       <div className="sidebar-footer"><TaskCenter notify={notify}/><button onClick={() => setShowSettings(true)}><Settings size={15} />设置中心</button><button onClick={exportBackup}><DatabaseBackup size={15} />导出整库备份</button><button onClick={restoreBackup}><Download size={15} />从备份恢复</button><span>本地素材库 · 离线可用</span></div>
     </aside>
 
-    <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}>
-      {view === "knowledge" ? <Suspense fallback={<div className="knowledge-loading">正在加载知识库…</div>}><KnowledgeWorkspace key={libraryEpoch} initialNoteId={knowledgeInitialId} onOpenProject={enabledIds.has("projects")?id=>{setKnowledgeProjectId(id);changeView("projects");}:undefined} notify={notify}/></Suspense> : view === "aiAssistant" ? <AiAssistant key={libraryEpoch} settingsOpen={showSettings} launch={aiLaunch} language={contentLanguage} notify={notify} onChanged={() => { void refreshAll(); setProjectRefreshKey(v => v + 1); }} onSettings={() => setShowSettings(true)} /> : mediaKind ? <MediaLibraryView key={`${libraryEpoch}-${mediaKind}`} shortcuts={personalization.global.shortcuts} onAi={enabledIds.has("aiAssistant") ? ids => openAi({ kind: "organize", mediaIds: ids }) : undefined} kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub initialProjectId={knowledgeProjectId} key={libraryEpoch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "plan", projectId: id }) : undefined} contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} onEditAsset={id=>{changeView("library");void api.getAsset(id,contentLanguage).then(asset=>{setSelectedId(id);setDetail(asset);setEditor("edit")}).catch(error=>notify(String(error),true))}} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} onOpenNote={id=>{setKnowledgeInitialId(id);changeView("knowledge");}} /> : <div className="asset-workspace-layout">
+    <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}><WorkspaceBoundary key={view}>
+      {view === "knowledge" ? <Suspense fallback={<LoadFeedback label="正在加载知识库…" skeleton/>}><KnowledgeWorkspace key={libraryEpoch} initialNoteId={knowledgeInitialId} onOpenProject={enabledIds.has("projects")?id=>{setKnowledgeProjectId(id);changeView("projects");}:undefined} notify={notify}/></Suspense> : view === "aiAssistant" ? <AiAssistant key={libraryEpoch} settingsOpen={showSettings} launch={aiLaunch} language={contentLanguage} notify={notify} onChanged={() => { void refreshAll(); setProjectRefreshKey(v => v + 1); }} onSettings={() => setShowSettings(true)} /> : mediaKind ? <MediaLibraryView key={`${libraryEpoch}-${mediaKind}`} shortcuts={personalization.global.shortcuts} onAi={enabledIds.has("aiAssistant") ? ids => openAi({ kind: "organize", mediaIds: ids }) : undefined} kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub initialProjectId={knowledgeProjectId} key={libraryEpoch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "plan", projectId: id }) : undefined} contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} onEditAsset={id=>{changeView("library");void api.getAsset(id,contentLanguage).then(asset=>{setSelectedId(id);setDetail(asset);setEditor("edit")}).catch(error=>notify(String(error),true))}} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} onOpenNote={id=>{setKnowledgeInitialId(id);changeView("knowledge");}} /> : <div className="asset-workspace-layout">
       <ResizableContextPane ariaLabel="素材分类" className="asset-context-pane" width={personalization.library.contextPaneWidths.library || 248} defaultWidth={248} collapsed={personalization.library.collapsedContextPanes.includes("library")} onResizeEnd={width => setContextPaneWidth("library", width)} onCollapsedChange={collapsed => setContextPaneCollapsed("library", collapsed)}>
         <div className="asset-context-heading"><strong>素材导航</strong><span>{meta.totalAssets.toLocaleString("zh-CN")} 项</span></div>
         <div className="asset-context-shortcuts">{enabledIds.has("favorites") && <button className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={15} />我的收藏</button>}{enabledIds.has("recent") && <button className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={15} />最近查看</button>}</div>
@@ -706,9 +710,10 @@ export default function App() {
       {view === "health" && <HealthPanel summary={health} activeIssue={request.healthIssue || null} loading={healthLoading} linkCheckRunning={linkCheckRunning} linkProgress={linkProgress} onSelect={issue => patchRequest({ healthIssue: issue })} onRefresh={refreshHealth} onCheckLinks={() => void checkAllLinks()} onCancelLinkCheck={() => void cancelLinkCheck()} />}
       <FilterBar request={request} options={meta.filters} onChange={patchRequest} />
       {selectionMode && <><SelectionSummary ids={selectedIds} filterKey={JSON.stringify(request)} getMatchingIds={async()=> (await api.selectAssetIds({...request,offset:0,limit:1})).ids}/><BatchToolbar onAi={enabledIds.has("aiAssistant") ? () => openAi({ kind: "organize", assetIds: [...selectedIds] }) : undefined} count={selectedIds.size} totalCount={total} selectingAll={selectingAll} categories={meta.categories} onSelectAll={() => void selectAllResults()} onClear={() => setSelectedIds(new Set())} onExit={() => { setSelectionMode(false); setSelectedIds(new Set()); }} onAddToReference={() => void addSelectionToReference()} onAddToProject={() => selectedIds.size && setProjectPicker([...selectedIds])} onTranslate={() => void translateSelected([...selectedIds])} translating={translatingBatch} onApply={applyBatch} /></>}
-      <div className="grid-scroll" ref={scrollRef}><AssetGrid items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onContextMenu={openAssetContextMenu} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
+      {searchFailed&&<ReadFailure onRetry={()=>void runSearch({...request,offset:0})}/>}
+      <div className="grid-scroll" ref={scrollRef}><AssetGrid blocked={searchFailed} items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onContextMenu={openAssetContextMenu} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
       </section></div>}
-    </main>
+    </WorkspaceBoundary></main>
 
     {!mediaKind && view !== "knowledge" && view !== "aiAssistant" && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <>{selectedId && <button className="inspector-backdrop" aria-label="关闭素材详情" onClick={closeAssetDetail} />}<DetailPanel onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "organize", assetIds: [id] }) : undefined} asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={closeAssetDetail} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} /></>}
     {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onMediaImported={async id=>{setDetail(await api.getAsset(id,contentLanguage));await refreshAll();}} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
@@ -722,6 +727,7 @@ export default function App() {
     {activeDrag && dragPoint && <div className="library-drag-preview active" style={{ left: dragPoint.x + 14, top: dragPoint.y + 14 }}>{dragPreviewText(activeDrag)}</div>}
     {showCommandPalette && <CommandPalette commands={paletteCommands} onClose={() => setShowCommandPalette(false)} />}
     {assetContextMenu && <ContextMenu {...assetContextMenu} onClose={() => setAssetContextMenu(null)} />}
+    <AutomaticBackupService notify={notify}/>
     <div className="toast-stack">{toasts.map(toast => <div key={toast.id} className={`toast ${toast.error ? "error" : ""}`}><span>{toast.message}</span>{toast.action && <button onClick={() => { setToasts(previous => previous.filter(item => item.id !== toast.id)); void toast.action?.(); }}>{toast.actionLabel}</button>}</div>)}</div>
   </div>;
 }

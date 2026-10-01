@@ -109,6 +109,12 @@ struct PendingMoveUndo {
 }
 
 impl AppState {
+    pub fn config_directory(&self) -> PathBuf {
+        self.settings_path
+            .parent()
+            .expect("fixed settings path")
+            .to_path_buf()
+    }
     pub fn note_appearance(&self) -> Result<serde_json::Value, String> {
         Ok(self
             .settings
@@ -158,7 +164,10 @@ impl AppState {
             PathBuf::from(&settings.active_library)
         };
         let (active, warning) = match open_library(&desired) {
-            Ok(active) => (active, None),
+            Ok(active) => {
+                let warning=active.base_dir.join(crate::backup::RESTORE_MARKER).exists().then(||"上次素材库恢复中断，已暂停库内操作。请在设置中心→数据与素材库→稳定性与恢复，确认恢复原库。未自动重试。".to_string());
+                (active, warning)
+            }
             Err(error) if desired != default_path => (
                 open_library(&default_path)?,
                 Some(format!("上次使用的素材库无法打开，已回到默认库：{error}")),
@@ -757,6 +766,9 @@ impl AppState {
 }
 
 fn ensure_library(path: &Path, name: &str, allow_legacy: bool) -> Result<(), String> {
+    if path.join(crate::backup::RESTORE_MARKER).exists() {
+        return Ok(());
+    }
     fs::create_dir_all(path).map_err(|e| format!("创建素材库目录失败：{e}"))?;
     fs::create_dir_all(path.join("images/originals")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("images/thumbnails")).map_err(|e| e.to_string())?;
@@ -799,6 +811,14 @@ fn validate_library(path: &Path) -> Result<(), String> {
 }
 
 fn open_library(path: &Path) -> Result<ActiveLibrary, String> {
+    if path.join(crate::backup::RESTORE_MARKER).exists() {
+        return Ok(ActiveLibrary {
+            base_dir: path.to_path_buf(),
+            db_path: path.join("library.db"),
+            marker: read_marker(path)?,
+            connection: None,
+        });
+    }
     validate_library(path)?;
     let marker = read_marker(path)?;
     let db_path = path.join("library.db");

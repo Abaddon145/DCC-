@@ -21,6 +21,7 @@ pub fn migrate(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction().map_err(error)?;
     tx.execute_batch(include_str!("notes_schema.sql"))
         .map_err(error)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS knowledge_reviews(note_id TEXT PRIMARY KEY REFERENCES knowledge_notes(id) ON DELETE CASCADE,due_date TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('waiting','mastered'))); CREATE INDEX IF NOT EXISTS idx_knowledge_reviews_due ON knowledge_reviews(status,due_date);").map_err(error)?;
     let has_color = tx
         .prepare("PRAGMA table_info(knowledge_notes)")
         .map_err(error)?
@@ -34,7 +35,7 @@ pub fn migrate(db: &Connection) -> Result<()> {
         tx.execute_batch("ALTER TABLE knowledge_notes ADD COLUMN navigation_color TEXT;")
             .map_err(error)?;
     }
-    tx.execute("UPDATE schema_meta SET value='16' WHERE key='schema_version' AND CAST(value AS INTEGER)<16", []).map_err(error)?;
+    tx.execute("UPDATE schema_meta SET value='17' WHERE key='schema_version' AND CAST(value AS INTEGER)<17", []).map_err(error)?;
     tx.commit().map_err(error)
 }
 
@@ -953,7 +954,7 @@ mod tests {
             db.query_row("SELECT value FROM schema_meta", [], |r| r
                 .get::<_, String>(0))
                 .unwrap(),
-            "16"
+            "17"
         );
     }
     #[test]

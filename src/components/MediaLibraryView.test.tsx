@@ -14,6 +14,18 @@ vi.mock("./ModelViewer", () => ({ ModelViewer: ({ onReady }: { onReady?: (captur
 vi.mock("@tanstack/react-virtual", () => ({ useVirtualizer: ({ count }: { count: number }) => ({ getTotalSize: () => count * 236, getVirtualItems: () => count ? [{ key: 0, index: 0, start: 0 }] : [] }) }));
 
 describe("MediaLibraryView folder creation", () => {
+  it("shows read failures with retry instead of an empty library", async () => {
+    let failed=false;
+    vi.mocked(api.searchMediaEntries).mockImplementation(async request=>{
+      if(request.limit>1&&!failed){failed=true;throw new Error("读取失败");}
+      return {items:[],total:0,offset:0,limit:request.limit};
+    });
+    render(<MediaLibraryView kind="image" onNotify={vi.fn()} paneWidth={220} paneCollapsed={false} onPaneWidthChange={vi.fn()} onPaneCollapsedChange={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "重新读取" })).toBeInTheDocument();
+    expect(screen.queryByText("还没有媒体")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(await screen.findByText("还没有媒体")).toBeInTheDocument();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
