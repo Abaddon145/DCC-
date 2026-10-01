@@ -47,6 +47,8 @@ struct AppSettings {
     global_preferences: GlobalPreferences,
     #[serde(default)]
     translation_preferences: crate::translation_service::TranslationPreferences,
+    #[serde(default)]
+    note_appearance: serde_json::Value,
 }
 
 fn default_language() -> String {
@@ -66,6 +68,7 @@ impl Default for AppSettings {
             fab_auto_translate: true,
             global_preferences: GlobalPreferences::default(),
             translation_preferences: crate::translation_service::TranslationPreferences::default(),
+            note_appearance: serde_json::Value::Null,
         }
     }
 }
@@ -78,6 +81,7 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub knowledge_editing: AtomicBool,
     pub tasks: crate::tasks::TaskRegistry,
     pub translation_service: crate::translation_service::TranslationService,
     settings_path: PathBuf,
@@ -105,6 +109,36 @@ struct PendingMoveUndo {
 }
 
 impl AppState {
+    pub fn note_appearance(&self) -> Result<serde_json::Value, String> {
+        Ok(self
+            .settings
+            .lock()
+            .map_err(|_| "设置锁损坏")?
+            .note_appearance
+            .clone())
+    }
+    pub fn save_note_appearance(&self, value: serde_json::Value) -> Result<(), String> {
+        if !value.is_object() || value.to_string().len() > 4096 {
+            return Err("知识库外观设置无效".into());
+        }
+        for key in ["background", "text", "accent"] {
+            let color = value[key].as_str().ok_or("颜色无效")?;
+            if color.len() != 7
+                || !color.starts_with('#')
+                || !color[1..].chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err("颜色仅支持 #RRGGBB".into());
+            }
+        }
+        let mut settings = self.settings.lock().map_err(|_| "设置锁损坏")?;
+        let previous = settings.note_appearance.clone();
+        settings.note_appearance = value;
+        if let Err(error) = write_settings(&self.settings_path, &settings) {
+            settings.note_appearance = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
     pub fn initialize() -> Result<Self, String> {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -136,6 +170,7 @@ impl AppState {
         write_settings(&settings_path, &settings)?;
         Ok(Self {
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
+            knowledge_editing: AtomicBool::new(false),
             translation_service: crate::translation_service::TranslationService::open(
                 &config_dir.join("translation-cache.sqlite"),
             )?,
@@ -614,6 +649,7 @@ impl AppState {
         touch_recent(&mut settings, &target);
         write_settings(&self.settings_path, &settings)?;
         *active = next;
+        crate::note_moves::clear_undo();
         drop(settings);
         drop(active);
         self.locations()
@@ -802,6 +838,10 @@ fn migrate_library(
             &stage.join("media-library"),
         )?;
         copy_tree_verified(&active.base_dir.join("media"), &stage.join("media"))?;
+        copy_tree_verified(
+            &active.base_dir.join("note-attachments"),
+            &stage.join("note-attachments"),
+        )?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {
             format_version: 1,
@@ -980,6 +1020,7 @@ mod tests {
     fn test_state(path: &Path) -> AppState {
         ensure_library(path, "测试库", false).unwrap();
         AppState {
+            knowledge_editing: AtomicBool::new(false),
             tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
             translation_service: crate::translation_service::TranslationService::open(
                 &path.join("translation-cache.sqlite"),

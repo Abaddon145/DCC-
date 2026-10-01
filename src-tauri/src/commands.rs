@@ -233,8 +233,12 @@ pub fn get_project(
     id: String,
     content_language: Option<String>,
     mark_opened: Option<bool>,
+    paged: Option<bool>,
 ) -> Result<CreativeProject, String> {
     state.with_library(|connection, _| {
+        if paged.unwrap_or(false) {
+            return projects::get_project_workspace(connection, &id, mark_opened.unwrap_or(true));
+        }
         projects::get_project(
             connection,
             &id,
@@ -242,6 +246,46 @@ pub fn get_project(
             mark_opened.unwrap_or(true),
         )
     })
+}
+
+#[tauri::command]
+pub fn list_project_assets(
+    state: State<AppState>,
+    id: String,
+    content_language: String,
+    query: String,
+    status: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectAssetLink>, String> {
+    state.with_library(|db, _| {
+        projects::asset_page(
+            db,
+            &id,
+            &content_language,
+            &query,
+            status.as_deref(),
+            offset,
+            limit,
+        )
+    })
+}
+#[tauri::command]
+pub fn list_project_tasks(
+    state: State<AppState>,
+    id: String,
+    status: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<ProjectTask>, String> {
+    state.with_library(|db, _| projects::task_page(db, &id, status.as_deref(), offset, limit))
+}
+#[tauri::command]
+pub fn get_project_unit_impact(
+    state: State<AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    state.with_library(|db, _| projects::unit_impact(db, &id))
 }
 
 #[tauri::command]
@@ -510,6 +554,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "audio",
         "video",
         "projects",
+        "knowledge",
     ]
     .contains(&module_id)
     {
@@ -2024,6 +2069,14 @@ pub fn is_reference_window_open(app: AppHandle, state: State<AppState>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn knowledge_workspace_context_is_a_registered_browsing_module() {
+        assert_eq!(validate_workspace_module("knowledge"), Ok(()));
+        assert_eq!(
+            validate_workspace_module("not-a-module"),
+            Err("未知的浏览模块".into())
+        );
+    }
     #[test]
     fn parses_baidu_share_text() {
         let parsed =

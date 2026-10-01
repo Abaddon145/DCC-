@@ -28,9 +28,14 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
         value.shortcuts.entry(command).or_insert(shortcut);
     }
     let mut used = HashSet::new();
-    for shortcut in value.shortcuts.values() {
+    for (command, shortcut) in &value.shortcuts {
         let normalized = shortcut.trim().to_ascii_lowercase();
-        if normalized.is_empty() || !used.insert(normalized) {
+        let scope = if command.starts_with("note") {
+            "note"
+        } else {
+            "app"
+        };
+        if normalized.is_empty() || !used.insert(format!("{scope}:{normalized}")) {
             return Err("快捷键不能为空或重复".into());
         }
     }
@@ -46,7 +51,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
             "audioLibrary",
             "videoLibrary",
         ],
-        &["projects", "aiAssistant", "reference"],
+        &["projects", "knowledge", "aiAssistant", "reference"],
         &["smartCollections", "favorites", "recent"],
         &["tagManager", "health", "trash"],
     ];

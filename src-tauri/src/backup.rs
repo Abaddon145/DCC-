@@ -59,7 +59,13 @@ pub fn export_library_with_progress(
         .execute("VACUUM INTO ?1", [snapshot_text])
         .map_err(|e| format!("创建数据库快照失败：{e}"))?;
     let mut sources: Vec<(PathBuf, String)> = vec![(snapshot, "library.db".into())];
-    for managed_dir in ["images", "reference-boards", "media-library", "media"] {
+    for managed_dir in [
+        "images",
+        "reference-boards",
+        "media-library",
+        "media",
+        "note-attachments",
+    ] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
@@ -151,7 +157,13 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         })
         .map_err(|e| e.to_string())?;
     drop(check);
-    let directories = ["images", "reference-boards", "media-library", "media"];
+    let directories = [
+        "images",
+        "reference-boards",
+        "media-library",
+        "media",
+        "note-attachments",
+    ];
     for name in directories {
         if stage.path().join(name).exists() {
             copy_tree(&stage.path().join(name), &prepared.path().join(name))?;
@@ -340,12 +352,19 @@ mod tests {
         let base = dir.path().join("library");
         fs::create_dir_all(base.join("media/asset/originals")).unwrap();
         fs::write(base.join("media/asset/originals/model.glb"), b"model").unwrap();
+        fs::create_dir_all(base.join("note-attachments/note")).unwrap();
+        fs::write(
+            base.join("note-attachments/note/learning.png"),
+            b"note image",
+        )
+        .unwrap();
         let db_path = base.join("library.db");
         let connection = db::open_database(&db_path).unwrap();
         connection.execute("INSERT INTO categories(id,name,sort_order,created_at) VALUES('test','环境',0,'now')",[]).unwrap();
         let output = dir.path().join("backup.dccassetlib");
         export_library(&connection, &base, &output).unwrap();
         fs::write(base.join("media/asset/originals/model.glb"), b"changed").unwrap();
+        fs::write(base.join("note-attachments/note/learning.png"), b"changed").unwrap();
         connection.execute("DELETE FROM categories", []).unwrap();
         let marker = crate::state::LibraryMarker {
             format_version: 1,
@@ -360,6 +379,10 @@ mod tests {
             connection: Some(connection),
         };
         restore_library(&mut active, &output).unwrap();
+        assert_eq!(
+            fs::read(base.join("note-attachments/note/learning.png")).unwrap(),
+            b"note image"
+        );
         assert_eq!(
             fs::read(base.join("media/asset/originals/model.glb")).unwrap(),
             b"model"

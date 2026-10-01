@@ -296,6 +296,17 @@ impl TranslationService {
             .await
     }
     // URL and key are private implementation inputs. The command surface never accepts them.
+    #[cfg(test)]
+    pub(crate) async fn creative_json_fixture(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        url: &str,
+    ) -> Result<String, String> {
+        self.creative_exchange(body, limit, cancel, "local-test-fixture", url)
+            .await
+    }
     async fn creative_exchange(
         &self,
         body: &serde_json::Value,

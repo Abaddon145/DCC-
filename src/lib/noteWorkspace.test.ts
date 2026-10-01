@@ -1,0 +1,10 @@
+import {describe,it,expect} from "vitest";
+import {openNoteTab,sanitizeNoteTabs,normalizeNoteAppearance,defaultNoteAppearance,mergeRestoredNoteTabs,validateNoteAppearance,noteAppearancePresets} from "./noteWorkspace";
+describe("note workspace state",()=>{
+  it("restores structure view and safe navigation color",()=>{const id="11111111-1111-4111-8111-111111111111";expect(sanitizeNoteTabs([{id,layout:"mindMap",color:"#7CACCB"}])[0]).toMatchObject({layout:"mindMap",color:"#7CACCB"});expect(sanitizeNoteTabs([{id,layout:"unknown",color:"url(bad)"}])[0]).toMatchObject({layout:"document",color:null});});
+  it("keeps presets readable and rejects indistinguishable colors",()=>{for(const preset of Object.values(noteAppearancePresets))expect(()=>validateNoteAppearance(preset)).not.toThrow();expect(()=>validateNoteAppearance({...defaultNoteAppearance,text:defaultNoteAppearance.background})).toThrow("对比度");});
+  it("does not discard a note opened while saved tabs are loading",()=>{const restored=openNoteTab([],"old","saved");const opened=openNoteTab([],"new","opened");expect(mergeRestoredNoteTabs(restored,opened).map(v=>v.id)).toEqual(["old","new"]);expect(mergeRestoredNoteTabs(restored,openNoteTab([],"old","updated"))[0].title).toBe("updated");});
+  it("opens once and preserves view and scroll on rename",()=>{const a=openNoteTab([],"id","first");a[0].view="read";a[0].scroll=400;const b=openNoteTab(a,"id","renamed");expect(b).toHaveLength(1);expect(b[0]).toMatchObject({title:"renamed",view:"read",scroll:400});});
+  it("bounds restored state and rejects duplicate or malformed ids",()=>{const id="11111111-1111-4111-8111-111111111111";expect(sanitizeNoteTabs([{id,scroll:-2},{id},{id:"bad"}])).toHaveLength(1);expect(sanitizeNoteTabs([{id,scroll:-2}])[0].scroll).toBe(0);});
+  it("only accepts safe colors and bounded layout values",()=>{expect(normalizeNoteAppearance({background:"url(http://bad)",fontSize:200})).toMatchObject({background:defaultNoteAppearance.background,fontSize:24});});
+});
