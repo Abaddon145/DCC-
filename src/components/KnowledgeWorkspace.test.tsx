@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "./KnowledgeWorkspace";
 import { templateDocument, type KnowledgeNote } from "../lib/knowledge";
 import { withKnowledgeBarrier } from "../lib/noteSaveGuard";
+import MindElixir from "mind-elixir";
 
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),notify:vi.fn()}));
+Object.defineProperty(window,"matchMedia",{configurable:true,value:()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}})});
 Object.defineProperty(Range.prototype,"getClientRects",{configurable:true,value:()=>[]});
 Object.defineProperty(document,"elementFromPoint",{configurable:true,value:()=>null});
 Object.defineProperty(Range.prototype,"getBoundingClientRect",{configurable:true,value:()=>({top:0,left:0,right:0,bottom:0,width:0,height:0})});
@@ -26,6 +28,51 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(cleanup);
 describe("knowledge editing",()=>{
+  it("writes real mind-map branch moves back to canonical headings and can undo them",async()=>{
+    const original=MindElixir.prototype.init;let mind:MindElixir|null=null;
+    const init=vi.spyOn(MindElixir.prototype,"init").mockImplementation(function(this:MindElixir,data){mind=this;return original.call(this,data);});
+    try{
+      render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());fireEvent.click(screen.getByRole("button",{name:"导图"}));await waitFor(()=>expect(mind).not.toBeNull());
+      await act(async()=>{const instance=mind!;await instance.moveNodeIn([instance.findEle("b0")],instance.findEle("b6"));});fireEvent.click(screen.getByRole("button",{name:"保存"}));
+      await waitFor(()=>{const input=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input;expect(input.document.content[6].attrs.level).toBe(3);expect(input.document.content[6].content[0].text).toBe("学习目标");});
+      fireEvent.click(screen.getByRole("button",{name:"撤销"}));fireEvent.click(screen.getByRole("button",{name:"保存"}));await waitFor(()=>expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input.document.content[0].content[0].text).toBe("学习目标"));
+    }finally{init.mockRestore();}
+  });
+  it("opens the whole-note mind map and preserves the original body on view changes",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"导图"}));await screen.findByRole("region",{name:"整篇笔记结构"});await waitFor(()=>expect(document.querySelectorAll(".structure-canvas me-tpc").length).toBeGreaterThan(1));
+    fireEvent.click(screen.getByRole("button",{name:"正文"}));await screen.findByRole("textbox",{name:"笔记正文"});expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note")).toBe(false);
+  });
+  it("moves a held note into a notebook with pointer events rather than native HTML drag",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;const id="22222222-2222-4222-8222-222222222222";
+    mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>cmd==="list_notebooks"?Promise.resolve([{id,name:"目标笔记本",parentId:null,sortOrder:0}]):cmd==="move_note_item"?Promise.resolve("undo-token"):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);const card=await screen.findByRole("button",{name:/UE 学习笔记/});const row=(await screen.findByRole("button",{name:"目标笔记本"})).closest("[data-notebook-drop]")!;
+    const point=vi.spyOn(document,"elementFromPoint").mockReturnValue(row);
+    const pointer=(target:Element|Window,type:string,x:number)=>{const event=new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:100});Object.defineProperty(event,"pointerId",{value:1});fireEvent(target,event);};
+    pointer(card,"pointerdown",100);pointer(window,"pointermove",120);expect(row).toHaveClass("drop-inside");pointer(window,"pointerup",120);
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("move_note_item",{libraryId:"test-library",kind:"note",id:note.id,parent:id,index:0}));expect(card).toHaveAttribute("draggable","false");
+    fireEvent.click(await screen.findByRole("button",{name:"撤销移动"}));await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("undo_note_move",{libraryId:"test-library",token:"undo-token"}));point.mockRestore();
+  });
+  it("edits canonical rich content from outline and appends a template without overwriting",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"大纲"}));const outline=await screen.findByRole("navigation",{name:"完整内容大纲"});fireEvent.click(await screen.findByRole("button",{name:"学习目标"}));
+    await screen.findByRole("textbox",{name:"节点完整内容"});fireEvent.change(screen.getByRole("combobox",{name:"段落格式"}),{target:{value:"3"}});
+    fireEvent.click(screen.getByRole("button",{name:"追加模板章节"}));fireEvent.click(screen.getByRole("button",{name:"保存"}));
+    await waitFor(()=>{const input=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input;expect(input.document.content[0].attrs.level).toBe(3);expect(input.document.content).toHaveLength((note.document.content?.length||0)*2);});expect(outline).toBeInTheDocument();
+  });
+  it("changes note navigation color without sending color through the strict note save input",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;mocks.invoke.mockImplementation((cmd:string,args?:Record<string,unknown>)=>cmd==="set_note_color"?Promise.resolve({...note,color:args?.color}):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.contextMenu(await screen.findByRole("button",{name:/UE 学习笔记/}));fireEvent.click(screen.getByRole("menuitem",{name:"笔记颜色…"}));fireEvent.click(screen.getByRole("button",{name:"选择 #7CACCB"}));fireEvent.click(screen.getByRole("button",{name:"应用"}));
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("set_note_color",{libraryId:"test-library",id:note.id,color:"#7CACCB"}));expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note")).toBe(false);
+  });
+  it("switches reading with Ctrl+E while focus remains in the note list",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    const card=await screen.findByRole("button",{name:/UE 学习笔记/});fireEvent.click(card);
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.keyDown(card,{key:"e",ctrlKey:true,isComposing:true});expect(title).toBeEnabled();
+    card.focus();fireEvent.keyDown(card,{key:"e",ctrlKey:true});await waitFor(()=>expect(title).toBeDisabled());
+    fireEvent.keyDown(card,{key:"e",ctrlKey:true});await waitFor(()=>expect(title).toBeEnabled());
+  });
   it("switches to reading without changing the document and locks editing controls",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
     const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());

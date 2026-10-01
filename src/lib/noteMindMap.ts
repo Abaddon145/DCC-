@@ -31,9 +31,11 @@ const escape=(text:string)=>text.replace(/[&<>"']/g,v=>({"&":"&amp;","<":"&lt;",
 export function noteMapSvg(value:unknown):string {
   const data=normalizeNoteMap(value);const rows:{node:NoteMapNode;depth:number;parent:number}[]=[];
   const add=(node:NoteMapNode,depth:number,parent:number)=>{const index=rows.length;rows.push({node,depth,parent});for(const child of node.children||[])add(child,depth+1,index);};add(data.nodeData,0,-1);
-  const width=Math.max(360,...rows.map(row=>row.depth*220+260));const height=rows.length*56+32;
-  const lines=rows.filter(row=>row.parent>=0).map(row=>{const i=rows.indexOf(row);const parent=rows[row.parent];return `<path d="M ${parent.depth*220+230} ${row.parent*56+40} H ${row.depth*220+8} V ${i*56+40}" fill="none" stroke="#6C7B90"/>`;}).join("");
-  const nodes=rows.map((row,i)=>`<g><rect x="${row.depth*220+16}" y="${i*56+20}" width="208" height="40" rx="6" fill="#202936" stroke="#64748B"/><text x="${row.depth*220+26}" y="${i*56+45}" font-family="sans-serif" font-size="14" fill="#E4E8EF">${escape(Array.from(row.node.topic).slice(0,20).join(""))}</text></g>`).join("");
+  const wrapped=rows.map(row=>{const chars=Array.from(row.node.topic);const lines:string[]=[];for(let i=0;i<chars.length;i+=14)lines.push(chars.slice(i,i+14).join(""));return lines.length?lines:[""];});
+  let offset=20;const boxes=wrapped.map(lines=>{const box={y:offset,height:lines.length*20+20};offset+=box.height+16;return box;});
+  const width=Math.max(360,...rows.map(row=>row.depth*220+260));const height=offset+16;
+  const lines=rows.map((row,i)=>{if(row.parent<0)return "";const parent=rows[row.parent];return `<path d="M ${parent.depth*220+230} ${boxes[row.parent].y+boxes[row.parent].height/2} H ${row.depth*220+8} V ${boxes[i].y+boxes[i].height/2}" fill="none" stroke="#6C7B90"/>`;}).join("");
+  const nodes=rows.map((row,i)=>`<g><rect x="${row.depth*220+16}" y="${boxes[i].y}" width="208" height="${boxes[i].height}" rx="6" fill="#202936" stroke="#64748B"/><text font-family="sans-serif" font-size="14" fill="#E4E8EF">${wrapped[i].map((line,j)=>`<tspan x="${row.depth*220+26}" y="${boxes[i].y+25+j*20}">${escape(line)}</tspan>`).join("")}</text></g>`).join("");
   const scale=Math.min(1,1600/width,1600/height);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1,Math.round(width*scale))}" height="${Math.max(1,Math.round(height*scale))}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="#11151B"/>${lines}${nodes}</svg>`;
 }

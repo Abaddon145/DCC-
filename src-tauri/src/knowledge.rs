@@ -21,13 +21,28 @@ pub fn migrate(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction().map_err(error)?;
     tx.execute_batch(include_str!("notes_schema.sql"))
         .map_err(error)?;
-    tx.execute("UPDATE schema_meta SET value='14' WHERE key='schema_version' AND CAST(value AS INTEGER)<14", []).map_err(error)?;
+    let has_color = tx
+        .prepare("PRAGMA table_info(knowledge_notes)")
+        .map_err(error)?
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(error)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(error)?
+        .iter()
+        .any(|name| name == "navigation_color");
+    if !has_color {
+        tx.execute_batch("ALTER TABLE knowledge_notes ADD COLUMN navigation_color TEXT;")
+            .map_err(error)?;
+    }
+    tx.execute("UPDATE schema_meta SET value='15' WHERE key='schema_version' AND CAST(value AS INTEGER)<15", []).map_err(error)?;
     tx.commit().map_err(error)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Note {
+    #[serde(default)]
+    pub color: Option<String>,
     pub id: String,
     pub notebook_id: Option<String>,
     pub title: String,
@@ -113,6 +128,8 @@ pub struct NotePage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteSummary {
+    #[serde(default)]
+    pub color: Option<String>,
     pub id: String,
     pub title: String,
     pub plain_text: String,
@@ -158,11 +175,12 @@ pub fn references(db: &Connection, note_id: &str) -> Result<Vec<NoteReference>> 
 }
 
 pub fn backlinks(db: &Connection, note_id: &str) -> Result<Vec<NoteSummary>> {
-    let mut statement=db.prepare("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at FROM knowledge_notes n JOIN knowledge_references r ON r.note_id=n.id WHERE r.target_kind='note' AND r.target_id=?1 AND n.deleted_at IS NULL ORDER BY n.updated_at DESC LIMIT 100").map_err(error)?;
+    let mut statement=db.prepare("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n JOIN knowledge_references r ON r.note_id=n.id WHERE r.target_kind='note' AND r.target_id=?1 AND n.deleted_at IS NULL ORDER BY n.updated_at DESC LIMIT 100").map_err(error)?;
     let notes = statement
         .query_map([note_id], |row| {
             let tags: String = row.get(3)?;
             Ok(NoteSummary {
+                color: row.get(6)?,
                 id: row.get(0)?,
                 title: row.get(1)?,
                 plain_text: row.get(2)?,
@@ -202,6 +220,7 @@ fn read_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
     };
     Ok(Note {
+        color: row.get(12)?,
         id: row.get(0)?,
         notebook_id: row.get(1)?,
         title: row.get(2)?,
@@ -216,7 +235,28 @@ fn read_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
         updated_at: row.get(11)?,
     })
 }
-const COLUMNS: &str = "n.id,n.notebook_id,n.title,n.document_json,n.plain_text,n.tags_json,n.favorite,n.revision,n.journal_date,n.deleted_at,n.created_at,n.updated_at";
+const COLUMNS: &str = "n.id,n.notebook_id,n.title,n.document_json,n.plain_text,n.tags_json,n.favorite,n.revision,n.journal_date,n.deleted_at,n.created_at,n.updated_at,n.navigation_color";
+pub fn set_color(db: &Connection, id: &str, color: Option<&str>) -> Result<Note> {
+    if let Some(value) = color {
+        if value.len() != 7
+            || !value.starts_with('#')
+            || !value[1..].bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("请选择 #RRGGBB 格式的笔记颜色".into());
+        }
+    }
+    if db
+        .execute(
+            "UPDATE knowledge_notes SET navigation_color=?2 WHERE id=?1",
+            params![id, color.map(str::to_ascii_uppercase)],
+        )
+        .map_err(error)?
+        != 1
+    {
+        return Err("笔记不存在".into());
+    }
+    get(db, id)
+}
 pub fn get(db: &Connection, id: &str) -> Result<Note> {
     db.query_row(
         &format!("SELECT {COLUMNS} FROM knowledge_notes n WHERE n.id=?1"),
@@ -456,6 +496,7 @@ pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool)
     }
     let timestamp = now();
     let note = Note {
+        color: previous.as_ref().and_then(|v| v.color.clone()),
         id: previous.as_ref().map(|v| v.id.clone()).unwrap_or_else(uid),
         notebook_id: input.notebook_id,
         title: title.into(),
@@ -550,7 +591,7 @@ pub fn search(
             |r| r.get(0),
         )
         .map_err(error)?;
-    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at FROM knowledge_notes n WHERE {where_sql} ORDER BY n.updated_at DESC,n.id LIMIT ?7 OFFSET ?8")).map_err(error)?;
+    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n WHERE {where_sql} ORDER BY n.updated_at DESC,n.id LIMIT ?7 OFFSET ?8")).map_err(error)?;
     let items = statement
         .query_map(
             params![
@@ -566,6 +607,7 @@ pub fn search(
             |row| {
                 let tags: String = row.get(3)?;
                 Ok(NoteSummary {
+                    color: row.get(6)?,
                     id: row.get(0)?,
                     title: row.get(1)?,
                     plain_text: row.get(2)?,
@@ -768,8 +810,29 @@ mod tests {
             db.query_row("SELECT value FROM schema_meta", [], |r| r
                 .get::<_, String>(0))
                 .unwrap(),
-            "14"
+            "15"
         );
+    }
+    #[test]
+    fn navigation_color_migration_and_save_are_independent_of_content_revision() {
+        let mut db = db();
+        let note = save(&mut db, input("颜色")).unwrap();
+        db.execute_batch("ALTER TABLE knowledge_notes DROP COLUMN navigation_color; UPDATE schema_meta SET value='14';").unwrap();
+        migrate(&db).unwrap();
+        assert!(get(&db, &note.id).unwrap().color.is_none());
+        assert!(set_color(&db, &note.id, Some("url(bad)")).is_err());
+        let colored = set_color(&db, &note.id, Some("#aabbcc")).unwrap();
+        assert_eq!(colored.revision, note.revision);
+        assert_eq!(colored.color.as_deref(), Some("#AABBCC"));
+        let saved = save(&mut db, edit(&colored)).unwrap();
+        assert_eq!(saved.color, colored.color);
+        assert_eq!(
+            search(&db, "", None, false, false, 0, 10).unwrap().items[0].color,
+            colored.color
+        );
+        let deleted = set_deleted(&mut db, &note.id, saved.revision, true).unwrap();
+        let restored = set_deleted(&mut db, &note.id, deleted.revision, false).unwrap();
+        assert_eq!(restored.color, colored.color);
     }
     #[test]
     fn rejects_remote_images_and_unsafe_links_without_writing() {
@@ -903,6 +966,7 @@ mod tests {
         value.title = "更新后的笔记".into();
         value.document = json!({"type":"doc","content":[{"type":"attachment","attrs":{"attachmentId":attachment.id,"label":"学习附件"}}]});
         let current = save(&mut db, value).unwrap();
+        set_color(&db, &current.id, Some("#85B596")).unwrap();
         let history = revisions(&db, &current.id).unwrap();
         pin_revision(&db, &history[0].id, true).unwrap();
         let package = temp.path().join("backup.dccassetlib");
@@ -924,6 +988,7 @@ mod tests {
         crate::backup::restore_library(&mut active, &package).unwrap();
         let db = active.connection.as_ref().unwrap();
         let restored = get(db, &current.id).unwrap();
+        assert_eq!(restored.color.as_deref(), Some("#85B596"));
         assert_eq!(restored.document, current.document);
         assert_eq!(restored.notebook_id, Some(notebook.id));
         assert!(revisions(db, &current.id).unwrap()[0].pinned);

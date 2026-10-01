@@ -194,6 +194,8 @@ pub fn run() {
                     knowledge_commands::open_note_attachment,
                     knowledge_commands::get_note,
                     knowledge_commands::save_note,
+                    knowledge_commands::set_note_color,
+                    knowledge_commands::get_note_structure_svg,
                     knowledge_commands::duplicate_note,
                     knowledge_commands::retry_note_remote_image,
                     knowledge_commands::write_note_clipboard_text,
