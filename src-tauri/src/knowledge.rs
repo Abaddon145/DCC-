@@ -34,7 +34,7 @@ pub fn migrate(db: &Connection) -> Result<()> {
         tx.execute_batch("ALTER TABLE knowledge_notes ADD COLUMN navigation_color TEXT;")
             .map_err(error)?;
     }
-    tx.execute("UPDATE schema_meta SET value='15' WHERE key='schema_version' AND CAST(value AS INTEGER)<15", []).map_err(error)?;
+    tx.execute("UPDATE schema_meta SET value='16' WHERE key='schema_version' AND CAST(value AS INTEGER)<16", []).map_err(error)?;
     tx.commit().map_err(error)
 }
 
@@ -361,8 +361,16 @@ pub(crate) fn inspect_document(
                 if level > 32
                     || ids.len() >= 1000
                     || object.keys().any(|key| {
-                        !["id", "topic", "children", "root", "expanded", "direction"]
-                            .contains(&key.as_str())
+                        ![
+                            "id",
+                            "topic",
+                            "children",
+                            "root",
+                            "expanded",
+                            "direction",
+                            "metadata",
+                        ]
+                        .contains(&key.as_str())
                     })
                 {
                     return Err("思维导图过大或含不支持的节点属性".into());
@@ -378,6 +386,31 @@ pub(crate) fn inspect_document(
                     return Err("思维导图节点 ID 无效或重复".into());
                 }
                 let topic = entry["topic"].as_str().ok_or("思维导图缺少文字")?;
+                if let Some(metadata) = entry.get("metadata") {
+                    let metadata = metadata.as_object().ok_or("导图格式无效")?;
+                    if metadata.len() != 1 {
+                        return Err("导图格式包含未知属性".into());
+                    }
+                    let format = metadata
+                        .get("format")
+                        .and_then(Value::as_object)
+                        .ok_or("导图格式无效")?;
+                    for (key, value) in format {
+                        match key.as_str() {
+                            "bold" | "italic" | "underline" | "strike" | "code"
+                                if value.is_boolean() => {}
+                            "heading" if value.as_u64().is_some_and(|n| n <= 3) => {}
+                            "link" => {
+                                let link = value.as_str().ok_or("导图链接无效")?;
+                                let url = url::Url::parse(link).map_err(|_| "导图链接无效")?;
+                                if link.len() > 8192 || !matches!(url.scheme(), "http" | "https") {
+                                    return Err("导图链接仅支持 http/https".into());
+                                }
+                            }
+                            _ => return Err("导图格式包含不支持的属性".into()),
+                        }
+                    }
+                }
                 if topic.chars().count() > 1000 {
                     return Err("思维导图文字过长".into());
                 }
@@ -564,6 +597,19 @@ pub fn search(
     offset: u32,
     limit: u32,
 ) -> Result<NotePage> {
+    search_ordered(db, query, notebook, trash, favorite, offset, limit, false)
+}
+
+pub fn search_ordered(
+    db: &Connection,
+    query: &str,
+    notebook: Option<&str>,
+    trash: bool,
+    favorite: bool,
+    offset: u32,
+    limit: u32,
+    manual: bool,
+) -> Result<NotePage> {
     let query = query.trim();
     if query.len() > 2000 {
         return Err("搜索词过长".into());
@@ -591,7 +637,12 @@ pub fn search(
             |r| r.get(0),
         )
         .map_err(error)?;
-    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n WHERE {where_sql} ORDER BY n.updated_at DESC,n.id LIMIT ?7 OFFSET ?8")).map_err(error)?;
+    let order = if manual {
+        "COALESCE((SELECT position FROM knowledge_note_order o WHERE o.note_id=n.id AND o.scope=COALESCE(?3,'__all__')),9223372036854775807),n.updated_at DESC,n.id"
+    } else {
+        "n.updated_at DESC,n.id"
+    };
+    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n WHERE {where_sql} ORDER BY {order} LIMIT ?7 OFFSET ?8")).map_err(error)?;
     let items = statement
         .query_map(
             params![
@@ -627,6 +678,66 @@ pub fn search(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(error)?;
     Ok(NotePage { items, total })
+}
+
+pub fn reorder_notes(
+    db: &mut Connection,
+    source: &str,
+    target: &str,
+    after: bool,
+    notebook: Option<&str>,
+    query: &str,
+    favorite: bool,
+) -> Result<()> {
+    let tx = db.transaction().map_err(error)?;
+    let mut matching = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = search_ordered(&tx, query, notebook, false, favorite, offset, 100, true)?;
+        matching.extend(page.items.into_iter().map(|n| n.id));
+        if matching.len() as u64 >= page.total as u64 {
+            break;
+        }
+        offset += 100;
+    }
+    if source == target {
+        return Ok(());
+    }
+    let source_index = matching
+        .iter()
+        .position(|id| id == source)
+        .ok_or("源笔记不属于当前筛选结果")?;
+    if !matching.iter().any(|id| id == target) {
+        return Err("目标笔记不属于当前筛选结果".into());
+    }
+    let moved = matching.remove(source_index);
+    let at = matching
+        .iter()
+        .position(|id| id == target)
+        .ok_or("目标已变化")?
+        + usize::from(after);
+    matching.insert(at, moved);
+    let scope = notebook.unwrap_or("__all__");
+    let ids = {
+        let mut stmt=tx.prepare("SELECT n.id FROM knowledge_notes n LEFT JOIN knowledge_note_order o ON o.note_id=n.id AND o.scope=?2 WHERE n.deleted_at IS NULL AND (?1 IS NULL OR n.notebook_id=?1) ORDER BY COALESCE(o.position,9223372036854775807),n.updated_at DESC,n.id").map_err(error)?;
+        let result = stmt
+            .query_map(params![notebook, scope], |r| r.get::<_, String>(0))
+            .map_err(error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(error)?;
+        result
+    };
+    let matched: HashSet<_> = matching.iter().cloned().collect();
+    let mut replacements = matching.into_iter();
+    for (position, id) in ids.into_iter().enumerate() {
+        let id = if matched.contains(&id) {
+            replacements.next().ok_or("排序结果不完整")?
+        } else {
+            id
+        };
+        tx.execute("INSERT INTO knowledge_note_order(scope,note_id,position) VALUES(?1,?2,?3) ON CONFLICT(scope,note_id) DO UPDATE SET position=excluded.position",params![scope,id,position as i64]).map_err(error)?;
+    }
+    tx.commit().map_err(error)
 }
 
 pub fn set_deleted(
@@ -810,7 +921,41 @@ mod tests {
             db.query_row("SELECT value FROM schema_meta", [], |r| r
                 .get::<_, String>(0))
                 .unwrap(),
-            "15"
+            "16"
+        );
+    }
+    #[test]
+    fn manual_note_order_preserves_hidden_slots_and_content_revisions() {
+        let mut db = db();
+        let a = save(&mut db, input("visible A")).unwrap();
+        let hidden = save(&mut db, input("hidden")).unwrap();
+        let b = save(&mut db, input("visible B")).unwrap();
+        let before = search_ordered(&db, "", None, false, false, 0, 100, true)
+            .unwrap()
+            .items;
+        let hidden_slot = before.iter().position(|n| n.id == hidden.id).unwrap();
+        reorder_notes(&mut db, &a.id, &b.id, false, None, "visible", false).unwrap();
+        let all = search_ordered(&db, "", None, false, false, 0, 100, true)
+            .unwrap()
+            .items;
+        assert_eq!(all[hidden_slot].id, hidden.id);
+        let matched = search_ordered(&db, "visible", None, false, false, 0, 100, true)
+            .unwrap()
+            .items;
+        assert_eq!(
+            matched.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec![a.id.as_str(), b.id.as_str()]
+        );
+        assert_eq!(get(&db, &a.id).unwrap().revision, a.revision);
+        assert!(reorder_notes(&mut db, &hidden.id, &b.id, false, None, "visible", false).is_err());
+        assert_eq!(
+            search_ordered(&db, "", None, false, false, 0, 100, true)
+                .unwrap()
+                .items
+                .iter()
+                .map(|n| &n.id)
+                .collect::<Vec<_>>(),
+            all.iter().map(|n| &n.id).collect::<Vec<_>>()
         );
     }
     #[test]

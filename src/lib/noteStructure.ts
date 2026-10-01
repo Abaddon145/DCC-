@@ -43,3 +43,35 @@ export function removeStructure(document:JSONContent,index:number):JSONContent {
 export function structureMap(root:StructureNode):NoteMapData {
   const visit=(node:StructureNode):NoteMapNode=>({id:node.id,topic:node.topic,root:node.root,children:node.children.map(visit)});return {nodeData:visit(root),direction:1};
 }
+
+export function insertStructureSibling(document:JSONContent,index:number):{document:JSONContent;index:number} {
+  const blocks=(document.content||[]).slice();
+  const position=index<0?blocks.length:structureRange(document,index).end;
+  const current=blocks[index];
+  blocks.splice(position,0,current?.type==="heading"
+    ?{type:"heading",attrs:{level:current.attrs?.level||1},content:[{type:"text",text:"新主题"}]}
+    :{type:"paragraph",content:[{type:"text",text:"新内容"}]});
+  return {document:{...document,content:blocks},index:position};
+}
+
+export function indentStructure(document:JSONContent,index:number,promote=false):JSONContent {
+  const root=noteStructure(document,"");const node=findStructure(root,`b${index}`);
+  if(!node)throw Error("请选择内容主题");
+  const parent=findStructure(root,node.parent)!;
+  if(promote){if(parent.index<0)throw Error("已经位于根级");return moveStructure(document,index,parent.index,"after");}
+  const previous=parent.children[parent.children.findIndex(n=>n.id===node.id)-1];
+  if(!previous||document.content?.[previous.index].type!=="heading")throw Error("只能缩进到前一个标题主题下，正文不会自动变成标题");
+  return moveStructure(document,index,previous.index,"inside");
+}
+
+export function formatStructure(document:JSONContent,index:number,level:number,siblings=false):JSONContent {
+  if(![0,1,2,3].includes(level))throw Error("无效的标题级别");
+  const root=noteStructure(document,"");const node=findStructure(root,`b${index}`);
+  if(!node)throw Error("请选择内容主题");
+  const indices=new Set(siblings?findStructure(root,node.parent)!.children.map(n=>n.index):[index]);
+  const content=(document.content||[]).map((block,i)=>{
+    if(!indices.has(i)||!["heading","paragraph"].includes(block.type||""))return block;
+    const attrs={...block.attrs};delete attrs.level;
+    return {...block,type:level?"heading":"paragraph",attrs:level?{...attrs,level}:attrs};
+  });return {...document,content};
+}

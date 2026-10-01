@@ -1,4 +1,5 @@
 import type { CommandId, GlobalPreferences, LibraryPreferences, ModuleGroupId, ModuleId } from "../types";
+import {noteShortcutDefaults,noteShortcutLabels,setNoteShortcuts} from "./noteShortcutKeys";
 
 export const moduleRegistry: Array<{ id: ModuleId; group: ModuleGroupId; label: string; description: string }> = [
   { id: "library", group: "content", label: "素材库", description: "浏览、搜索与整理全部素材" },
@@ -32,12 +33,13 @@ export const commandRegistry: Array<{ id: CommandId; label: string; keywords: st
   { id: "selectAll", label: "全选当前结果", keywords: "select all 全选" },
   { id: "saveAsset", label: "保存素材编辑", keywords: "save 保存" },
   { id: "deleteSelected", label: "删除选择", keywords: "delete trash 删除" },
+  ...Object.entries(noteShortcutLabels).map(([id,label])=>({id:id as CommandId,label:`知识库 · ${label}`,keywords:"note 笔记"})),
 ];
 
 export const defaultGlobalPreferences: GlobalPreferences = {
   theme: "graphite", accentColor: "#D99A42", density: "comfortable", fontScale: 1, toolbarDensity: "comfortable", reduceMotion: false,
   sidebarWidth: 248, detailWidth: 420,
-  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete" },
+  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete",...noteShortcutDefaults },
 };
 
 export const defaultLibraryPreferences: LibraryPreferences = {
@@ -58,6 +60,7 @@ export function textColorFor(background: string) {
 }
 
 export function applyGlobalPreferences(preferences: GlobalPreferences) {
+  setNoteShortcuts(preferences.shortcuts);
   const root = document.documentElement;
   root.dataset.theme = preferences.theme;
   root.dataset.density = preferences.density;
@@ -79,7 +82,9 @@ export function normalizeShortcut(event: KeyboardEvent) {
   if (event.ctrlKey || event.metaKey) parts.push("Ctrl");
   if (event.altKey) parts.push("Alt");
   if (event.shiftKey) parts.push("Shift");
-  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  let key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if(/^Digit[1-4]$/.test(event.code))key=event.code.slice(-1);
+  if(key==="+"||(event.code==="Equal"&&(event.ctrlKey||event.metaKey))){key="+";const index=parts.indexOf("Shift");if(index>=0)parts.splice(index,1);}
   parts.push(key === " " ? "Space" : key);
   return parts.join("+");
 }
@@ -92,7 +97,8 @@ export function shortcutConflicts(shortcuts: Record<string, string>) {
   const seen = new Map<string, string>();
   const conflicts = new Set<string>();
   Object.entries(shortcuts).forEach(([id, value]) => {
-    const key = value.trim().toLowerCase();
+    const scope=id.startsWith("note")?"note:":"app:";
+    const key = value.trim()?scope+value.trim().toLowerCase():"";
     const existing = seen.get(key);
     if (key && existing) { conflicts.add(existing); conflicts.add(id); } else if (key) seen.set(key, id);
   });

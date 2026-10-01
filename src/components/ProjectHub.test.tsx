@@ -29,6 +29,15 @@ const image: MediaEntry = {
   thumbnailFileId: "thumb-1", primaryFileId: "file-1", createdAt: "2026-01-01", updatedAt: "2026-01-01",
 };
 
+async function pointerDrop(source:HTMLElement,target:HTMLElement){
+  vi.stubGlobal("PointerEvent",MouseEvent);
+  Object.defineProperty(document,"elementFromPoint",{configurable:true,value:()=>target});
+  fireEvent.pointerDown(source,{button:0,clientX:0,clientY:0});
+  fireEvent.pointerMove(window,{clientX:20,clientY:1});
+  fireEvent.pointerUp(window,{clientX:20,clientY:1});
+  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,110));});
+}
+
 describe("ProjectHub", () => {
   beforeEach(() => {
     vi.mocked(api.listProjects).mockResolvedValue([summary]);
@@ -53,9 +62,8 @@ describe("ProjectHub", () => {
     fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
     fireEvent.click(await screen.findByRole("button", { name: /任务 1/ }));
     const task = await screen.findByText("完成灯光");
-    fireEvent.dragStart(task.closest("article")!);
     const doneColumn = screen.getByText("完成", { selector: "strong" }).closest("section")!;
-    fireEvent.drop(doneColumn);
+    await pointerDrop(task.closest("article")!,doneColumn);
     await waitFor(() => expect(api.moveProjectTask).toHaveBeenCalledWith("task-1", "done", 0));
   });
 
@@ -156,8 +164,7 @@ describe("ProjectHub", () => {
     await screen.findByText("任务 0");
     fireEvent.click(screen.getAllByRole("button",{name:"下一页"})[0]);
     const task=await screen.findByText("任务 40");
-    fireEvent.dragStart(task.closest("article")!);
-    fireEvent.drop(screen.getByText("任务 41").closest("article")!);
+    await pointerDrop(task.closest("article")!,screen.getByText("任务 41").closest("article")!);
     await waitFor(()=>expect(api.moveProjectTask).toHaveBeenCalledWith("task-40","todo",41));
   });
 });

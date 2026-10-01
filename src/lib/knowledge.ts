@@ -11,7 +11,7 @@ export type NoteInput = Pick<KnowledgeNote, "notebookId" | "title" | "document" 
 export interface KnowledgeNotebook { id: string; parentId: string | null; name: string; sortOrder: number }
 export interface NoteRevision { id: string; noteId: string; snapshot: KnowledgeNote; pinned: boolean; createdAt: string }
 export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string};
-export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number }
+export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean }
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt"|"color">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
 
@@ -25,6 +25,7 @@ function writableNoteInput(input: NoteInput): NoteInput {
 export function knowledgeApi(libraryId: string) {
   return {
     search: (request: NoteSearch) => invoke<{ items: NoteSummary[]; total: number }>("search_notes", { libraryId, ...request }),
+    reorder: (source:string,target:string,after:boolean,notebookId:string|null,query:string,favorite:boolean) => invoke<void>("reorder_notes",{libraryId,source,target,after,notebookId,query,favorite}),
     get: (id: string) => invoke<KnowledgeNote>("get_note", { libraryId, id }),
     setColor: (id:string,color:string|null) => invoke<KnowledgeNote>("set_note_color",{libraryId,id,color}),
     duplicate: (note: KnowledgeNote) => invoke<KnowledgeNote>("duplicate_note",{libraryId,id:note.id,expectedRevision:note.revision}),

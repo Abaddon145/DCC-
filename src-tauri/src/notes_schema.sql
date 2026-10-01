@@ -19,6 +19,13 @@ CREATE TABLE IF NOT EXISTS knowledge_notes (
  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_notes_list ON knowledge_notes(deleted_at,notebook_id,updated_at DESC);
+CREATE TABLE IF NOT EXISTS knowledge_note_order (
+ scope TEXT NOT NULL,
+ note_id TEXT NOT NULL REFERENCES knowledge_notes(id) ON DELETE CASCADE,
+ position INTEGER NOT NULL,
+ PRIMARY KEY(scope,note_id)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_note_order ON knowledge_note_order(scope,position);
 CREATE TABLE IF NOT EXISTS knowledge_revisions (
  id TEXT PRIMARY KEY,
  note_id TEXT NOT NULL REFERENCES knowledge_notes(id) ON DELETE CASCADE,

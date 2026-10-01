@@ -15,6 +15,7 @@ import { readContextPage, useRequestGate, useWorkspaceState } from "../lib/works
 import { MediaAssociationPicker } from "./MediaAssociationPicker";
 import { shortcutMatches } from "../lib/personalization";
 import { SelectionSummary } from "./SelectionSummary";
+import {beginEdgeScroll,beginPointerReorder} from "../lib/drag";
 
 const labels: Record<MediaKind,{title:string;eyebrow:string;extensions:string[]}>={
   image:{title:"图片库",eyebrow:"IMAGE LIBRARY",extensions:["jpg","jpeg","png","webp","gif","bmp","tif","tiff"]},
@@ -79,33 +80,41 @@ export function MediaLibraryView({onAi,kind,onNotify,paneWidth,paneCollapsed,onP
   const beginPointerDrag=(payload:PointerDrag,event:ReactPointerEvent<HTMLElement>)=>{
     if(event.button!==0||((event.target as HTMLElement).closest("button")&&!(event.target as HTMLElement).closest("[data-media-folder-drag]")))return;
     pointerCleanup.current?.();
+    if(payload.kind==="folder"){
+      const targetId=(target:HTMLElement)=>target.dataset.mediaFolderId||null;
+      pointerCleanup.current=beginPointerReorder(event,{
+        source:event.currentTarget.closest<HTMLElement>("[data-media-folder-id]")||event.currentTarget,
+        selector:"[data-media-folder-id]",
+        placement:(target,point)=>{if(!targetId(target))return "inside";const rect=target.getBoundingClientRect(),ratio=(point.y-rect.top)/Math.max(1,rect.height);return ratio<.25?"before":ratio>.75?"after":"inside";},
+        canDrop:(target,zone)=>{const id=targetId(target);if(id===payload.id)return false;let parent=zone==="inside"?id:folders.find(f=>f.id===id)?.parentId;const seen=new Set<string>();while(parent){if(parent===payload.id||seen.has(parent))return false;seen.add(parent);parent=folders.find(f=>f.id===parent)?.parentId;}return true;},
+        onStart:()=>setPointerDrag(payload),onFinish:()=>{setPointerDrag(null);setPointerDrop(null);},
+        onHover:(target,zone,valid)=>setPointerDrop(previous=>{const id=target?targetId(target):null;if(!target||!valid)return null;return previous?.id===id&&previous.zone===zone?previous:{id,zone};}),
+        onDrop:(target,_after,zone)=>{const id=targetId(target);const folder=folders.find(f=>f.id===id);const parent=zone==="inside"?id:folder?.parentId||null;const siblings=folders.filter(f=>f.parentId===parent&&f.id!==payload.id);const index=zone==="inside"?siblings.length:Math.max(0,siblings.findIndex(f=>f.id===id))+(zone==="after"?1:0);void moveFolder(payload.id,parent,index);},
+        onInvalid:()=>onNotify("这里不能放置：文件夹不能移入自身或子文件夹"),
+      });return;
+    }
     const pointerId=event.pointerId,startX=event.clientX,startY=event.clientY;
     let active=false;
+    const edgeScroll=beginEdgeScroll();
     const locate=(x:number,y:number):PointerDrop|null=>{
       const row=document.elementFromPoint(x,y)?.closest<HTMLElement>("[data-media-folder-id]");
       if(!row)return null;
       const id=row.dataset.mediaFolderId||null;
-      if(!id||payload.kind==="entries")return{id,zone:"inside"};
-      const rect=row.getBoundingClientRect(),ratio=(y-rect.top)/rect.height;
-      return{id,zone:ratio<.25?"before":ratio>.75?"after":"inside"};
+      return{id,zone:"inside"};
     };
-    const cleanup=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);window.removeEventListener("pointercancel",cancel);window.removeEventListener("keydown",key);pointerCleanup.current=null;document.body.classList.remove("library-pointer-dragging")};
+    const cleanup=()=>{edgeScroll.stop();window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);window.removeEventListener("pointercancel",cancel);window.removeEventListener("keydown",key);pointerCleanup.current=null;document.body.classList.remove("library-pointer-dragging")};
     const finish=(commit:boolean,x:number,y:number)=>{
       cleanup();setPointerDrag(null);setPointerDrop(null);setDragPoint(null);
       if(!active)return;
       const block=(click:MouseEvent)=>{click.preventDefault();click.stopImmediatePropagation()};
       window.addEventListener("click",block,{capture:true,once:true});window.setTimeout(()=>window.removeEventListener("click",block,true),120);
+      edgeScroll.stop();
+      const target=commit?locate(x,y):null;
       if(!commit)return;
-      const target=locate(x,y);if(!target)return;
-      if(payload.kind==="entries"){void dropEntries(payload.ids,target.id);return}
-      if(!target.id){void moveFolder(payload.id,null,rootFolders.length);return}
-      const folder=folders.find(item=>item.id===target.id);if(!folder)return;
-      const siblings=folders.filter(item=>item.parentId===folder.parentId&&item.id!==payload.id);
-      const targetIndex=siblings.findIndex(item=>item.id===folder.id);
-      if(target.zone==="inside")void moveFolder(payload.id,folder.id,folders.filter(item=>item.parentId===folder.id).length);
-      else if(targetIndex>=0)void moveFolder(payload.id,folder.parentId,targetIndex+(target.zone==="after"?1:0));
+      if(!target){onNotify("这里不能放置：请选择有效文件夹");return;}
+      void dropEntries(payload.ids,target.id);
     };
-    const move=(next:PointerEvent)=>{if(next.pointerId!==pointerId)return;if(!active&&Math.hypot(next.clientX-startX,next.clientY-startY)<6)return;if(!active){active=true;document.body.classList.add("library-pointer-dragging");setPointerDrag(payload)}next.preventDefault();setDragPoint({x:next.clientX,y:next.clientY});setPointerDrop(locate(next.clientX,next.clientY))};
+    const move=(next:PointerEvent)=>{if(next.pointerId!==pointerId)return;if(!active&&Math.hypot(next.clientX-startX,next.clientY-startY)<6)return;if(!active){active=true;document.body.classList.add("library-pointer-dragging");setPointerDrag(payload)}next.preventDefault();setDragPoint({x:next.clientX,y:next.clientY});edgeScroll.update({x:next.clientX,y:next.clientY});setPointerDrop(locate(next.clientX,next.clientY))};
     const up=(next:PointerEvent)=>{if(next.pointerId===pointerId)finish(true,next.clientX,next.clientY)};
     const cancel=(next:PointerEvent)=>{if(next.pointerId===pointerId)finish(false,0,0)};
     const key=(next:KeyboardEvent)=>{if(next.key==="Escape")finish(false,0,0)};

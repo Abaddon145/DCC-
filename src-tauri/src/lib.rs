@@ -174,6 +174,8 @@ pub fn run() {
                     knowledge_commands::set_knowledge_editing,
                     knowledge_commands::finish_knowledge_close,
                     knowledge_commands::search_notes,
+                    knowledge_commands::reorder_notes,
+                    knowledge_commands::start_note_screenshot,
                     knowledge_commands::export_note_package,
                     knowledge_commands::export_note_draft,
                     knowledge_commands::read_note_markdown,

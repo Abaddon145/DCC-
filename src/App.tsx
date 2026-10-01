@@ -17,7 +17,7 @@ import { QuickAddDialog } from "./components/QuickAddDialog";
 import { BatchToolbar } from "./components/BatchToolbar";
 import { HealthPanel } from "./components/HealthPanel";
 import { StorageSettings } from "./components/StorageSettings";
-import { dragPreviewText, type BeginLibraryPointerDrag, type LibraryDragPoint } from "./lib/drag";
+import { beginEdgeScroll, beginPointerReorder,dragPreviewText, type BeginLibraryPointerDrag, type LibraryDragPoint } from "./lib/drag";
 import { ReferenceBoardHub } from "./components/ReferenceBoardHub";
 import { ReferenceBoardPicker } from "./components/ReferenceBoardPicker";
 import { TagManager } from "./components/TagManager";
@@ -346,28 +346,43 @@ export default function App() {
   const dropLibraryPayloadAt = (payload: LibraryDragPayload, x: number, y: number) => {
     const element = document.elementFromPoint(x, y);
     const row = element?.closest<HTMLElement>("[data-category-drop-id]");
-    if (!row) return;
+    if (!row) return false;
     const rawTargetId = row.dataset.categoryDropId;
-    if (!rawTargetId) return;
+    if (!rawTargetId) return false;
     const targetId = rawTargetId === "__root__" ? null : rawTargetId;
     if (payload.kind === "assets") {
       void moveAssetsByDrag(payload.ids, targetId);
-      return;
+      return true;
     }
     const zone = categoryDropZone(row.getBoundingClientRect(), y, payload, targetId === null);
     const moveRequest = categoryMoveRequest(meta.categories, payload.id, targetId, zone);
     if (moveRequest) void moveCategoryByDrag(moveRequest);
+    return Boolean(moveRequest);
   };
   const beginLibraryPointerDrag: BeginLibraryPointerDrag = (payload, event) => {
     if (event.button !== 0 || moveBusy.current) return;
     pointerDragCleanup.current?.();
+    if(payload.kind==="category"){
+      const id=(target:HTMLElement)=>target.dataset.categoryDropId==="__root__"?null:target.dataset.categoryDropId!;
+      pointerDragCleanup.current=beginPointerReorder(event,{
+        source:event.currentTarget.closest<HTMLElement>(".category-row")||event.currentTarget,
+        selector:"[data-category-drop-id]",
+        placement:(target,point)=>categoryDropZone(target.getBoundingClientRect(),point.y,payload,id(target)===null),
+        canDrop:(target,zone)=>categoryMoveRequest(meta.categories,payload.id,id(target),zone)!==null,
+        onStart:()=>setActiveDrag(payload),onFinish:()=>setActiveDrag(null),
+        onDrop:(target,_after,zone)=>{const request=categoryMoveRequest(meta.categories,payload.id,id(target),zone);if(request)void moveCategoryByDrag(request);},
+        onInvalid:()=>notify("这里不能放置：分类不能移入自身或子分类"),
+      });return;
+    }
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
     let dragging = false;
+    const edgeScroll = beginEdgeScroll();
     let clickBlocker: ((event: MouseEvent) => void) | null = null;
 
     const cleanup = () => {
+      edgeScroll.stop();
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
       window.removeEventListener("pointercancel", handleCancel);
@@ -393,7 +408,8 @@ export default function App() {
       setDragPoint(null);
       if (!dragging) return;
       suppressGeneratedClick();
-      if (commit) dropLibraryPayloadAt(payload, x, y);
+      const accepted = commit && dropLibraryPayloadAt(payload, x, y);
+      if (commit && !accepted) notify("这里不能放置：请选择有效分类，且不能移入自身或子分类");
     };
     const handleMove = (pointerEvent: PointerEvent) => {
       if (pointerEvent.pointerId !== pointerId) return;
@@ -405,6 +421,7 @@ export default function App() {
       }
       pointerEvent.preventDefault();
       setDragPoint({ x: pointerEvent.clientX, y: pointerEvent.clientY });
+      edgeScroll.update({ x: pointerEvent.clientX, y: pointerEvent.clientY });
     };
     const handleUp = (pointerEvent: PointerEvent) => {
       if (pointerEvent.pointerId === pointerId) finish(true, pointerEvent.clientX, pointerEvent.clientY);

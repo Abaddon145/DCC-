@@ -1,5 +1,6 @@
 import type {JSONContent} from "@tiptap/react";
-export interface NoteMapNode {id:string;topic:string;children?:NoteMapNode[];root?:boolean;expanded?:boolean;direction?:0|1}
+export interface NoteMapFormat {bold?:boolean;italic?:boolean;underline?:boolean;strike?:boolean;code?:boolean;heading?:number;link?:string}
+export interface NoteMapNode {id:string;topic:string;children?:NoteMapNode[];root?:boolean;expanded?:boolean;direction?:0|1;metadata?:{format:NoteMapFormat}}
 export interface NoteMapData {nodeData:NoteMapNode;direction:1}
 export function normalizeNoteMap(value:unknown):NoteMapData {
   const ids=new Set<string>();let count=0;
@@ -9,7 +10,14 @@ export function normalizeNoteMap(value:unknown):NoteMapData {
     if(typeof v.id!=="string"||! /^[a-zA-Z0-9_-]{1,80}$/.test(v.id)||ids.has(v.id)||typeof v.topic!=="string"||v.topic.length>1000)throw new Error("思维导图节点无效或重复");
     ids.add(v.id);
     if(v.children!==undefined&&!Array.isArray(v.children))throw new Error("思维导图子节点无效");
-    return {id:v.id,topic:v.topic,expanded:v.expanded!==false,...(depth===0?{root:true}:{}),...(Array.isArray(v.children)?{children:v.children.map(child=>visit(child,depth+1))}:{})};
+    const format:NoteMapFormat={};const metadata=v.metadata as {format?:Record<string,unknown>}|undefined;
+    const rawFormat=metadata?.format;
+    if(rawFormat&&typeof rawFormat==="object"){
+      for(const key of ["bold","italic","underline","strike","code"] as const)if(typeof rawFormat[key]==="boolean")format[key]=rawFormat[key] as boolean;
+      if(Number.isInteger(rawFormat.heading)&&Number(rawFormat.heading)>=0&&Number(rawFormat.heading)<=3)format.heading=Number(rawFormat.heading);
+      if(typeof rawFormat.link==="string"&&/^https?:\/\//i.test(rawFormat.link)&&rawFormat.link.length<=8192){try{format.link=new URL(rawFormat.link).href;}catch{/* Invalid links are never rendered. */}}
+    }
+    return {id:v.id,topic:v.topic,expanded:v.expanded!==false,...(Object.keys(format).length?{metadata:{format}}:{}),...(depth===0?{root:true}:{}),...(Array.isArray(v.children)?{children:v.children.map(child=>visit(child,depth+1))}:{})};
   }
   const input=value as {nodeData?:unknown}|null;
   return {nodeData:visit(input?.nodeData,0),direction:1};

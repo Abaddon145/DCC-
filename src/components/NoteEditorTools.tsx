@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/react";
 import { KnowledgeMenu, type KnowledgeMenuState, type KnowledgeMenuAction } from "./KnowledgeMenu";
 import { api } from "../lib/api";
 import {copyNoteSelection,pasteNoteSelection} from "../lib/noteClipboard";
+import {activeNoteShortcutAction} from "../lib/noteShortcuts";
 
 export function NoteEditorTools({editor,libraryId,noteId="",disabled,onAi,onInsert}:{editor:Editor|null;libraryId:string;noteId?:string;disabled:boolean;onAi:()=>void;onInsert:(kind:"attachment"|"reference"|"screenshot")=>void}) {
   const [menu,setMenu]=useState<KnowledgeMenuState|null>(null);
@@ -13,6 +14,13 @@ export function NoteEditorTools({editor,libraryId,noteId="",disabled,onAi,onInse
   const [linkText,setLinkText]=useState("");
   const root=useRef<HTMLDivElement>(null);
   const [error,setError]=useState("");
+  useEffect(()=>{
+    if(!editor)return;const dom=editor.view.dom;
+    const openLink=(event?:Event)=>{if(disabled)return;if(event?.type==="note-edit-link")editor.commands.selectAll();setLinkText(editor.state.doc.textBetween(editor.state.selection.from,editor.state.selection.to,"\n"));setLink(String(editor.getAttributes("link").href||""));};
+    const key=(event:KeyboardEvent)=>{if(event.isComposing||disabled||activeNoteShortcutAction(event)!=="noteLink")return;event.preventDefault();event.stopPropagation();openLink();};
+    dom.addEventListener("keydown",key,true);dom.addEventListener("note-edit-link",openLink);
+    return()=>{dom.removeEventListener("keydown",key,true);dom.removeEventListener("note-edit-link",openLink);};
+  },[editor,disabled]);
   useEffect(()=>{if(disabled){setMenu(null);setLink(null);}},[disabled]);
   const act=(work:()=>Promise<void>|void)=>{void Promise.resolve().then(work).catch(()=>setError("操作失败。剪贴板请使用 Ctrl+C / Ctrl+V；链接仅支持 http/https。"));};
   useEffect(()=>{

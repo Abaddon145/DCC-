@@ -5,6 +5,22 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub fn start_note_screenshot() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            .arg("ms-screenclip:")
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|_| "无法启动 Windows 区域截屏，请使用 Win+Shift+S 后粘贴".to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("区域截屏仅支持 Windows".into())
+}
+
+#[tauri::command]
 pub fn get_note_structure_svg(
     state: State<AppState>,
     library_id: String,
@@ -575,9 +591,10 @@ pub fn search_notes(
     favorite: bool,
     offset: u32,
     limit: u32,
+    manual_order: Option<bool>,
 ) -> Result<NotePage, String> {
     active(state.with_library_if_id(&library_id, |db, _| {
-        knowledge::search(
+        knowledge::search_ordered(
             db,
             &query,
             notebook_id.as_deref(),
@@ -585,8 +602,40 @@ pub fn search_notes(
             favorite,
             offset,
             limit,
+            manual_order.unwrap_or(false),
         )
     })?)
+}
+#[tauri::command]
+pub async fn reorder_notes(
+    app: tauri::AppHandle,
+    library_id: String,
+    source: String,
+    target: String,
+    after: bool,
+    notebook_id: Option<String>,
+    query: String,
+    favorite: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        active(
+            app.state::<AppState>()
+                .with_library_mut_if_id(&library_id, |db, _| {
+                    knowledge::reorder_notes(
+                        db,
+                        &source,
+                        &target,
+                        after,
+                        notebook_id.as_deref(),
+                        &query,
+                        favorite,
+                    )
+                })?,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn get_note(state: State<AppState>, library_id: String, id: String) -> Result<Note, String> {

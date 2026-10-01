@@ -31,6 +31,20 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(cleanup);
 describe("knowledge editing",()=>{
+  it("opens document and global search without first clicking a mode",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    const content=document.querySelector<HTMLElement>(".knowledge-editor .tiptap")!;
+    fireEvent.keyDown(content,{key:"f",ctrlKey:true});
+    expect(screen.getByRole("search",{name:"文档内搜索"})).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox",{name:"查找当前笔记"}),{target:{value:"学习目标"}});
+    expect(document.querySelector(".note-search-hit")).not.toBeNull();
+    fireEvent.keyDown(content,{key:"f",ctrlKey:true,shiftKey:true});
+    expect(screen.getByRole("dialog",{name:"搜索全部笔记"})).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog",{name:"搜索全部笔记"}),{key:"Escape"});
+    expect(screen.queryByRole("dialog",{name:"搜索全部笔记"})).toBeNull();
+  });
   it("restores the knowledge workspace through the real application startup",async()=>{
     vi.stubGlobal("ResizeObserver",class {observe(){}unobserve(){}disconnect(){}});
     const original=mocks.invoke.getMockImplementation()!;

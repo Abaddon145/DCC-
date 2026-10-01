@@ -4,7 +4,9 @@ import {Fragment} from "@tiptap/pm/model";
 import {closeHistory} from "@tiptap/pm/history";
 import MindElixir from "mind-elixir";
 import "mind-elixir/style.css";
-import {blockText,findStructure,moveStructure,noteStructure,removeStructure,structureMap,type StructureNode} from "../lib/noteStructure";
+import {blockText,findStructure,moveStructure,noteStructure,removeStructure,structureMap,insertStructureSibling,indentStructure,formatStructure,type StructureNode} from "../lib/noteStructure";
+import {activeNoteShortcutAction,applyNoteFormat} from "../lib/noteShortcuts";
+import {beginPointerReorder} from "../lib/drag";
 import {noteTemplates,templateDocument,type NoteTemplate} from "../lib/knowledge";
 import {NoteEditorTools} from "./NoteEditorTools";
 import {copyNoteSelection,pasteNoteSelection} from "../lib/noteClipboard";
@@ -14,7 +16,15 @@ export default function NoteStructureView({editor,document:doc,title,layout,disa
   const [template,setTemplate]=useState<NoteTemplate>("tutorial");const host=useRef<HTMLDivElement>(null);const mind=useRef<MindElixir|null>(null);const latest=useRef({root,doc,disabled});latest.current={root,doc,disabled};
   const cleanupDrag=useRef<(()=>void)|null>(null);const [drop,setDrop]=useState<{id:string;zone:"inside"|"before"|"after";invalid:boolean}|null>(null);
   const suppressClick=useRef(false);
+  const section=useRef<HTMLElement>(null);
   const node=findStructure(root,selected)||root;
+  useEffect(()=>{
+    const dom=editor.view.dom;
+    const zoom=(event:Event)=>{const delta=(event as CustomEvent<number>).detail;const instance=mind.current;if(instance)instance.scale(Math.max(.2,Math.min(3,instance.scaleVal+delta*.1)));else if(section.current){const value=Number(section.current.style.zoom||1);section.current.style.zoom=String(Math.max(.5,Math.min(2,value+delta*.1)));}};
+    const select=(event:Event)=>setSelected(`b${(event as CustomEvent<number>).detail}`);
+    dom.addEventListener("note-zoom",zoom);dom.addEventListener("note-select-block",select);
+    return()=>{dom.removeEventListener("note-zoom",zoom);dom.removeEventListener("note-select-block",select);};
+  },[editor]);
   const apply=(next:JSONContent)=>{if(disabled)return;const value=editor.schema.nodeFromJSON(next);editor.view.dispatch(closeHistory(editor.state.tr).replaceWith(0,editor.state.doc.content.size,value.content));setSelected("root");};
   const move=(from:string,to:string,zone:"inside"|"before"|"after")=>{const state=latest.current;if(state.disabled)return;const source=findStructure(state.root,from);const target=findStructure(state.root,to);if(!source||!target||source.index<0)throw new Error("请选择有效的内容分支");apply(moveStructure(state.doc,source.index,target.index,zone));};
   const moveRef=useRef(move);moveRef.current=move;
@@ -37,15 +47,44 @@ export default function NoteStructureView({editor,document:doc,title,layout,disa
     blocks.splice(node.end,0,kind==="heading"?{type:"heading",attrs:{level},content:[{type:"text",text:"新章节"}]}:{type:"paragraph",content:[{type:"text",text:"新内容"}]});apply({...doc,content:blocks});setSelected(`b${node.end}`);
   };
   const remove=()=>{if(node.index<0)return;const blocks=(doc.content||[]).slice(node.index,node.end);const count=(value:JSONContent):number=>(["image","attachment","reference","mindMap","remoteImage"].includes(value.type||"")?1:0)+(value.content||[]).reduce((n,child)=>n+count(child),0);if(window.confirm(`删除“${node.topic}”分支？将删除 ${blocks.length} 个内容块、${blocks.map(blockText).join("").length} 字符和 ${blocks.reduce((n,b)=>n+count(b),0)} 个图片/附件/引用。可使用撤销恢复。`))apply(removeStructure(doc,node.index));};
-  const pointerDrag=(e:React.PointerEvent,id:string)=>{
-    if(disabled||e.button!==0||(e.target as Element).closest(".structure-fold"))return;cleanupDrag.current?.();const start={x:e.clientX,y:e.clientY};let active=false;let destination:typeof drop=null;
-    const cleanup=()=>{window.removeEventListener("pointermove",update);window.removeEventListener("pointerup",finish);window.removeEventListener("pointercancel",cleanup);window.removeEventListener("keydown",escape);document.body.classList.remove("library-pointer-dragging");cleanupDrag.current=null;setDrop(null);};
-    const update=(event:PointerEvent)=>{if(event.pointerId!==e.pointerId)return;if(!active&&Math.hypot(event.clientX-start.x,event.clientY-start.y)<6)return;active=true;event.preventDefault();document.body.classList.add("library-pointer-dragging");const row=document.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>("[data-structure-node]");destination=null;if(row){const target=row.dataset.structureNode!;const rect=row.getBoundingClientRect();const ratio=(event.clientY-rect.top)/Math.max(1,rect.height);const zone=target==="root"?"inside":ratio<.25?"before":ratio>.75?"after":"inside";let invalid=false;try{const state=latest.current;moveStructure(state.doc,findStructure(state.root,id)!.index,findStructure(state.root,target)!.index,zone);}catch{invalid=true;}destination={id:target,zone,invalid};}setDrop(destination);};
-    const finish=(event:PointerEvent)=>{if(event.pointerId!==e.pointerId)return;const target=destination;cleanup();if(active){suppressClick.current=true;setTimeout(()=>{suppressClick.current=false;},0);}if(active&&target&&!target.invalid)try{moveRef.current(id,target.id,target.zone);}catch(error){notify(String(error),true);}};const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")cleanup();};cleanupDrag.current=cleanup;window.addEventListener("pointermove",update,{passive:false});window.addEventListener("pointerup",finish);window.addEventListener("pointercancel",cleanup);window.addEventListener("keydown",escape);
+  const keyboard=(event:React.KeyboardEvent)=>{
+    if(event.defaultPrevented||event.nativeEvent.isComposing)return;
+    const id=activeNoteShortcutAction(event.nativeEvent);if(!id)return;
+    const typing=!!(event.target as Element).closest("input,textarea,select,[contenteditable=true]");
+    if(typing&&!["noteUndo","noteRedo"].includes(id))return;
+    if(disabled)return;
+    if(!["noteSibling","noteIndent","notePromote","noteUndo","noteRedo","noteBold","noteItalic","noteUnderline","noteStrike","noteCode","noteLink"].includes(id)&&!/^note(Siblings)?(Heading|Paragraph)/.test(id))return;
+    event.preventDefault();event.stopPropagation();
+    try{
+      if(id==="noteUndo"||id==="noteRedo"){id==="noteUndo"?editor.commands.undo():editor.commands.redo();return;}
+      if(id==="noteSibling"){const value=insertStructureSibling(doc,node.index);apply(value.document);setSelected(`b${value.index}`);return;}
+      if(node.index<0)throw Error("请先选择内容主题");
+      if(id==="noteIndent"||id==="notePromote"){apply(indentStructure(doc,node.index,id==="notePromote"));return;}
+      const heading=/^note(Siblings)?(Heading([123])|Paragraph)$/.exec(id);
+      if(heading){apply(formatStructure(doc,node.index,Number(heading[3]||0),!!heading[1]));setSelected(node.id);return;}
+      const block=editor.state.doc.child(node.index);if(!block.isTextblock)throw Error("这个主题不是文字内容，请打开对应附件");
+      let from=1;for(let i=0;i<node.index;i++)from+=editor.state.doc.child(i).nodeSize;
+      editor.commands.setTextSelection({from,to:from+block.content.size});
+      if(id==="noteLink"){
+        const own=section.current?.querySelector<HTMLElement>(".structure-content .tiptap");
+        own?.dispatchEvent(new CustomEvent("note-edit-link"));
+      }else applyNoteFormat(editor,id);
+    }catch(error){notify(String(error),true);}
+  };
+  const pointerDrag=(e:React.PointerEvent<HTMLElement>,id:string)=>{
+    if(disabled||e.button!==0||(e.target as Element).closest(".structure-fold"))return;
+    cleanupDrag.current?.();
+    cleanupDrag.current=beginPointerReorder(e,{
+      selector:"[data-structure-node]",
+      placement:(target,point)=>{if(target.dataset.structureNode==="root")return "inside";const rect=target.getBoundingClientRect(),ratio=(point.y-rect.top)/Math.max(1,rect.height);return ratio<.25?"before":ratio>.75?"after":"inside";},
+      canDrop:(target,zone)=>{try{const state=latest.current;moveStructure(state.doc,findStructure(state.root,id)!.index,findStructure(state.root,target.dataset.structureNode!)!.index,zone);return true;}catch{return false;}},
+      onDrop:(target,_after,zone)=>{try{moveRef.current(id,target.dataset.structureNode!,zone);}catch(error){notify(String(error),true);}},
+      onInvalid:()=>notify("不能放到这里：请选择合法章节，普通正文不能接收子级",true),
+    });
   };
   useEffect(()=>()=>cleanupDrag.current?.(),[]);
   const tree=(n:StructureNode,depth=0):React.ReactNode=><div key={n.id}><div data-structure-node={n.id} className={`structure-row ${selected===n.id?"active":""} ${drop?.id===n.id?`drop-${drop.invalid?"invalid":drop.zone}`:""}`} style={{paddingLeft:depth*14+8}} onPointerDown={e=>{if(n.index>=0)pointerDrag(e,n.id);}}><button className="structure-fold" aria-label={`${folded.has(n.id)?"展开":"折叠"}${n.topic}`} disabled={!n.children.length} onClick={()=>setFolded(v=>{const next=new Set(v);if(next.has(n.id))next.delete(n.id);else next.add(n.id);return next;})}>{n.children.length?(folded.has(n.id)?"▸":"▾"):"·"}</button><button onClick={()=>setSelected(n.id)} title={n.topic}>{n.topic}</button><small>{n.children.length||""}</small></div>{!folded.has(n.id)&&n.children.map(child=>tree(child,depth+1))}</div>;
-  return <section onClickCapture={e=>{if(suppressClick.current){e.preventDefault();e.stopPropagation();}}} onKeyDown={e=>{if(e.defaultPrevented||e.nativeEvent.isComposing||(e.target as Element).closest("input,textarea,select,[contenteditable=true]"))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){e.preventDefault();if(!disabled){if(e.shiftKey)editor.commands.redo();else editor.commands.undo();}}}} className="note-structure" aria-label="整篇笔记结构"><header><div><strong>{layout==="mindMap"?"思维导图":"内容大纲"}</strong><span>与正文实时同步 · 点击节点编辑完整内容</span></div><div><button disabled={disabled} onClick={()=>editor.commands.undo()}>撤销</button><button disabled={disabled} onClick={()=>editor.commands.redo()}>重做</button><button disabled={disabled} onClick={()=>add("heading")}>添加章节</button><button disabled={disabled} onClick={()=>add("paragraph")}>添加内容</button><button disabled={disabled||node.index<0} onClick={remove}>删除分支</button>{layout==="mindMap"&&<><button onClick={()=>mind.current?.scaleFit()}>适应窗口</button><button onClick={()=>onExport("svg")}>导出 SVG</button><button onClick={()=>onExport("png")}>导出 PNG</button></>}</div></header><div className="structure-templates"><select aria-label="导图模板" value={template} onChange={e=>setTemplate(e.target.value as NoteTemplate)}>{["tutorial","concept","troubleshooting","cgWorkflow","retrospective"].map(id=><option key={id} value={id}>{noteTemplates[id as NoteTemplate].name}</option>)}</select><button disabled={disabled} onClick={()=>apply({...doc,content:[...(doc.content||[]),...(templateDocument(template).content||[])]})}>追加模板章节</button><span>保留现有内容，不覆盖</span></div><div className="structure-columns">{layout==="outline"?<nav className="structure-tree" aria-label="完整内容大纲">{tree(root)}</nav>:<div className="structure-canvas" ref={host}/>}<aside className="structure-content"><header><strong>{node.index<0?"选择一个内容节点":node.topic}</strong></header>{node.index>=0?<BlockEditor key={selected} editor={editor} index={node.index} disabled={disabled} libraryId={libraryId} noteId={noteId} onInsert={onInsert} onAi={onAi} notify={notify} trackImport={trackImport}/>:<p>章节组织正文；图片、表格、代码和独立导图保留原格式。拖动分支调整正文层级和顺序。</p>}</aside></div></section>;
+  return <section ref={section} onKeyDownCapture={keyboard} onClickCapture={e=>{if(suppressClick.current){e.preventDefault();e.stopPropagation();}}} className="note-structure" aria-label="整篇笔记结构"><header><div><strong>{layout==="mindMap"?"思维导图":"内容大纲"}</strong><span>与正文实时同步 · 点击节点编辑完整内容</span></div><div><button disabled={disabled} onClick={()=>editor.commands.undo()}>撤销</button><button disabled={disabled} onClick={()=>editor.commands.redo()}>重做</button><button disabled={disabled} onClick={()=>add("heading")}>添加章节</button><button disabled={disabled} onClick={()=>add("paragraph")}>添加内容</button><button disabled={disabled||node.index<0} onClick={remove}>删除分支</button>{layout==="mindMap"&&<><button onClick={()=>mind.current?.scaleFit()}>适应窗口</button><button onClick={()=>onExport("svg")}>导出 SVG</button><button onClick={()=>onExport("png")}>导出 PNG</button></>}</div></header><div className="structure-templates"><select aria-label="导图模板" value={template} onChange={e=>setTemplate(e.target.value as NoteTemplate)}>{["tutorial","concept","troubleshooting","cgWorkflow","retrospective"].map(id=><option key={id} value={id}>{noteTemplates[id as NoteTemplate].name}</option>)}</select><button disabled={disabled} onClick={()=>apply({...doc,content:[...(doc.content||[]),...(templateDocument(template).content||[])]})}>追加模板章节</button><span>保留现有内容，不覆盖</span></div><div className="structure-columns">{layout==="outline"?<nav className="structure-tree" aria-label="完整内容大纲">{tree(root)}</nav>:<div className="structure-canvas" ref={host}/>}<aside className="structure-content"><header><strong>{node.index<0?"选择一个内容节点":node.topic}</strong></header>{node.index>=0?<BlockEditor key={selected} editor={editor} index={node.index} disabled={disabled} libraryId={libraryId} noteId={noteId} onInsert={onInsert} onAi={onAi} notify={notify} trackImport={trackImport}/>:<p>章节组织正文；图片、表格、代码和独立导图保留原格式。拖动分支调整正文层级和顺序。</p>}</aside></div></section>;
 }
 
 function BlockEditor({editor:main,index,disabled,libraryId,noteId,onInsert,onAi,notify,trackImport}: {editor:Editor;index:number;disabled:boolean;libraryId:string;noteId:string;onInsert:(kind:"attachment"|"reference"|"screenshot")=>void;onAi:()=>void;notify:(message:string,error?:boolean)=>void;trackImport:(work:Promise<unknown>)=>Promise<unknown>}){
