@@ -380,6 +380,7 @@ fn import_with_notebook(
             [&note.id],
         )
         .map_err(err)?;
+        let note = knowledge::set_color(&tx, &note.id, package.note.color.as_deref())?;
         tx.commit().map_err(err)?;
         Ok(ImportResult { note, warnings })
     })();
@@ -479,10 +480,12 @@ mod tests {
         let attachment = knowledge_files::import(&db, &base, &blank.id, &source).unwrap();
         let note=knowledge::save(&mut db,NoteInput{id:Some(blank.id.clone()),expected_revision:Some(1),notebook_id:None,title:blank.title,document:json!({"type":"doc","content":[{"type":"attachment","attrs":{"attachmentId":attachment.id,"label":"资料"}},{"type":"reference","attrs":{"kind":"note","targetId":blank.id,"label":"自己"}}]}),tags:blank.tags,favorite:true,journal_date:None}).unwrap();
         let output = temp.path().join("note.dccnotes");
+        knowledge::set_color(&db, &note.id, Some("#7CACCB")).unwrap();
         export(&db, &base, &note.id, &output).unwrap();
         let imported = import(&mut db, &base, &output).unwrap().note;
         assert_ne!(imported.id, note.id);
         assert_eq!(imported.title, note.title);
+        assert_eq!(imported.color.as_deref(), Some("#7CACCB"));
         assert_eq!(
             imported.document["content"][1]["attrs"]["targetId"],
             imported.id
@@ -505,6 +508,7 @@ mod tests {
         assert!(duplicate(&mut db, &base, &note.id, note.revision - 1).is_err());
         let copy = duplicate(&mut db, &base, &note.id, note.revision).unwrap();
         assert_eq!(copy.title, "技术学习（副本）");
+        assert_eq!(copy.color.as_deref(), Some("#7CACCB"));
         assert!(!copy.favorite);
         assert!(copy.journal_date.is_none());
         assert!(knowledge::revisions(&db, &copy.id).unwrap().is_empty());

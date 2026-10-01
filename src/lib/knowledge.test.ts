@@ -21,8 +21,8 @@ describe("knowledge workspace", () => {
     const remove=registerNoteSaveGuard(async()=>{throw new Error("保存失败");});const mutation=vi.fn();
     try {await expect(withKnowledgeBarrier(mutation)).rejects.toThrow("保存失败");expect(mutation).not.toHaveBeenCalled();expect(knowledgeChangesPaused()).toBe(false);}finally{remove();}
   });
-  it("provides five learning templates and a blank document", () => {
-    expect(Object.keys(noteTemplates)).toHaveLength(6);
+  it("provides learning and CG templates plus a blank document", () => {
+    expect(Object.keys(noteTemplates)).toHaveLength(7);
     expect(templateDocument("tutorial").content?.[0].type).toBe("heading");
     expect(templateDocument("blank").content).toEqual([{ type: "paragraph" }]);
   });

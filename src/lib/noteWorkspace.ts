@@ -1,5 +1,5 @@
 export type NoteView = "edit" | "read";
-export interface NoteTab { id:string; title:string; pinned:boolean; view:NoteView; scroll:number; from:number; to:number }
+export interface NoteTab { id:string; title:string; pinned:boolean; view:NoteView; layout?:"document"|"outline"|"mindMap";color?:string|null; scroll:number; from:number; to:number }
 export function mergeRestoredNoteTabs(restored:NoteTab[],opened:NoteTab[]):NoteTab[]{
   const activeIds=new Set(opened.map(tab=>tab.id));
   return [...restored.filter(tab=>!activeIds.has(tab.id)),...opened].slice(-50);
@@ -12,7 +12,7 @@ export function openNoteTab(tabs:NoteTab[],id:string,title:string):NoteTab[]{
 export function sanitizeNoteTabs(value:unknown):NoteTab[]{
   if(!Array.isArray(value))return [];const seen=new Set<string>();return value.slice(0,50).flatMap(raw=>{
     if(!raw||typeof raw!=="object"||typeof raw.id!=="string"||!/^[\da-f-]{36}$/i.test(raw.id)||seen.has(raw.id))return [];
-    seen.add(raw.id);return [{id:raw.id,title:typeof raw.title==="string"?raw.title.slice(0,300):"笔记",pinned:raw.pinned===true,view:raw.view==="read"?"read" as const:"edit" as const,scroll:Math.max(0,Math.min(1e7,Number(raw.scroll)||0)),from:Math.max(1,Math.min(1e7,Number(raw.from)||1)),to:Math.max(1,Math.min(1e7,Number(raw.to)||1))}];
+    seen.add(raw.id);return [{id:raw.id,title:typeof raw.title==="string"?raw.title.slice(0,300):"笔记",pinned:raw.pinned===true,color:typeof raw.color==="string"&&/^#[\da-f]{6}$/i.test(raw.color)?raw.color:null,layout:raw.layout==="outline"?"outline" as const:raw.layout==="mindMap"?"mindMap" as const:"document" as const,view:raw.view==="read"?"read" as const:"edit" as const,scroll:Math.max(0,Math.min(1e7,Number(raw.scroll)||0)),from:Math.max(1,Math.min(1e7,Number(raw.from)||1)),to:Math.max(1,Math.min(1e7,Number(raw.to)||1))}];
   });
 }
 export interface NoteAppearance { background:string; text:string; accent:string; fontSize:number; lineHeight:number; contentWidth:number; navigationWidth:number; listWidth:number; codeTheme:"dark"|"muted" }

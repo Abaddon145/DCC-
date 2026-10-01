@@ -5,6 +5,30 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub fn get_note_structure_svg(
+    state: State<AppState>,
+    library_id: String,
+    id: String,
+    revision: i64,
+) -> Result<String, String> {
+    active(state.with_library_if_id(&library_id, |db, _| {
+        crate::note_export::structure_svg(db, &id, revision)
+    })?)
+}
+
+#[tauri::command]
+pub fn set_note_color(
+    state: State<AppState>,
+    library_id: String,
+    id: String,
+    color: Option<String>,
+) -> Result<Note, String> {
+    active(state.with_library_if_id(&library_id, |db, _| {
+        knowledge::set_color(db, &id, color.as_deref())
+    })?)
+}
+
+#[tauri::command]
 pub async fn get_note_export_html(
     app: tauri::AppHandle,
     library_id: String,

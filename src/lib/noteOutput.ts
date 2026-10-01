@@ -1,6 +1,9 @@
 import {noteMapSvg,type NoteMapData} from "./noteMindMap";
 export async function noteMapPng(data:NoteMapData):Promise<number[]> {
-  const svg=noteMapSvg(data);const source=URL.createObjectURL(new Blob([svg],{type:"image/svg+xml"}));
+  return noteSvgPng(noteMapSvg(data));
+}
+export async function noteSvgPng(svg:string):Promise<number[]> {
+  const source=URL.createObjectURL(new Blob([svg],{type:"image/svg+xml"}));
   try{
     const image=new Image();image.src=source;await image.decode();
     const canvas=document.createElement("canvas");canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { JSONContent } from "@tiptap/react";
 
 export interface KnowledgeNote {
+  color?: string | null;
   id: string; notebookId: string | null; title: string; document: JSONContent; plainText: string;
   tags: string[]; favorite: boolean; revision: number; journalDate: string | null;
   deletedAt: string | null; createdAt: string; updatedAt: string;
@@ -11,7 +12,7 @@ export interface KnowledgeNotebook { id: string; parentId: string | null; name: 
 export interface NoteRevision { id: string; noteId: string; snapshot: KnowledgeNote; pinned: boolean; createdAt: string }
 export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string};
 export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number }
-export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt">;
+export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt"|"color">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
 
 /** TypeScript structural types do not remove extra runtime fields from note snapshots. */
@@ -25,6 +26,7 @@ export function knowledgeApi(libraryId: string) {
   return {
     search: (request: NoteSearch) => invoke<{ items: NoteSummary[]; total: number }>("search_notes", { libraryId, ...request }),
     get: (id: string) => invoke<KnowledgeNote>("get_note", { libraryId, id }),
+    setColor: (id:string,color:string|null) => invoke<KnowledgeNote>("set_note_color",{libraryId,id,color}),
     duplicate: (note: KnowledgeNote) => invoke<KnowledgeNote>("duplicate_note",{libraryId,id:note.id,expectedRevision:note.revision}),
     writeClipboard: (text:string) => invoke<void>("write_note_clipboard_text",{text}),
     writeFragment: (id:string,slice:unknown) => invoke<void>("write_note_clipboard_fragment",{libraryId,id,slice}),
@@ -61,8 +63,9 @@ export function knowledgeApi(libraryId: string) {
 export const noteTemplates = {
   blank: { name: "空白笔记", headings: [] },
   tutorial: { name: "教程学习", headings: ["学习目标", "教程来源", "关键步骤", "练习与结果", "疑问与下一步"] },
-  concept: { name: "技术知识点", headings: ["概念与用途", "适用场景", "实现方法", "注意事项", "相关资料"] },
-  troubleshooting: { name: "报错解决", headings: ["问题现象", "环境与版本", "复现步骤", "原因分析", "解决方案", "验证结果"] },
+  concept: { name: "知识点拆解", headings: ["概念与用途", "适用场景", "实现方法", "注意事项", "相关资料"] },
+  cgWorkflow: { name: "CG 制作流程", headings: ["创作目标与参考", "构图与白盒", "模型与拓扑", "材质与灯光", "渲染与合成", "交付与检查"] },
+  troubleshooting: { name: "报错排查", headings: ["问题现象", "环境与版本", "复现步骤", "原因分析", "解决方案", "验证结果"] },
   retrospective: { name: "项目复盘", headings: ["目标与结果", "制作过程", "做得好的地方", "问题与改进", "可复用经验"] },
   journal: { name: "每日学习", headings: ["今日目标", "学习记录", "实践成果", "待解决问题", "明日计划"] },
 };

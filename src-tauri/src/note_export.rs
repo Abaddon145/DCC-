@@ -14,12 +14,17 @@ pub fn map_svg(data: &Value) -> Result<String, String> {
     let mut rows = Vec::new();
     let mut stack = vec![(&data["nodeData"], 0usize, None::<usize>)];
     while let Some((node, depth, parent)) = stack.pop() {
-        if rows.len() >= 1000 || depth > 32 {
+        if rows.len() >= 10000 || depth > 32 {
             return Err("思维导图过大".into());
         }
         let topic = node["topic"].as_str().ok_or("导图节点无效")?;
+        let chars: Vec<char> = topic.chars().collect();
+        let mut lines: Vec<String> = chars.chunks(14).map(|part| part.iter().collect()).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
         let index = rows.len();
-        rows.push((topic, depth, parent));
+        rows.push((lines, depth, parent));
         if let Some(children) = node["children"].as_array() {
             stack.extend(
                 children
@@ -35,25 +40,115 @@ pub fn map_svg(data: &Value) -> Result<String, String> {
         .max()
         .unwrap_or(360)
         .max(360);
-    let height = rows.len() * 56 + 32;
+    let mut offset = 20usize;
+    let boxes: Vec<(usize, usize)> = rows
+        .iter()
+        .map(|(lines, _, _)| {
+            let height = lines.len() * 20 + 20;
+            let y = offset;
+            offset += height + 16;
+            (y, height)
+        })
+        .collect();
+    let height = offset + 16;
     let scale = 1f64
         .min(1600f64 / width as f64)
         .min(1600f64 / height as f64);
-    let mut svg=format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {width} {height}\"><rect width=\"{width}\" height=\"{height}\" fill=\"#11151B\"/>",(width as f64*scale).round() as usize,(height as f64*scale).round() as usize);
-    for (i, (topic, depth, parent)) in rows.iter().enumerate() {
+    let mut svg=format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {width} {height}\"><rect width=\"{width}\" height=\"{height}\" fill=\"#11151B\"/>",(width as f64*scale).round().max(1.0) as usize,(height as f64*scale).round().max(1.0) as usize);
+    for (i, (lines, depth, parent)) in rows.iter().enumerate() {
         if let Some(parent) = parent {
             svg.push_str(&format!(
                 "<path d=\"M {} {} H {} V {}\" fill=\"none\" stroke=\"#6C7B90\"/>",
                 rows[*parent].1 * 220 + 230,
-                parent * 56 + 40,
+                boxes[*parent].0 + boxes[*parent].1 / 2,
                 depth * 220 + 8,
-                i * 56 + 40
+                boxes[i].0 + boxes[i].1 / 2
             ));
         }
-        svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"208\" height=\"40\" rx=\"6\" fill=\"#202936\" stroke=\"#64748B\"/><text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"14\" fill=\"#E4E8EF\">{}</text>",depth*220+16,i*56+20,depth*220+26,i*56+45,escape(&topic.chars().take(20).collect::<String>())));
+        svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"208\" height=\"{}\" rx=\"6\" fill=\"#202936\" stroke=\"#64748B\"/><text font-family=\"sans-serif\" font-size=\"14\" fill=\"#E4E8EF\">",depth*220+16,boxes[i].0,boxes[i].1));
+        for (line, text) in lines.iter().enumerate() {
+            svg.push_str(&format!(
+                "<tspan x=\"{}\" y=\"{}\">{}</tspan>",
+                depth * 220 + 26,
+                boxes[i].0 + 25 + line * 20,
+                escape(text)
+            ));
+        }
+        svg.push_str("</text>");
     }
     svg.push_str("</svg>");
     Ok(svg)
+}
+fn structure_data(note: &knowledge::Note) -> Value {
+    fn text(node: &Value) -> String {
+        let mut result = node["text"].as_str().unwrap_or("").to_string();
+        if let Some(children) = node["content"].as_array() {
+            for child in children {
+                result.push_str(&text(child));
+            }
+        }
+        result
+    }
+    let mut nodes = vec![serde_json::json!({"id":"root","topic":note.title,"children":[]})];
+    let mut parents = vec![0usize];
+    let mut headings = vec![(0u64, 0usize)];
+    if let Some(blocks) = note.document["content"].as_array() {
+        for (index, block) in blocks.iter().enumerate() {
+            let is_heading = block["type"] == "heading";
+            let level = block["attrs"]["level"].as_u64().unwrap_or(1);
+            if is_heading {
+                while headings.len() > 1 && headings.last().unwrap().0 >= level {
+                    headings.pop();
+                }
+            }
+            let content = text(block);
+            let label = if content.trim().is_empty() {
+                block["attrs"]["alt"]
+                    .as_str()
+                    .or(block["attrs"]["label"].as_str())
+                    .unwrap_or(match block["type"].as_str().unwrap_or("") {
+                        "image" => "图片",
+                        "table" => "表格",
+                        "mindMap" => "独立思维导图",
+                        "attachment" => "附件",
+                        "reference" => "引用",
+                        "paragraph" => "空段落",
+                        _ => "内容",
+                    })
+                    .to_string()
+            } else {
+                content.trim().to_string()
+            };
+            let summary = label.chars().take(80).collect::<String>()
+                + if label.chars().count() > 80 {
+                    "…"
+                } else {
+                    ""
+                };
+            nodes.push(serde_json::json!({"id":format!("b{index}"),"topic":summary,"children":[]}));
+            parents.push(headings.last().unwrap().1);
+            if is_heading {
+                headings.push((level, nodes.len() - 1));
+            }
+        }
+    }
+    for index in (1..nodes.len()).rev() {
+        nodes[index]["children"].as_array_mut().unwrap().reverse();
+        let node = nodes[index].take();
+        nodes[parents[index]]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(node);
+    }
+    nodes[0]["children"].as_array_mut().unwrap().reverse();
+    serde_json::json!({"nodeData":nodes.remove(0)})
+}
+pub fn structure_svg(db: &Connection, id: &str, revision: i64) -> Result<String, String> {
+    let note = knowledge::get(db, id)?;
+    if note.revision != revision {
+        return Err("笔记已变化，请重新导出".into());
+    }
+    map_svg(&structure_data(&note))
 }
 fn render(db: &Connection, base: &Path, node: &Value, budget: &mut u64) -> Result<String, String> {
     let mut content = String::new();
@@ -210,7 +305,9 @@ pub fn export_map(
     png: Option<Vec<u8>>,
     path: &Path,
 ) -> Result<(), String> {
-    uuid::Uuid::parse_str(map_id).map_err(|_| "导图 ID 无效")?;
+    if map_id != "__document__" {
+        uuid::Uuid::parse_str(map_id).map_err(|_| "导图 ID 无效")?;
+    }
     if !["svg", "png"].contains(&format)
         || path.extension().and_then(|v| v.to_str()) != Some(format)
         || path.exists()
@@ -232,7 +329,12 @@ pub fn export_map(
             nodes.extend(children);
         }
     }
-    let data = data.ok_or("笔记中未找到该导图")?;
+    let whole = if map_id == "__document__" {
+        Some(structure_data(&note))
+    } else {
+        None
+    };
+    let data = whole.as_ref().or(data).ok_or("笔记中未找到该导图")?;
     let bytes = if format == "svg" {
         map_svg(data)?.into_bytes()
     } else {
@@ -266,6 +368,8 @@ mod tests {
         let svg = map_svg(&json!({"nodeData":{"id":"root","topic":"<script>alert(1)"}})).unwrap();
         assert!(!svg.contains("<script>"));
         assert!(svg.contains("&lt;script&gt;"));
+        let svg = map_svg(&json!({"nodeData":{"topic":"abcdefghijklmnopqrstuv——结尾"}})).unwrap();
+        assert!(svg.contains("opqrstuv——结尾"));
     }
     #[test]
     fn map_persists_indexes_and_exports_without_active_html() {
@@ -288,6 +392,20 @@ mod tests {
         )
         .unwrap();
         assert!(note.plain_text.contains("参数"));
+        let structure = temp.path().join("structure.svg");
+        export_map(
+            &db,
+            &note.id,
+            note.revision,
+            "__document__",
+            "svg",
+            None,
+            &structure,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(structure)
+            .unwrap()
+            .contains("独立思维导图"));
         let result = html(&db, temp.path(), &note.id, note.revision).unwrap();
         assert!(!result.contains("<script>"));
         assert!(result.contains("&lt;script&gt;"));
