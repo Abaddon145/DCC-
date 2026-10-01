@@ -462,6 +462,43 @@ fn migrate_to_v10(connection: &Connection) -> Result<(), String> {
 }
 
 fn migrate_to_v11(connection: &Connection) -> Result<(), String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    migrate_to_v11_inner(&transaction)?;
+    transaction.commit().map_err(|e| e.to_string())
+}
+#[cfg(test)]
+#[test]
+fn legacy_trash_upgrade_rolls_back_on_copy_failure() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value TEXT);INSERT INTO schema_meta VALUES('schema_version','10');CREATE TABLE deletion_batches(id TEXT PRIMARY KEY,kind TEXT,label TEXT,asset_count INTEGER,category_count INTEGER,created_at TEXT);INSERT INTO deletion_batches VALUES('old','unexpected-kind','keep',1,0,'now');").unwrap();
+    assert!(migrate_to_v11(&db).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT label FROM deletion_batches WHERE id='old'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        db.query_row("SELECT value FROM schema_meta", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "10"
+    );
+    assert!(!db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='deletion_batches_v10')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+}
+
+fn migrate_to_v11_inner(connection: &Connection) -> Result<(), String> {
     let version = connection
         .query_row(
             "SELECT value FROM schema_meta WHERE key='schema_version'",
@@ -3235,7 +3272,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "16");
+        assert_eq!(version, "17");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

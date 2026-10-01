@@ -8,6 +8,8 @@ import { DetailPanel } from "./DetailPanel";
 import { MediaDetail } from "./MediaLibraryView";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useRequestGate, useWorkspaceState } from "../lib/workspace";
+import {LoadFeedback,ReadFailure} from "./LoadFeedback";
+import { ProjectChecklist } from "./ProjectChecklist";
 import {beginPointerReorder} from "../lib/drag";
 
 const typeLabels: Record<ProjectType, string> = { still: "静帧作品", scene: "场景项目", animation: "动画 / 短片" };
@@ -28,6 +30,7 @@ export function ProjectHub({ initialProjectId,onAi, contentLanguage, notify, onO
   const setTab=(value:string)=>{closeInspectors();setContext(previous=>({...previous,tab:value,scroll:0}))};
   const projectGate=useRequestGate();
   useEffect(()=>{if(!contextLoaded||!context.projectId||(initialProjectId&&context.projectId!==initialProjectId))return;const version=projectGate.begin();void api.getProject(context.projectId,contentLanguage,false).then(value=>{if(projectGate.isCurrent(version))setActive(value)}).catch(()=>{if(projectGate.isCurrent(version)){setActive(null);setContext(previous=>({...previous,projectId:null}))}});return()=>projectGate.invalidate()},[contextLoaded,context.projectId,contentLanguage]);
+  const listVersion=useRef(0);const [listFailed,setListFailed]=useState(false);
   const [loading, setLoading] = useState(true);
   const [inspectedAsset, setInspectedAsset] = useState<AssetDetail | null>(null);
   const [inspectedMedia, setInspectedMedia] = useState<MediaEntryDetail | null>(null);
@@ -35,7 +38,7 @@ export function ProjectHub({ initialProjectId,onAi, contentLanguage, notify, onO
   const [contextMenu, setContextMenu] = useState<{x:number;y:number;title:string;items:ContextMenuItem[]}|null>(null);
   const detailGate = useRequestGate();
   const closeInspectors = useCallback(() => { detailGate.invalidate(); setInspectedAsset(null); setInspectedMedia(null); }, [detailGate]);
-  const refreshList = useCallback(async () => { setLoading(true); try { setProjects(await api.listProjects(showArchived)); } catch (error) { notify(String(error), true); } finally { setLoading(false); } }, [showArchived, notify]);
+  const refreshList = useCallback(async () => { const version=++listVersion.current;setListFailed(false);setLoading(true); try { const items=await api.listProjects(showArchived);if(version===listVersion.current)setProjects(items); } catch (error) { if(version===listVersion.current){setListFailed(true);notify(String(error), true);} } finally { if(version===listVersion.current)setLoading(false); } }, [showArchived, notify]);
   const refreshActive = useCallback(async (markOpened = false) => { if (!active) return; const version=projectGate.begin();try { const value = await api.getProject(active.id, contentLanguage, markOpened);if(!projectGate.isCurrent(version))return;setActive(value); setProjects(previous => previous.map(item => item.id === value.id ? value : item)); } catch (error) { notify(String(error), true); } }, [active?.id, contentLanguage, notify]);
   useEffect(() => { void refreshList(); }, [refreshList, refreshKey]);
   useEffect(() => { if (active) void refreshActive(false); }, [contentLanguage]);
@@ -69,7 +72,7 @@ export function ProjectHub({ initialProjectId,onAi, contentLanguage, notify, onO
   </>;
   return <section className="project-hub">
     <header className="module-page-header"><div><span className="eyebrow">CREATIVE WORKSPACE</span><h1>创作项目</h1><p>把素材、参考、镜头和制作任务组织成可执行的作品计划。</p></div><div><label className="toggle-line"><input type="checkbox" checked={showArchived} onChange={event => setShowArchived(event.target.checked)} />显示已归档</label><button className="primary-button" onClick={() => setEditing(emptyProject())}><Plus size={16} />新建项目</button></div></header>
-    {loading ? <div className="loading-state">正在读取项目…</div> : projects.length ? <div className="project-card-grid">{projects.map(project => <article className="project-card" key={project.id} onContextMenu={event=>{event.preventDefault();setContextMenu({x:event.clientX,y:event.clientY,title:project.name,items:[{label:"打开项目",run:()=>void openProject(project.id)},{label:"编辑项目",run:()=>setEditing(toInput(project))},{label:project.status==="archived"?"恢复项目":"归档项目",run:()=>void archive(project,project.status!=="archived")},{label:"永久删除项目",danger:true,disabled:project.status!=="archived",run:()=>void purge(project)}]})}}>
+    {listFailed?<ReadFailure onRetry={()=>void refreshList()}/>:loading ? <LoadFeedback label="正在读取项目…" skeleton/> : projects.length ? <div className="project-card-grid">{projects.map(project => <article className="project-card" key={project.id} onContextMenu={event=>{event.preventDefault();setContextMenu({x:event.clientX,y:event.clientY,title:project.name,items:[{label:"打开项目",run:()=>void openProject(project.id)},{label:"编辑项目",run:()=>setEditing(toInput(project))},{label:project.status==="archived"?"恢复项目":"归档项目",run:()=>void archive(project,project.status!=="archived")},{label:"永久删除项目",danger:true,disabled:project.status!=="archived",run:()=>void purge(project)}]})}}>
       <button className="project-cover" onClick={() => void openProject(project.id)}><ProjectCover project={project} /><span>{typeLabels[project.projectType]}</span></button>
       <div className="project-card-body"><div className="project-title-row"><div><span className={`project-status ${project.status}`}>{statusLabels[project.status]}</span><h3>{project.name}</h3></div><ProjectMenu project={project} onEdit={() => setEditing(toInput(project))} onArchive={() => void archive(project, project.status !== "archived")} onDelete={() => void purge(project)} /></div>
       <p>{project.description || "暂无项目说明"}</p><div className="project-stats"><span><Images size={14} />{project.assetCount} 素材</span><span><ListTodo size={14} />{project.completedTaskCount}/{project.taskCount} 任务</span>{project.reviewTaskCount > 0 && <span className="review"><Check size={14} />{project.reviewTaskCount} 待检查</span>}</div>
@@ -188,7 +191,7 @@ function ProjectTasks({ contentLanguage,project, notify, refresh }: { contentLan
   const [editing, setEditing] = useState<ProjectTaskInput | null>(null);
   const save = async (input: ProjectTaskInput) => { try { await api.saveProjectTask(input); setEditing(null); await refresh(); } catch (error) { notify(String(error), true); } };
   const remove = async (task: ProjectTask) => { if (!window.confirm(`删除任务“${task.title}”？`)) return; try { await api.deleteProjectTask(task.id); await refresh(); } catch (error) { notify(String(error), true); } };
-  return <div className="kanban"><div className="project-tools"><button className="primary-button compact" onClick={() => setEditing(emptyTask(project.id))}><Plus size={14} />新建任务</button><span>完成 {project.progress}% · 拖动卡片切换状态</span></div><div className="kanban-columns">{taskColumns.map(column=><ProjectTaskColumn key={column.id} project={project} column={column} notify={notify} onMoved={refresh} onEdit={task=>setEditing(toTaskInput(task))} onDelete={remove} onAdd={()=>setEditing({...emptyTask(project.id),status:column.id})}/>)}</div>{editing && <TaskEditor value={editing} units={project.units} contentLanguage={contentLanguage} onClose={() => setEditing(null)} onSave={save} />}</div>;
+  return <div className="kanban"><div className="project-tools"><button className="primary-button compact" onClick={() => setEditing(emptyTask(project.id))}><Plus size={14} />新建任务</button><ProjectChecklist projectId={project.id} kind={project.projectType} onAdded={refresh} notify={notify}/><span>完成 {project.progress}% · 拖动卡片切换状态</span></div><div className="kanban-columns">{taskColumns.map(column=><ProjectTaskColumn key={column.id} project={project} column={column} notify={notify} onMoved={refresh} onEdit={task=>setEditing(toTaskInput(task))} onDelete={remove} onAdd={()=>setEditing({...emptyTask(project.id),status:column.id})}/>)}</div>{editing && <TaskEditor value={editing} units={project.units} contentLanguage={contentLanguage} onClose={() => setEditing(null)} onSave={save} />}</div>;
 }
 
 function ProjectTaskColumn({project,column,notify,onMoved,onEdit,onDelete,onAdd}:{project:CreativeProject;column:{id:ProjectTaskStatus;label:string};notify:Props["notify"];onMoved:()=>Promise<void>;onEdit:(task:ProjectTask)=>void;onDelete:(task:ProjectTask)=>Promise<void>;onAdd:()=>void}) {

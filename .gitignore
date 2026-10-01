@@ -22,6 +22,11 @@ reference-boards/
 release-artifacts/
 task-journal.json
 task-journal.tmp
+recovery-drafts/
+backup-policies/
+.restore-pending.json
+.restore-old-*/
+.restore-new-*/
 translation-glossary.json
 translation-cache.sqlite*
 library.db*

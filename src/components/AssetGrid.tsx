@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { LoadFeedback } from "./LoadFeedback";
 import { Box, Check, Heart } from "lucide-react";
 import type { AssetCard, LibraryPreferences } from "../types";
 import type { LibraryDragPayload } from "../types";
@@ -11,6 +12,7 @@ interface Props {
   items: AssetCard[];
   total: number;
   loading: boolean;
+  blocked?: boolean;
   selectedId: string | null;
   onSelect: (id: string, trigger?: HTMLElement) => void;
   onFavorite: (item: AssetCard) => void;
@@ -29,7 +31,7 @@ export function assetIdsForDrag(itemId: string, selectionMode: boolean, selected
   return selectionMode && selectedIds.has(itemId) ? [...selectedIds] : [itemId];
 }
 
-export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavorite, onContextMenu, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences, query = "" }: Props) {
+export function AssetGrid({ items, total, loading, blocked=false, selectedId, onSelect, onFavorite, onContextMenu, onLoadMore, scrollRef, selectionMode = false, selectedIds = new Set(), onToggleSelect, onPointerDragStart, preferences, query = "" }: Props) {
   const [width, setWidth] = useState(900);
   const lastSelected = useRef<number | null>(null);
   const viewMode = preferences?.assetView || "grid";
@@ -53,7 +55,7 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
   useEffect(() => virtualizer.measure(), [rowHeight, viewMode]);
   const virtualRows = virtualizer.getVirtualItems();
   const lastIndex = virtualRows.at(-1)?.index ?? 0;
-  useEffect(() => { if (!loading && items.length < total && lastIndex >= rows - 2) onLoadMore(); }, [lastIndex, rows, items.length, total, loading, onLoadMore]);
+  useEffect(() => { if (!blocked && !loading && items.length < total && lastIndex >= rows - 2) onLoadMore(); }, [blocked,lastIndex, rows, items.length, total, loading, onLoadMore]);
 
   const content = useMemo(() => virtualRows.map(row => {
     const slice = items.slice(row.index * columns, row.index * columns + columns);
@@ -103,8 +105,10 @@ export function AssetGrid({ items, total, loading, selectedId, onSelect, onFavor
     </div>;
   }), [virtualRows, items, columns, onSelect, onFavorite, onContextMenu, selectedId, selectionMode, selectedIds, onToggleSelect, onPointerDragStart, preferences, viewMode, query, coverHeight]);
 
+  if (blocked && items.length === 0) return null;
+  if (loading && items.length === 0) return <LoadFeedback label="正在读取素材…" skeleton/>;
   if (!loading && items.length === 0) return <div className="empty-state"><div className="empty-icon"><Box size={34} /></div><h2>还没有找到素材</h2><p>调整搜索条件，或者添加第一条素材。</p></div>;
-  return <div className="virtual-grid" style={{ height: virtualizer.getTotalSize() }}>{content}{loading && <div className="grid-loading">正在读取素材…</div>}</div>;
+  return <div className="virtual-grid" style={{ height: virtualizer.getTotalSize() }}>{content}{loading && <LoadFeedback label="正在读取素材…"/>}</div>;
 }
 
 function HighlightedText({ text, query }: { text: string; query: string }) {

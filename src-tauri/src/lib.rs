@@ -1,5 +1,6 @@
 mod ai;
 mod ai_store;
+mod automatic_backup;
 mod backup;
 mod bilingual;
 mod commands;
@@ -27,6 +28,7 @@ mod note_remote_images;
 mod organization;
 mod projects;
 mod reference_boards;
+mod reliability;
 mod search_syntax;
 mod state;
 mod tasks;
@@ -56,6 +58,7 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "set_knowledge_editing"
             | "finish_knowledge_close"
     ) || (backup
+        && command != "list_reference_boards"
         && (command.starts_with("get_")
             || command.starts_with("list_")
             || command.starts_with("search_")
@@ -160,6 +163,30 @@ pub fn run() {
         })
         .invoke_handler(|invoke| {
             let webview = invoke.message.webview();
+            let interrupted = webview
+                .state::<AppState>()
+                .with_active_mut(|active| Ok(active.base_dir.join(backup::RESTORE_MARKER).exists()))
+                .unwrap_or(true);
+            if interrupted
+                && !matches!(
+                    invoke.message.command(),
+                    "get_library_locations"
+                        | "get_personalization_settings"
+                        | "get_automatic_backup_policy"
+                        | "get_interrupted_restore"
+                        | "recover_interrupted_restore"
+                        | "export_diagnostics"
+                        | "list_library_tasks"
+                        | "get_task_warning"
+                        | "set_knowledge_editing"
+                        | "finish_knowledge_close"
+                )
+            {
+                invoke
+                    .resolver
+                    .reject("上次恢复中断，请在设置中心的数据与素材库页确认恢复原库");
+                return true;
+            }
             if let Some((_, backup)) = webview.state::<AppState>().tasks.maintenance() {
                 if !maintenance_command_allowed(invoke.message.command(), backup) {
                     invoke
@@ -227,6 +254,23 @@ pub fn run() {
                     ai::run_ai_search,
                     get_library_meta,
                     tasks::list_library_tasks,
+                    reliability::stash_note_recovery,
+                    reliability::get_note_recovery,
+                    reliability::clear_note_recovery,
+                    reliability::restore_note_recovery_copy,
+                    reliability::set_note_review,
+                    reliability::list_note_reviews,
+                    reliability::get_note_review,
+                    reliability::get_interrupted_restore,
+                    reliability::recover_interrupted_restore,
+                    reliability::list_recovery_notes,
+                    reliability::export_diagnostics,
+                    reliability::add_project_checklist,
+                    automatic_backup::get_automatic_backup_policy,
+                    automatic_backup::save_automatic_backup_policy,
+                    automatic_backup::get_automatic_backup_due,
+                    automatic_backup::finish_automatic_backup,
+                    tasks::get_task_warning,
                     tasks::get_library_task,
                     tasks::start_library_task,
                     tasks::cancel_library_task,
@@ -405,6 +449,7 @@ mod tests {
         assert!(!maintenance_command_allowed("upsert_asset", true));
         assert!(!maintenance_command_allowed("search_assets", false));
         assert!(maintenance_command_allowed("list_library_tasks", false));
+        assert!(!maintenance_command_allowed("list_reference_boards", true));
     }
 
     #[test]
