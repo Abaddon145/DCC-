@@ -61,3 +61,26 @@
 @media(max-width:1000px){.knowledge-navigation{flex-basis:160px}.knowledge-list{width:220px}.knowledge-main .knowledge-document{padding:24px 20px 80px}.knowledge-tabs>button{padding:5px;font-size:10px}}
 .knowledge-mind-map{margin:24px 0;border:1px solid var(--border-color,#334155);border-radius:8px;padding:12px;cursor:pointer;overflow:hidden}.knowledge-mind-map img{max-height:260px;max-width:100%;object-fit:contain;display:block;margin:12px auto}.note-map-dialog{width:min(1400px,94vw);height:88vh;background:#11151b;border:1px solid #334155;border-radius:10px;display:flex;flex-direction:column;overflow:hidden}.note-map-dialog header{padding:16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #334155;gap:12px}.note-map-dialog header span{display:block;font-size:12px;color:#9aa8ba;margin-top:6px}.note-map-dialog header button{margin-left:8px}.note-map-canvas{flex:1;min-height:0;position:relative}.note-map-dialog [role=alert]{color:#f4a39a;padding:12px}
 .note-find-bar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:8px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);font-size:12px}.note-find-bar input{min-width:80px;flex:1}.note-search-hit{background:var(--accent-bg);outline:1px solid var(--accent);border-radius:2px}.note-global-search{width:min(640px,90vw);max-height:80vh;display:flex;flex-direction:column;gap:12px}.note-global-search>div{overflow:auto;min-height:0}.note-global-search>div>button{display:flex;flex-direction:column;gap:6px;width:100%;text-align:left;padding:12px;border-bottom:1px solid var(--border)}.note-global-search span{font-size:12px;color:var(--text-muted);overflow-wrap:anywhere}
+
+/* One content scroller; controls never move out of the available workspace. */
+.knowledge-main .knowledge-editor{display:flex;flex-direction:column;overflow:hidden}
+.knowledge-editor>.knowledge-view-switch,.knowledge-editor>.knowledge-editor-heading,.knowledge-editor>.note-find-bar{position:relative;top:auto;flex-shrink:0;background:var(--note-background,var(--panel));z-index:2}
+.knowledge-main .knowledge-document{width:100%;min-height:0;overflow:auto;margin:0 auto;flex:1;box-sizing:border-box}
+.knowledge-main .knowledge-structured-document{max-width:none;display:flex;flex-direction:column;padding:16px;overflow:hidden}
+.knowledge-structured-document .knowledge-title{font-size:22px!important;padding-bottom:10px!important}
+.knowledge-structured-document .knowledge-metadata{margin-bottom:12px}
+.note-structure{height:auto;min-height:0;flex:1}
+.note-structure>header,.structure-templates{flex-shrink:0}
+.structure-content{width:34%;min-width:200px;max-width:420px;resize:horizontal}
+.structure-tree{flex:1;width:auto;min-width:0}
+.structure-row{min-height:40px}
+.structure-canvas me-tpc{max-width:260px;line-height:1.6;border-radius:6px!important}
+.structure-canvas me-tpc img{max-width:160px;max-height:100px;object-fit:contain}
+.knowledge-editor-heading select{max-width:180px}
+
+@media(max-width:1100px){.knowledge-navigation{flex-basis:150px}.knowledge-list{width:200px;padding-inline:10px}.knowledge-structured-document .knowledge-metadata{display:none}.note-structure>header{padding:8px}.structure-content{width:42%;min-width:160px;padding:10px}.structure-templates{padding:6px 8px}.knowledge-view-switch span{display:none}}
+@media(max-height:650px){.knowledge-main .knowledge-structured-document{padding:8px}.structure-templates{display:none}.knowledge-structured-document .knowledge-title{font-size:18px!important}.knowledge-editor-heading{padding-block:6px}}
+.structure-tree .structure-row button:not(.structure-fold){white-space:normal;overflow-wrap:anywhere;line-height:1.75}
+.structure-inline-content{border-left:1px solid var(--border);padding:0 12px 8px;min-width:0}.structure-inline-content .knowledge-prose{min-height:0}.structure-inline-content .knowledge-prose>[data-topic-depth]{margin-left:0!important}.structure-inline-content .knowledge-editor-tools{margin-block:8px}
+.structure-image img{max-width:240px;max-height:160px;object-fit:contain}.note-structure header label{display:inline-flex;gap:6px;align-items:center;font-size:11px}.note-structure input[type=color]{width:26px;height:26px;padding:0;border:0}
+.knowledge-hide-navigation>.knowledge-navigation,.knowledge-hide-list>.knowledge-list{display:none}.knowledge-tabs>button[aria-pressed=true]{color:var(--note-accent)}

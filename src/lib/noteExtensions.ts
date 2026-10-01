@@ -1,6 +1,19 @@
-import { Node, mergeAttributes } from "@tiptap/react";
+import { Extension, Node, mergeAttributes } from "@tiptap/react";
 import Image from "@tiptap/extension-image";
 import {noteMapSvg} from "./noteMindMap";
+import {Plugin} from "@tiptap/pm/state";
+import {normalizeStructure} from "./noteStructure";
+
+export const NoteTopicHierarchy=Extension.create({
+  name:"noteTopicHierarchy",
+  addProseMirrorPlugins(){return [new Plugin({appendTransaction:(transactions,_old,state)=>{
+    if(!transactions.some(transaction=>transaction.docChanged))return null;
+    const normalized=normalizeStructure(state.doc.toJSON());const transaction=state.tr;let index=0;
+    state.doc.forEach((block,position)=>{const attrs=normalized.content![index++].attrs!;if(block.attrs.topicDepth!==attrs.topicDepth||block.attrs.topicId!==attrs.topicId)transaction.setNodeMarkup(position,undefined,{...block.attrs,topicDepth:attrs.topicDepth,topicId:attrs.topicId});});
+    return transaction.steps.length?transaction:null;
+  }})];},
+  addGlobalAttributes(){return [{types:["doc"],attributes:{mapDirection:{default:2},mapTheme:{default:"graphite"}}},{types:["paragraph","heading","bulletList","orderedList","taskList","blockquote","codeBlock","horizontalRule","table","image","remoteImage","reference","attachment","mindMap"],attributes:{topicColor:{default:null,parseHTML:element=>{const value=element.getAttribute("data-topic-color");return value&&/^#[a-f0-9]{6}$/i.test(value)?value:null;},renderHTML:attrs=>attrs.topicColor?{"data-topic-color":attrs.topicColor}:{}},topicId:{default:null,parseHTML:element=>{const id=element.getAttribute("data-topic-id");return id&&/^[a-f0-9-]{36}$/i.test(id)?id:null;},renderHTML:attrs=>attrs.topicId?{"data-topic-id":attrs.topicId}:{}},topicDepth:{default:null,parseHTML:element=>{const raw=element.getAttribute("data-topic-depth");const value=Number(raw);return raw!==null&&Number.isInteger(value)&&value>=0&&value<=32?value:null;},renderHTML:attrs=>attrs.topicDepth===null?{}:{"data-topic-depth":attrs.topicDepth,style:`margin-left:${attrs.topicDepth*14}px`}}}}];},
+});
 
 export const NoteMindMapNode=Node.create({
   name:"mindMap",group:"block",atom:true,draggable:true,

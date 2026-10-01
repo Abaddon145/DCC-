@@ -18,7 +18,7 @@ export default function NoteMindMapDialog({data,readOnly,onChange,onClose,regist
   const history=useRef<NoteMapData[]>([]);const future=useRef<NoteMapData[]>([]);
   const [error,setError]=useState("");const [exporting,setExporting]=useState(false);
   const [find,setFind]=useState(false);const [query,setQuery]=useState("");const [match,setMatch]=useState(0);
-  const decorate=()=>{const mind=instance.current;if(!mind)return;const visit=(node:NoteMapNode)=>{const el=mind.findEle(node.id);if(el)el.style.fontStyle=node.metadata?.format.italic?"italic":"normal";node.children?.forEach(visit);};visit(normalizeNoteMap(mind.getData()).nodeData);};
+  const decorate=()=>{const mind=instance.current;if(!mind)return;const visit=(node:NoteMapNode)=>{const el=host.current?.querySelector<HTMLElement>(`me-tpc[data-nodeid="me${node.id}"]`);if(el)el.style.fontStyle=node.metadata?.format.italic?"italic":"normal";node.children?.forEach(visit);};visit(normalizeNoteMap(mind.getData()).nodeData);};
   const commit=()=>{try{if(instance.current&&!readOnly){const next=normalizeNoteMap(instance.current.getData());if(JSON.stringify(next)!==JSON.stringify(initial.current)){history.current.push(initial.current);history.current=history.current.slice(-50);future.current=[];initial.current=next;update.current(next);}decorate();}return true;}catch(e){setError(String(e));return false;}};
   const replace=(next:NoteMapData)=>{initial.current=normalizeNoteMap(next);instance.current?.refresh(displayData(initial.current));decorate();update.current(initial.current);};
   const undo=(redo=false)=>{if(readOnly)return;const from=redo?future.current:history.current;const to=redo?history.current:future.current;const previous=from.pop();if(previous){to.push(initial.current);replace(previous);}};
@@ -43,8 +43,8 @@ export default function NoteMindMapDialog({data,readOnly,onChange,onClose,regist
     if(event.nativeEvent.isComposing)return;
     const mind=instance.current;if(!mind)return;
     const id=activeNoteShortcutAction(event.nativeEvent);
-    const typing=!!(event.target as Element).closest("input,textarea,[contenteditable=true]");
-    if(typing&&!["noteUndo","noteRedo","noteFind","noteZoomIn","noteZoomOut"].includes(id||""))return;
+    const target=event.target as Element;const editing=target.closest<HTMLElement>("#input-box");const typing=!!target.closest("input,textarea,[contenteditable]:not([contenteditable=false])");
+    if(typing&&!["noteUndo","noteRedo","noteFind","noteZoomIn","noteZoomOut"].includes(id||"")&&!(editing&&["noteSibling","noteIndent","notePromote"].includes(id||"")))return;
     if(!id)return;event.preventDefault();event.stopPropagation();
     try{
       if(id==="noteFind"){setFind(true);return;}
@@ -53,9 +53,10 @@ export default function NoteMindMapDialog({data,readOnly,onChange,onClose,regist
       if(readOnly)return;
       if(id==="noteScreenshot"){await invoke("start_note_screenshot");setError("截取后关闭独立导图，返回笔记正文用 Ctrl+V 插入图片");return;}
       if(id==="noteUndo"||id==="noteRedo"){undo(id==="noteRedo");return;}
+      if(editing&&["noteSibling","noteIndent","notePromote"].includes(id)){editing.blur();if(!commit())return;}
       const node=mind.currentNode;if(!node)throw Error("请先选择主题");
       if(id==="noteSibling"){if(!node.nodeObj.parent)await mind.addChild(node);else await mind.insertSibling("after",node);return;}
-      if(id==="noteIndent"){const parent=node.nodeObj.parent;const index=parent?.children?.findIndex(n=>n.id===node.nodeObj.id)??-1;if(!parent||index<=0)throw Error("没有可缩进的前一个同级主题");await mind.moveNodeIn([node],mind.findEle(parent.children![index-1].id));return;}
+      if(id==="noteIndent"){await mind.addChild(node);return;}
       if(id==="notePromote"){const parent=node.nodeObj.parent;if(!parent||!parent.parent)throw Error("已经位于根级");await mind.moveNodeAfter([node],mind.findEle(parent.id));return;}
       const current=normalizeNoteMap(mind.getData());
       let selected:NoteMapNode|undefined;let siblings:NoteMapNode[]=[];
@@ -73,7 +74,7 @@ export default function NoteMindMapDialog({data,readOnly,onChange,onClose,regist
     }catch(e){setError(String(e));}
   };
   return <div className="modal-backdrop note-map-backdrop" onPointerDown={event=>{if(event.target===event.currentTarget&&!exporting)close();}}><section className="note-map-dialog" role="dialog" aria-modal="true" aria-label="思维导图" onKeyDownCapture={event=>{void key(event);}} onKeyDown={event=>{event.stopPropagation();if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();if(commit())void onSave().catch(e=>setError(String(e)));}if(event.key==="Escape"&&!exporting)close();}}>
-    <header><div><strong>思维导图</strong><span>{readOnly?"阅读模式":"双击编辑 · Enter 同级 · Tab 缩进 · Shift+Tab 提升"}</span></div><div>{!readOnly&&<><button onClick={()=>undo()}>撤销</button><button onClick={()=>undo(true)}>重做</button></>}<button onClick={()=>instance.current?.scaleFit()}>适应窗口</button><button disabled={exporting} onClick={()=>exportMap("svg")}>导出 SVG</button><button disabled={exporting} onClick={()=>exportMap("png")}>导出 PNG</button><button disabled={exporting} onClick={close}>关闭</button></div></header>
+    <header><div><strong>思维导图</strong><span>{readOnly?"阅读模式":"双击编辑 · Enter 同级 · Tab 子主题 · Shift+Tab 提升"}</span></div><div>{!readOnly&&<><button onClick={()=>undo()}>撤销</button><button onClick={()=>undo(true)}>重做</button></>}<button onClick={()=>instance.current?.scaleFit()}>适应窗口</button><button disabled={exporting} onClick={()=>exportMap("svg")}>导出 SVG</button><button disabled={exporting} onClick={()=>exportMap("png")}>导出 PNG</button><button disabled={exporting} onClick={close}>关闭</button></div></header>
     {find&&<div className="note-find-bar"><input autoFocus aria-label="查找导图主题" value={query} onChange={e=>{setQuery(e.target.value);setMatch(-1);}} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();jump(e.shiftKey?-1:1);}if(e.key==="Escape"){e.stopPropagation();setFind(false);}}}/><button onClick={()=>jump(-1)}>上一处</button><button onClick={()=>jump(1)}>下一处</button><button onClick={()=>setFind(false)}>关闭查找</button></div>}
     {error&&<p role="alert">{error}</p>}<div ref={host} className="note-map-canvas" onClickCapture={event=>{const link=(event.target as Element).closest("a");if(link){event.preventDefault();event.stopPropagation();const href=link.getAttribute("href");if(href&&/^https?:\/\//i.test(href))void api.openExternal(href).catch(e=>setError(String(e)));}}}/>
   </section></div>;

@@ -1,6 +1,6 @@
 import type {JSONContent} from "@tiptap/react";
 export interface NoteMapFormat {bold?:boolean;italic?:boolean;underline?:boolean;strike?:boolean;code?:boolean;heading?:number;link?:string}
-export interface NoteMapNode {id:string;topic:string;children?:NoteMapNode[];root?:boolean;expanded?:boolean;direction?:0|1;metadata?:{format:NoteMapFormat}}
+export interface NoteMapNode {id:string;topic:string;children?:NoteMapNode[];root?:boolean;expanded?:boolean;direction?:0|1;branchColor?:string;image?:{url:string;width:number;height:number;fit:"contain"};metadata?:{format:NoteMapFormat}}
 export interface NoteMapData {nodeData:NoteMapNode;direction:1}
 export function normalizeNoteMap(value:unknown):NoteMapData {
   const ids=new Set<string>();let count=0;

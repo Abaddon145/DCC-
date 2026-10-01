@@ -13,6 +13,7 @@ const images = [
 ];
 
 describe("ImageLightbox", () => {
+  it("uses the managed note protocol for note images",()=>{const id="11111111-1111-4111-8111-111111111111";render(<ImageLightbox images={[{id,originalName:"笔记图片",noteAttachmentId:id}]} initialIndex={0} title="笔记" onClose={vi.fn()}/>);expect(screen.getAllByAltText("笔记图片")[0]).toHaveAttribute("src",`http://dcc-media.localhost/note/${id}`);});
   it("switches images with controls and keyboard", () => {
     render(<ImageLightbox images={images} initialIndex={0} title="素材" onClose={vi.fn()} />);
     expect(screen.getByText(/first\.png/)).toBeInTheDocument();

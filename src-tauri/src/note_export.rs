@@ -14,7 +14,8 @@ pub fn map_svg(data: &Value) -> Result<String, String> {
     let mut rows = Vec::new();
     let mut stack = vec![(&data["nodeData"], 0usize, None::<usize>)];
     while let Some((node, depth, parent)) = stack.pop() {
-        if rows.len() >= 10000 || depth > 32 {
+        // Whole-note topics allow depth 32 plus the virtual note-title root.
+        if rows.len() >= 10000 || depth > 33 {
             return Err("思维导图过大".into());
         }
         let topic = node["topic"].as_str().ok_or("导图节点无效")?;
@@ -95,8 +96,11 @@ fn structure_data(note: &knowledge::Note) -> Value {
     if let Some(blocks) = note.document["content"].as_array() {
         for (index, block) in blocks.iter().enumerate() {
             let is_heading = block["type"] == "heading";
-            let level = block["attrs"]["level"].as_u64().unwrap_or(1);
-            if is_heading {
+            let explicit = block["attrs"]["topicDepth"].as_u64();
+            let level = explicit
+                .map(|depth| depth + 1)
+                .unwrap_or_else(|| block["attrs"]["level"].as_u64().unwrap_or(1));
+            if is_heading || explicit.is_some() {
                 while headings.len() > 1 && headings.last().unwrap().0 >= level {
                     headings.pop();
                 }
@@ -127,7 +131,7 @@ fn structure_data(note: &knowledge::Note) -> Value {
                 };
             nodes.push(serde_json::json!({"id":format!("b{index}"),"topic":summary,"children":[]}));
             parents.push(headings.last().unwrap().1);
-            if is_heading {
+            if is_heading || explicit.is_some() {
                 headings.push((level, nodes.len() - 1));
             }
         }
@@ -260,7 +264,16 @@ pub fn html(db: &Connection, base: &Path, id: &str, revision: i64) -> Result<Str
         return Err("笔记已变化，请重新导出".into());
     }
     knowledge::inspect_document(&note.document)?;
-    let body = render(db, base, &note.document, &mut 0)?;
+    let mut budget = 0;
+    let mut body = String::new();
+    for block in note.document["content"].as_array().ok_or("笔记正文无效")? {
+        let content = render(db, base, block, &mut budget)?;
+        let depth = block["attrs"]["topicDepth"].as_u64().unwrap_or(0);
+        body.push_str(&format!(
+            "<section style=\"margin-left:{}px\">{content}</section>",
+            depth * 14
+        ));
+    }
     Ok(format!("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>body{{max-width:860px;margin:48px auto;padding:24px;font:16px/1.8 system-ui;color:#242a33;background:#fff}}img,svg{{max-width:100%;height:auto}}pre{{white-space:pre-wrap;background:#f2f4f7;padding:16px}}table{{border-collapse:collapse}}td,th{{border:1px solid #bbb;padding:8px}}blockquote{{border-left:3px solid #bbb;margin-left:0;padding-left:18px}}</style></head><body><h1>{}</h1>{body}</body></html>",escape(&note.title),escape(&note.title)))
 }
 pub fn export(

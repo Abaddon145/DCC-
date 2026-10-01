@@ -283,6 +283,38 @@ pub(crate) fn inspect_document(
         return Err("笔记内容超过 4 MB，请拆分笔记或使用附件".into());
     }
     let mut text = String::new();
+    if let Some(blocks) = document["content"].as_array() {
+        let mut previous = None;
+        let mut topic_ids = std::collections::HashSet::new();
+        for block in blocks {
+            if let Some(id) = block["attrs"]["topicId"].as_str() {
+                if Uuid::parse_str(id).is_err() || !topic_ids.insert(id) {
+                    return Err("主题标识无效或重复".into());
+                }
+            }
+            if let Some(color) = block["attrs"]["topicColor"].as_str() {
+                if color.len() != 7
+                    || !color.starts_with('#')
+                    || !color[1..].bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err("主题颜色格式无效".into());
+                }
+            }
+            if let Some(value) = block["attrs"].get("topicDepth").filter(|v| !v.is_null()) {
+                let depth = value
+                    .as_u64()
+                    .filter(|n| *n <= 32)
+                    .ok_or("主题层级无效或超过 32 层")?;
+                if depth > previous.map_or(0, |n| n + 1) {
+                    return Err("主题层级不能跳过父级".into());
+                }
+                previous = Some(depth);
+            } else {
+                // Legacy documents remain readable; conversion happens in the editor.
+                previous = None;
+            }
+        }
+    }
     let mut references = Vec::new();
     let mut stack = vec![(document, 0)];
     while let Some((node, depth)) = stack.pop() {
@@ -988,6 +1020,22 @@ mod tests {
         value.document = serde_json::json!({"type":"doc","content":[{"type":"text","text":"点击","marks":[{"type":"link","attrs":{"href":"javascript:alert(1)"}}]}]});
         assert!(save(&mut db, value).is_err());
         assert_eq!(search(&db, "", None, false, false, 0, 10).unwrap().total, 0);
+    }
+
+    #[test]
+    fn topic_hierarchy_is_independent_of_headings_and_validated_before_save() {
+        let mut db = db();
+        let mut value = input("深层主题");
+        value.document = serde_json::json!({"type":"doc","content":(0..=12).map(|depth| serde_json::json!({"type":"paragraph","attrs":{"topicDepth":depth},"content":[{"type":"text","text":"主题"}]})).collect::<Vec<_>>()});
+        let saved = save(&mut db, value).unwrap();
+        assert_eq!(saved.document["content"][12]["attrs"]["topicDepth"], 12);
+        let mut bad = edit(&saved);
+        bad.document["content"][1]["attrs"]["topicDepth"] = serde_json::json!(33);
+        assert!(save(&mut db, bad).is_err());
+        assert_eq!(get(&db, &saved.id).unwrap().revision, saved.revision);
+        let mut bad = edit(&saved);
+        bad.document["content"][1]["attrs"]["topicDepth"] = serde_json::json!(3);
+        assert!(save(&mut db, bad).is_err());
     }
     #[test]
     fn restore_failure_rolls_back_checkpoint() {

@@ -82,8 +82,8 @@ describe("knowledge editing",()=>{
     const init=vi.spyOn(MindElixir.prototype,"init").mockImplementation(function(this:MindElixir,data){mind=this;return original.call(this,data);});
     try{
       render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());fireEvent.click(screen.getByRole("button",{name:"导图"}));await waitFor(()=>expect(mind).not.toBeNull());
-      await act(async()=>{const instance=mind!;await instance.moveNodeIn([instance.findEle("b0")],instance.findEle("b6"));});fireEvent.click(screen.getByRole("button",{name:"保存"}));
-      await waitFor(()=>{const input=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input;expect(input.document.content[6].attrs.level).toBe(3);expect(input.document.content[6].content[0].text).toBe("学习目标");});
+      await act(async()=>{const instance=mind!;const ids:string[]=[];const visit=(node:typeof instance.nodeData)=>{ids.push(node.id);node.children?.forEach(visit);};instance.nodeData.children?.forEach(visit);await instance.moveNodeIn([instance.findEle(ids[0])],instance.findEle(ids[6]));});fireEvent.click(screen.getByRole("button",{name:"保存"}));
+      await waitFor(()=>{const input=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input;expect(input.document.content[6].attrs.level).toBe(2);expect(input.document.content[6].attrs.topicDepth).toBe(1);expect(input.document.content[6].content[0].text).toBe("学习目标");});
       fireEvent.click(screen.getByRole("button",{name:"撤销"}));fireEvent.click(screen.getByRole("button",{name:"保存"}));await waitFor(()=>expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input.document.content[0].content[0].text).toBe("学习目标"));
     }finally{init.mockRestore();}
   });
@@ -91,6 +91,11 @@ describe("knowledge editing",()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
     fireEvent.click(screen.getByRole("button",{name:"导图"}));await screen.findByRole("region",{name:"整篇笔记结构"});await waitFor(()=>expect(document.querySelectorAll(".structure-canvas me-tpc").length).toBeGreaterThan(1));
     fireEvent.click(screen.getByRole("button",{name:"正文"}));await screen.findByRole("textbox",{name:"笔记正文"});expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note")).toBe(false);
+  });
+  it("creates consecutive children while editing outline topics without losing selection",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());fireEvent.click(screen.getByRole("button",{name:"大纲"}));fireEvent.click(await screen.findByRole("button",{name:"学习目标"}));
+    for(let depth=0;depth<8;depth++){const body=await screen.findByRole("textbox",{name:"节点完整内容"});fireEvent.keyDown(body,{key:"Tab",code:"Tab"});}
+    fireEvent.click(screen.getByRole("button",{name:"保存"}));await waitFor(()=>{const input=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note").at(-1)?.[1].input;expect(input.document.content.some((block:{attrs:{topicDepth:number}})=>block.attrs.topicDepth===8)).toBe(true);});
   });
   it("moves a held note into a notebook with pointer events rather than native HTML drag",async()=>{
     const original=mocks.invoke.getMockImplementation()!;const id="22222222-2222-4222-8222-222222222222";

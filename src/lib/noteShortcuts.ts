@@ -1,6 +1,6 @@
 import {Extension,type Editor} from "@tiptap/react";
 import {Plugin} from "@tiptap/pm/state";
-import {formatStructure} from "./noteStructure";
+import {formatStructure,insertStructureChild,insertStructureSibling,indentStructure} from "./noteStructure";
 
 import {activeNoteShortcutAction,noteShortcutAction} from "./noteShortcutKeys";
 export {noteShortcutDefaults,noteShortcutLabels,setNoteShortcuts,noteShortcutAction,activeNoteShortcutAction} from "./noteShortcutKeys";
@@ -18,7 +18,7 @@ export function applyNoteFormat(editor:Editor,id:string) {
   return true;
 }
 
-/** Override only formatting. Lists, tables and code retain their native Enter/Tab. */
+/** Lists, tables and code retain their native Enter/Tab. */
 export const NoteFormattingShortcuts=Extension.create({
   name:"noteFormattingShortcuts",priority:2000,
   addProseMirrorPlugins(){
@@ -28,6 +28,19 @@ export const NoteFormattingShortcuts=Extension.create({
         this.editor.view.dom.dispatchEvent(new CustomEvent("note-switch-view",{bubbles:true}));return true;
       }
       const id=activeNoteShortcutAction(event);
+      if(this.editor.isEditable&&["noteIndent","noteSibling","notePromote"].includes(id||"")){
+        const {$from}=this.editor.state.selection;
+        if($from.depth!==1||!["paragraph","heading"].includes($from.parent.type.name)||this.editor.view.dom.getAttribute("aria-label")==="节点完整内容")return false;
+        const index=$from.index(0),document=this.editor.getJSON();
+        try{
+          const result=id==="notePromote"?{document:indentStructure(document,index,true),index}:id==="noteIndent"?insertStructureChild(document,index):insertStructureSibling(document,index);
+          if(id==="notePromote"){const sourceId=document.content?.[index].attrs?.topicId;const destination=result.document.content?.findIndex(block=>block.attrs?.topicId===sourceId)??index;if(destination>=0)result.index=destination;}
+          const value=this.editor.schema.nodeFromJSON(result.document);let position=1;for(let i=0;i<result.index;i++)position+=value.child(i).nodeSize;
+          this.editor.commands.setContent(result.document);
+          this.editor.commands.setTextSelection({from:position,to:position+value.child(result.index).content.size});
+        }catch(error){this.editor.view.dom.dispatchEvent(new CustomEvent("note-structure-error",{bubbles:true,detail:String(error)}));}
+        return true;
+      }
       if(this.editor.isEditable&&id==="noteUndo")return this.editor.commands.undo();
       if(this.editor.isEditable&&id==="noteRedo")return this.editor.commands.redo();
       const original=noteShortcutAction(event);

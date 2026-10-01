@@ -3,7 +3,8 @@ import { ChevronLeft, ChevronRight, Maximize2, Minus, Plus, X } from "lucide-rea
 import type { AssetImage } from "../types";
 import { ImagePreview, preloadImage } from "./ImagePreview";
 
-interface Props { images: AssetImage[]; initialIndex: number; title: string; onClose: () => void }
+interface Props { images: (Pick<AssetImage,"id"|"originalName"> & {noteAttachmentId?:string})[]; initialIndex: number; title: string; onClose: () => void }
+const noteImageUrl=(id?:string)=>id&&/^[a-f0-9-]{36}$/i.test(id)?`http://dcc-media.localhost/note/${id}`:null;
 
 export function ImageLightbox({ images, initialIndex, title, onClose }: Props) {
   const [index, setIndex] = useState(Math.max(0, Math.min(initialIndex, images.length - 1)));
@@ -31,7 +32,7 @@ export function ImageLightbox({ images, initialIndex, title, onClose }: Props) {
   useEffect(() => {
     [-1, 1].forEach(delta => {
       const adjacent = images[(index + delta + images.length) % images.length];
-      if (adjacent && adjacent.id !== image?.id) preloadImage(adjacent.id, false).catch(() => undefined);
+      if (adjacent && adjacent.id !== image?.id && !adjacent.noteAttachmentId) preloadImage(adjacent.id, false).catch(() => undefined);
     });
   }, [images, index, image?.id]);
 
@@ -40,12 +41,12 @@ export function ImageLightbox({ images, initialIndex, title, onClose }: Props) {
     <header className="lightbox-header"><div><strong>{title}</strong><span>{index + 1} / {images.length} · {image.originalName}</span></div><button aria-label="关闭大图" onClick={onClose}><X size={21} /></button></header>
     <div className="lightbox-stage" onWheel={event => { event.preventDefault(); setZoomClamped(zoom + (event.deltaY < 0 ? .2 : -.2)); }} onPointerDown={event => { if (zoom <= 1) return; drag.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (!drag.current) return; setOffset({ x: drag.current.ox + event.clientX - drag.current.x, y: drag.current.oy + event.clientY - drag.current.y }); }} onPointerUp={() => { drag.current = null; }} onDoubleClick={() => { if (zoom === 1) setZoom(2); else reset(); }}>
       {images.length > 1 && <button aria-label="上一张" className="lightbox-nav previous" onClick={() => move(-1)}><ChevronLeft size={28} /></button>}
-      <div className="lightbox-image-wrap" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}><ImagePreview imageId={image.id} thumbnail={false} alt={image.originalName} className="lightbox-image" /></div>
+      <div className="lightbox-image-wrap" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}>{noteImageUrl(image.noteAttachmentId)?<img src={noteImageUrl(image.noteAttachmentId)!} alt={image.originalName} className="lightbox-image" draggable={false}/>:<ImagePreview imageId={image.id} thumbnail={false} alt={image.originalName} className="lightbox-image" />}</div>
       {images.length > 1 && <button aria-label="下一张" className="lightbox-nav next" onClick={() => move(1)}><ChevronRight size={28} /></button>}
     </div>
     <footer className="lightbox-footer">
       <div className="lightbox-tools"><button aria-label="缩小" onClick={() => setZoomClamped(zoom - .25)}><Minus size={16} /></button><span>{Math.round(zoom * 100)}%</span><button aria-label="放大" onClick={() => setZoomClamped(zoom + .25)}><Plus size={16} /></button><button aria-label="适应窗口" onClick={reset} title="适应窗口 (0)"><Maximize2 size={16} /></button></div>
-      <div className="lightbox-thumbs">{images.map((item, itemIndex) => <button key={item.id} className={itemIndex === index ? "active" : ""} onClick={() => { setIndex(itemIndex); reset(); }}><ImagePreview imageId={item.id} alt={item.originalName} className="lightbox-thumb" /></button>)}</div>
+      <div className="lightbox-thumbs">{images.map((item, itemIndex) => <button key={item.id} className={itemIndex === index ? "active" : ""} onClick={() => { setIndex(itemIndex); reset(); }}>{noteImageUrl(item.noteAttachmentId)?<img src={noteImageUrl(item.noteAttachmentId)!} alt={item.originalName} className="lightbox-thumb"/>:<ImagePreview imageId={item.id} alt={item.originalName} className="lightbox-thumb" />}</button>)}</div>
     </footer>
   </div>;
 }
