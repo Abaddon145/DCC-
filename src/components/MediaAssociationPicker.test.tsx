@@ -13,4 +13,20 @@ describe("media association workflow",()=>{
  it("copies images and reports skips instead of moving or deleting originals",async()=>{
    const notify=vi.fn();render(<MediaAssociationPicker ids={["image"]} target="board" onClose={vi.fn()} onAdded={async()=>{}} notify={notify}/>);await screen.findByRole("option",{name:"参考"});fireEvent.click(screen.getByRole("button",{name:"确认加入"}));await waitFor(()=>expect(api.addMediaImagesToBoard).toHaveBeenCalledWith("board",["image"],{x:0,y:0}));await waitFor(()=>expect(notify).toHaveBeenCalledWith(expect.stringContaining("跳过 1 项"),true));
  });
+ it.each(["project","board"] as const)("passes the expected library UUID to every %s mutation",async target=>{
+   const close=vi.fn();const libraryId="11111111-1111-4111-8111-111111111111";
+   render(<MediaAssociationPicker ids={["image"]} target={target} expectedLibraryId={libraryId} onClose={close} onAdded={async()=>{}} notify={vi.fn()}/>);
+   await screen.findByRole("option",{name:target==="project"?"CG作品":"参考"});fireEvent.click(screen.getByRole("button",{name:"确认加入"}));
+   await waitFor(()=>expect(close).toHaveBeenCalled());
+   if(target==="project")expect(api.linkProjectMedia).toHaveBeenCalledWith(["image"],["project"],libraryId);
+   else expect(api.addMediaImagesToBoard).toHaveBeenCalledWith("board",["image"],{x:0,y:0},libraryId);
+ });
+ it("stops a picker whose target module has been disabled",async()=>{
+   const props={ids:["image"],target:"project" as const,onClose:vi.fn(),onAdded:async()=>{},notify:vi.fn()};
+   const {rerender}=render(<MediaAssociationPicker {...props}/>);await screen.findByRole("option",{name:"CG作品"});
+   rerender(<MediaAssociationPicker {...props} canAddProject={false}/>);
+   expect(screen.getByRole("button",{name:"确认加入"})).toBeDisabled();
+   expect(screen.getByText("此模块已关闭，请先在设置中心启用。")).toBeInTheDocument();
+   fireEvent.click(screen.getByRole("button",{name:"确认加入"}));expect(api.linkProjectMedia).not.toHaveBeenCalled();
+ });
 });

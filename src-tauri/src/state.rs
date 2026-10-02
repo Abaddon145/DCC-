@@ -611,16 +611,38 @@ impl AppState {
         &self,
         request: StorageChangeRequest,
     ) -> Result<LibraryLocationState, String> {
-        self.cancel_link_check()?;
-        if let Ok(mut pending) = self.pending_move_undo.lock() {
-            *pending = None;
-        }
+        self.change_library_inner(request, None)
+    }
+
+    pub(crate) fn change_library_for_migration(
+        &self,
+        task_id: &str,
+    ) -> Result<LibraryLocationState, String> {
+        let task = self.tasks.get(task_id)?;
+        let crate::tasks::TaskRequest::Migration(request) = task.payload else {
+            return Err("不是迁移任务，未切换素材库".into());
+        };
+        self.change_library_inner(request, Some(task_id))
+    }
+
+    fn change_library_inner(
+        &self,
+        request: StorageChangeRequest,
+        migration_task: Option<&str>,
+    ) -> Result<LibraryLocationState, String> {
         let target = absolute_clean_path(&request.path)?;
         validate_not_root(&target)?;
         let mut active = self
             .active
             .lock()
             .map_err(|_| "素材库锁已损坏".to_string())?;
+        // Enqueue takes this same lock: a switch cannot pass an idle check while a task submits.
+        self.tasks
+            .ensure_library_change_allowed(&active.marker.library_id, migration_task)?;
+        self.cancel_link_check()?;
+        if let Ok(mut pending) = self.pending_move_undo.lock() {
+            *pending = None;
+        }
         let current = absolute_clean_path(&path_text(&active.base_dir))?;
         if target == current {
             return Err("所选目录已经是当前素材库".into());
@@ -1063,6 +1085,93 @@ mod tests {
         ensure_library(&library, "测试库", false).unwrap();
         validate_library(&library).unwrap();
         assert_eq!(read_marker(&library).unwrap().name, "测试库");
+    }
+
+    #[test]
+    fn enqueue_after_idle_preflight_prevents_library_switch_under_shared_lock() {
+        let dir = tempdir().unwrap();
+        let library = dir.path().join("library");
+        let target = dir.path().join("target");
+        let state = test_state(&library);
+        let original_id = state.active_library_id().unwrap();
+        std::thread::scope(|scope| {
+            let guard = state.active.lock().unwrap();
+            let (preflight, ready) = std::sync::mpsc::channel();
+            let state = &state;
+            let target = &target;
+            let switch = scope.spawn(move || {
+                assert!(!state.tasks.busy());
+                preflight.send(()).unwrap();
+                state.change_library(StorageChangeRequest {
+                    mode: "create".into(),
+                    path: path_text(&target),
+                    name: None,
+                })
+            });
+            ready.recv().unwrap();
+            state
+                .tasks
+                .submit(
+                    guard.marker.library_id.clone(),
+                    crate::tasks::TaskRequest::BrowserCapture {
+                        id: Uuid::new_v4().to_string(),
+                    },
+                )
+                .unwrap();
+            drop(guard);
+            assert!(switch.join().unwrap().unwrap_err().contains("任务仍在执行"));
+        });
+        assert_eq!(state.active_library_id().unwrap(), original_id);
+        assert!(!target.exists());
+        assert!(!library.join("settings.json").exists());
+    }
+
+    #[test]
+    fn queued_or_non_migration_task_cannot_authorize_library_change() {
+        let dir = tempdir().unwrap();
+        let library = dir.path().join("library");
+        let target = dir.path().join("target");
+        let state = test_state(&library);
+        let id = state.active_library_id().unwrap();
+        let (capture, _) = state
+            .tasks
+            .submit(
+                id.clone(),
+                crate::tasks::TaskRequest::BrowserCapture {
+                    id: Uuid::new_v4().to_string(),
+                },
+            )
+            .unwrap();
+        assert!(state
+            .change_library_for_migration(&capture.id)
+            .unwrap_err()
+            .contains("不是迁移任务"));
+        state.tasks.cancel(&capture.id).unwrap();
+        let (migration, _) = state
+            .tasks
+            .submit(
+                id,
+                crate::tasks::TaskRequest::Migration(StorageChangeRequest {
+                    mode: "migrate".into(),
+                    path: path_text(&target),
+                    name: None,
+                }),
+            )
+            .unwrap();
+        assert!(state
+            .change_library_for_migration(&migration.id)
+            .unwrap_err()
+            .contains("迁移任务已失效"));
+        assert!(!target.exists());
+        state.tasks.cancel(&migration.id).unwrap();
+        state
+            .change_library(StorageChangeRequest {
+                mode: "create".into(),
+                path: path_text(&target),
+                name: None,
+            })
+            .unwrap();
+        assert_eq!(state.active.lock().unwrap().base_dir, target);
     }
 
     #[test]

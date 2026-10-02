@@ -24,6 +24,9 @@ pub enum TaskRequest {
         id: String,
     },
     MediaImport(MediaImportRequest),
+    BrowserCapture {
+        id: String,
+    },
     ModelThumbnail {
         #[serde(rename = "entryId")]
         entry_id: String,
@@ -52,6 +55,7 @@ impl TaskRequest {
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
             Self::MediaImport(_) => "媒体导入",
+            Self::BrowserCapture { .. } => "浏览器采集",
             Self::ModelThumbnail { .. } => "模型缩略图",
             Self::FabImport { .. } => "Fab / 表格导入",
             Self::Translation { .. } => "双语补译",
@@ -214,6 +218,31 @@ impl TaskRegistry {
             .map(|store| store.entries.iter().any(|t| active(&t.status)))
             .unwrap_or(true)
     }
+    pub(crate) fn ensure_library_change_allowed(
+        &self,
+        library_id: &str,
+        migration_task: Option<&str>,
+    ) -> Result<(), String> {
+        let store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let Some(id) = migration_task {
+            if !store.entries.iter().any(|t| {
+                t.id == id
+                    && t.library_id == library_id
+                    && t.status == "running"
+                    && matches!(t.payload, TaskRequest::Migration(_))
+            }) {
+                return Err("迁移任务已失效，未切换素材库".into());
+            }
+        }
+        if store
+            .entries
+            .iter()
+            .any(|t| active(&t.status) && Some(t.id.as_str()) != migration_task)
+        {
+            return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
+        }
+        Ok(())
+    }
     pub fn list(&self, library_id: &str) -> Result<Vec<LibraryTask>, String> {
         Ok(self
             .store
@@ -291,6 +320,15 @@ impl TaskRegistry {
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
             if let Some(existing)=store.entries.iter().find(|value|active(&value.status)&&matches!(&value.payload,TaskRequest::ModelThumbnail{entry_id:id} if id==entry_id)){return Ok((existing.clone(),false))}
+        }
+        if let TaskRequest::BrowserCapture { id } = &task.payload {
+            if let Some(existing) = store.entries.iter().find(|value| {
+                value.library_id == task.library_id
+                    && (active(&value.status) || value.status == "completed")
+                    && matches!(&value.payload,TaskRequest::BrowserCapture{id:other} if other==id)
+            }) {
+                return Ok((existing.clone(), false));
+            }
         }
         if let Some(warning) = &store.persistence_warning {
             return Err(warning.clone());
@@ -467,18 +505,26 @@ pub fn queue_model_thumbnail_tasks(
     app: AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<usize, String> {
-    let id = state.active_library_id()?;
-    let jobs =
-        state.with_library(|connection, _| media_library::pending_model_thumbnails(connection))?;
+    let (id, jobs) = state.with_active_mut(|active| {
+        let connection = active
+            .connection
+            .as_ref()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        Ok((
+            active.marker.library_id.clone(),
+            media_library::pending_model_thumbnails(connection)?,
+        ))
+    })?;
     let mut count = 0;
     for job in jobs {
         if state.tasks.has_manual_thumbnail_task(&id, &job.id) {
             continue;
         }
-        start_library_task(
+        start_library_task_for_library(
             app.clone(),
             state.clone(),
             TaskRequest::ModelThumbnail { entry_id: job.id },
+            Some(&id),
         )?;
         count += 1;
     }
@@ -563,6 +609,14 @@ pub fn start_library_task(
     state: tauri::State<AppState>,
     payload: TaskRequest,
 ) -> Result<LibraryTask, String> {
+    start_library_task_for_library(app, state, payload, None)
+}
+pub fn start_library_task_for_library(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    payload: TaskRequest,
+    expected_library: Option<&str>,
+) -> Result<LibraryTask, String> {
     if matches!(
         payload,
         TaskRequest::Restore { .. } | TaskRequest::Migration(_)
@@ -570,7 +624,14 @@ pub fn start_library_task(
     {
         return Err("请先收回悬浮参考板，再维护素材库".into());
     }
-    let (task, launch) = state.tasks.submit(state.active_library_id()?, payload)?;
+    let (task, launch) = state.with_active_mut(|active| {
+        if expected_library.is_some_and(|id| id != active.marker.library_id) {
+            return Err("任务目标素材库已切换，未提交".into());
+        }
+        state
+            .tasks
+            .submit(active.marker.library_id.clone(), payload)
+    })?;
     if launch {
         tauri::async_runtime::spawn(dispatch(app));
     }
@@ -610,7 +671,7 @@ pub fn retry_library_task(
             });
         }
     }
-    start_library_task(app, state, payload)
+    start_library_task_for_library(app, state, payload, Some(&previous.library_id))
 }
 async fn dispatch(app: AppHandle) {
     loop {
@@ -654,6 +715,56 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::BrowserCapture { id } => tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            let (base, path) = state.with_active_mut(|active| {
+                if active.marker.library_id != task.library_id {
+                    return Err("采集所属库已切换".into());
+                }
+                Ok((active.base_dir.clone(), active.db_path.clone()))
+            })?;
+            let mut connection = open_media_worker_connection(&path)?;
+            let root = crate::browser_capture::mailbox_root()?;
+            let resource = app.path().resource_dir().ok();
+            let stop_app = app.clone();
+            let stop_id = task.id.clone();
+            let _control = crate::media::ProcessControl::new(move || {
+                stop_app.state::<AppState>().tasks.should_stop(&stop_id)
+            });
+            state.tasks.update(
+                &task.id,
+                0,
+                1,
+                String::new(),
+                "校验 / 复制 / 生成预览".into(),
+                None,
+            );
+            let result = crate::browser_capture::import(
+                &mut connection,
+                &base,
+                resource.as_deref(),
+                &root,
+                &id,
+                &task.library_id,
+                &|| state.tasks.should_stop(&task.id),
+            );
+            let response = match &result {
+                Ok(value) => serde_json::json!({"status":"completed","result":value}),
+                Err(error) => serde_json::json!({"status":"failed","message":error}),
+            };
+            crate::browser_capture::write_result(&id, &response)?;
+            state.tasks.update(
+                &task.id,
+                1,
+                1,
+                String::new(),
+                "采集处理结束".into(),
+                result.as_ref().ok().cloned(),
+            );
+            result
+        })
+        .await
+        .map_err(|e| e.to_string())?,
         payload @ (TaskRequest::AssetMediaImport { .. } | TaskRequest::AssetMediaRetry { .. }) => {
             tauri::async_runtime::spawn_blocking(move || {
                 let state = app.state::<AppState>();
@@ -828,8 +939,8 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                         })?;
                         Ok(serde_json::json!({"safetyBackupDirectory":safety}))
                     }
-                    TaskRequest::Migration(request) => {
-                        serde_json::to_value(state.change_library(request)?)
+                    TaskRequest::Migration(_) => {
+                        serde_json::to_value(state.change_library_for_migration(&task.id)?)
                             .map_err(|e| e.to_string())
                     }
                     _ => Err("未知维护任务".into()),
@@ -844,6 +955,80 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn library_change_only_exempts_the_exact_running_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        assert!(registry.ensure_library_change_allowed("lib", None).is_ok());
+        let (capture, _) = registry
+            .submit(
+                "lib".into(),
+                TaskRequest::BrowserCapture {
+                    id: "capture".into(),
+                },
+            )
+            .unwrap();
+        assert!(registry.ensure_library_change_allowed("lib", None).is_err());
+        registry.claim().unwrap();
+        assert!(registry
+            .ensure_library_change_allowed("lib", Some(&capture.id))
+            .is_err());
+        registry.finish(&capture.id, Ok(serde_json::json!({})));
+        let (migration, _) = registry
+            .submit(
+                "lib".into(),
+                TaskRequest::Migration(StorageChangeRequest {
+                    mode: "migrate".into(),
+                    path: "target".into(),
+                    name: None,
+                }),
+            )
+            .unwrap();
+        assert!(registry
+            .ensure_library_change_allowed("lib", Some(&migration.id))
+            .is_err());
+        registry.claim().unwrap();
+        assert!(registry.ensure_library_change_allowed("lib", None).is_err());
+        assert!(registry
+            .ensure_library_change_allowed("other", Some(&migration.id))
+            .is_err());
+        assert!(registry
+            .ensure_library_change_allowed("lib", Some("wrong-task"))
+            .is_err());
+        assert!(registry
+            .ensure_library_change_allowed("lib", Some(&migration.id))
+            .is_ok());
+        registry.finish(&migration.id, Ok(serde_json::json!({})));
+        assert!(registry
+            .ensure_library_change_allowed("lib", Some(&migration.id))
+            .is_err());
+        assert!(registry.ensure_library_change_allowed("lib", None).is_ok());
+    }
+
+    #[test]
+    fn capture_submission_deduplicates_pending_running_and_completed_within_its_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let payload = TaskRequest::BrowserCapture {
+            id: "capture".into(),
+        };
+        let (first, _) = registry.submit("lib".into(), payload.clone()).unwrap();
+        let (queued, launch) = registry.submit("lib".into(), payload.clone()).unwrap();
+        assert_eq!(queued.id, first.id);
+        assert!(!launch);
+        registry.claim().unwrap();
+        let (running, launch) = registry.submit("lib".into(), payload.clone()).unwrap();
+        assert_eq!(running.id, first.id);
+        assert!(!launch);
+        registry.finish(&first.id, Ok(serde_json::json!({})));
+        let (completed, launch) = registry.submit("lib".into(), payload.clone()).unwrap();
+        assert_eq!(completed.id, first.id);
+        assert!(!launch);
+        let (other, _) = registry.submit("other".into(), payload).unwrap();
+        assert_ne!(other.id, first.id);
+        assert_eq!(registry.list("lib").unwrap().len(), 1);
+        assert_eq!(registry.list("other").unwrap().len(), 1);
+    }
     #[test]
     fn sqlite_busy_timeout_assignment_returns_a_result_row() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();

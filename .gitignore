@@ -23,6 +23,7 @@ release-artifacts/
 task-journal.json
 task-journal.tmp
 recovery-drafts/
+browser-capture/
 backup-policies/
 .restore-pending.json
 .restore-old-*/
