@@ -46,6 +46,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     const GROUPS: [&[&str]; 4] = [
         &[
             "library",
+            "browserCapture",
             "imageLibrary",
             "modelLibrary",
             "audioLibrary",

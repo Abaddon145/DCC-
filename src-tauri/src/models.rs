@@ -74,6 +74,7 @@ pub struct SearchRequest {
 pub fn default_module_order() -> Vec<String> {
     [
         "library",
+        "browserCapture",
         "imageLibrary",
         "modelLibrary",
         "audioLibrary",
