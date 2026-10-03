@@ -16,6 +16,12 @@ pub(crate) const MODEL: &str = "deepseek-flash";
 const PROMPT_VERSION: &str = "dcc-translation-v1";
 const MAX_OUTPUT: u64 = 4096;
 
+#[derive(Debug)]
+pub(crate) struct CreativeReply {
+    pub content: Result<String, String>,
+    pub used: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TranslationPreferences {
@@ -293,6 +299,17 @@ impl TranslationService {
     ) -> Result<String, String> {
         let key = deepseek_key()?;
         self.creative_exchange(body, limit, cancel, &key, DEEPSEEK_URL)
+            .await?
+            .content
+    }
+    pub(crate) async fn creative_json_with_usage(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<CreativeReply, String> {
+        let key = deepseek_key()?;
+        self.creative_exchange(body, limit, cancel, &key, DEEPSEEK_URL)
             .await
     }
     // URL and key are private implementation inputs. The command surface never accepts them.
@@ -305,7 +322,8 @@ impl TranslationService {
         url: &str,
     ) -> Result<String, String> {
         self.creative_exchange(body, limit, cancel, "local-test-fixture", url)
-            .await
+            .await?
+            .content
     }
     async fn creative_exchange(
         &self,
@@ -314,7 +332,7 @@ impl TranslationService {
         cancel: &std::sync::atomic::AtomicBool,
         key: &str,
         url: &str,
-    ) -> Result<String, String> {
+    ) -> Result<CreativeReply, String> {
         use std::sync::atomic::Ordering;
         let builder = Client::builder();
         // Local test servers must not pass through Windows system proxies.
@@ -365,10 +383,10 @@ impl TranslationService {
             let result = tokio::select! { result=request=>result, _=cancelled=>return Err("已取消生成；已发送请求可能产生用量".into()) };
             match result {
                 Ok((status, Some(value))) => {
-                    if let Some(used) = value
+                    let used = value
                         .pointer("/usage/total_tokens")
-                        .and_then(|v| v.as_u64())
-                    {
+                        .and_then(|v| v.as_u64());
+                    if let Some(used) = used {
                         self.settle_for("deepseek", reserved, used, &month, true)?;
                     }
                     if value
@@ -376,13 +394,19 @@ impl TranslationService {
                         .and_then(|v| v.as_str())
                         != Some("stop")
                     {
-                        return Err("AI 结果未完整生成，请缩小范围后重试".into());
+                        return Ok(CreativeReply {
+                            used,
+                            content: Err("AI 结果未完整生成，请缩小范围后重试".into()),
+                        });
                     }
-                    return value
-                        .pointer("/choices/0/message/content")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .ok_or_else(|| format!("AI 未返回结果（{status}）"));
+                    return Ok(CreativeReply {
+                        used,
+                        content: value
+                            .pointer("/choices/0/message/content")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .ok_or_else(|| format!("AI 未返回结果（{status}）")),
+                    });
                 }
                 Ok((status, None)) => {
                     self.settle_for("deepseek", reserved, 0, &month, true)?;
@@ -994,7 +1018,9 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let handle = std::thread::spawn(move || {
             let mut count = 0;
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Client initialization competes with the full parallel database/media suite.
+            // Keep this fixture bounded, without expiring before the client can connect.
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
             for (status, value) in responses {
                 let mut socket = loop {
                     match listener.accept() {
@@ -1006,7 +1032,7 @@ mod tests {
                     }
                 };
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
                 let mut bytes = [0; 8192];
                 let mut request = Vec::new();
@@ -1091,10 +1117,35 @@ mod tests {
             &url,
         ))
         .unwrap();
-        assert_eq!(value, "{}");
+        assert_eq!(value.content.unwrap(), "{}");
+        assert_eq!(value.used, Some(81));
         assert_eq!(server.join().unwrap(), 2);
         assert_eq!(service.usage().unwrap().creative_tokens, 81);
         assert_eq!(service.usage().unwrap().deepseek_tokens, 81);
+    }
+    #[test]
+    fn creative_incomplete_output_keeps_provider_usage_without_another_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        let (url, server) = fake_creative(
+            vec![(
+                200,
+                serde_json::json!({"usage":{"total_tokens":91},"choices":[{"finish_reason":"length","message":{"content":"unfinished"}}]}),
+            )],
+            None,
+        );
+        let reply = tauri::async_runtime::block_on(service.creative_exchange(
+            &serde_json::json!({"max_tokens":20}),
+            10000,
+            &std::sync::atomic::AtomicBool::new(false),
+            "test-placeholder",
+            &url,
+        ))
+        .unwrap();
+        assert!(reply.content.unwrap_err().contains("未完整生成"));
+        assert_eq!(reply.used, Some(91));
+        assert_eq!(service.usage().unwrap().creative_tokens, 91);
+        assert_eq!(server.join().unwrap(), 1);
     }
     #[test]
     fn creative_auth_failure_is_safe_and_not_retried() {

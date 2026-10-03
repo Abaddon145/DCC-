@@ -6,6 +6,7 @@ import { formatBytes } from "../lib/validation";
 import { ImagePreview } from "./ImagePreview";
 import { MediaPreview } from "./MediaPreview";
 import { LibraryMediaPreview, MediaViewer, type PreviewItem } from "./MediaViewer";
+import { useImageCompare } from "./ImageCompare";
 
 interface Props {
   onAi?: (id: string) => void;
@@ -28,6 +29,7 @@ interface Props {
 }
 
 export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
+  const compare=useImageCompare();
   const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
@@ -77,6 +79,8 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         {asset.sourceUrl && <button className="source-link" onClick={onSourceOpen}>查看素材来源 <ExternalLink size={13} /></button>}
       </div>
       <div className="detail-actions">
+        {compare&&currentPreview?.type==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"asset",id:currentPreview.image.id,title:currentPreview.image.originalName})}>加入 A/B 对比</button>}
+        {compare&&currentPreview?.type==="library"&&currentPreview.media.kind==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"media",id:currentPreview.media.primaryFileId,title:currentPreview.media.name})}>加入 A/B 对比</button>}
         <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
         {asset.extractionCode && <button className="secondary-button" onClick={onCopy} title="复制提取码"><Copy size={17} /></button>}
         {!!(asset.images.length + (asset.media?.length || 0)) && <button className="secondary-button" onClick={() => onCollectMedia?.(asset.id)} title="复制为独立媒体条目"><Images size={17} />收录到媒体库</button>}

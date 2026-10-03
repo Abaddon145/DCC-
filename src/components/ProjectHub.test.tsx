@@ -76,6 +76,33 @@ describe("ProjectHub", () => {
     await waitFor(() => expect(api.saveProject).toHaveBeenCalledWith(expect.objectContaining({ coverMediaEntryId: "image-1", coverAssetId: null })));
   });
 
+  it("blocks duplicate project saves and preserves the editor after a failed save", async () => {
+    const notify = vi.fn();
+    let reject!: (error: Error) => void;
+    vi.mocked(api.saveProject).mockImplementationOnce(() => new Promise((_, failure) => { reject = failure; }));
+    render(<ProjectHub contentLanguage="zh-CN" notify={notify} onOpenReference={vi.fn()} onEditAsset={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "项目设置" }));
+    fireEvent.change(screen.getByLabelText("项目名称"), { target: { value: "保留我的草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存项目" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存中…" }));
+    expect(api.saveProject).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("磁盘写入失败")));
+    expect(screen.getByLabelText("项目名称")).toHaveValue("保留我的草稿");
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("磁盘写入失败"), true);
+    fireEvent.click(screen.getByRole("button", { name: "保存项目" }));
+    await waitFor(() => expect(api.saveProject).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows a retry on failed kanban reads instead of treating them as empty columns", async () => {
+    vi.mocked(api.listProjectTasks).mockRejectedValueOnce(new Error("读取失败"));
+    render(<ProjectHub contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /任务 1/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "重新读取" }));
+    expect(await screen.findByText("完成灯光")).toBeInTheDocument();
+  });
+
   it("assigns a replaceable video-library entry to a shot", async () => {
     const scene: ProjectUnit = { id: "scene-1", projectId: summary.id, parentId: null, kind: "scene", name: "场景一", description: "", startFrame: null, endFrame: null, resolutionWidth: null, resolutionHeight: null, frameRate: null, sortOrder: 0, videoMediaEntryId: null, videoStreamFileId: null, videoName: null, createdAt: "now", updatedAt: "now" };
     const shot: ProjectUnit = { ...scene, id: "shot-1", parentId: scene.id, kind: "shot", name: "SH010", startFrame: 1, endFrame: 100 };
