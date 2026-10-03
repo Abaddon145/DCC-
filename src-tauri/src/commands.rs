@@ -629,6 +629,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "video",
         "projects",
         "knowledge",
+        "browserCapture",
     ]
     .contains(&module_id)
     {
@@ -2155,6 +2156,11 @@ mod tests {
             validate_workspace_module("not-a-module"),
             Err("未知的浏览模块".into())
         );
+    }
+
+    #[test]
+    fn browser_capture_workspace_context_is_a_registered_browsing_module() {
+        assert_eq!(validate_workspace_module("browserCapture"), Ok(()));
     }
     #[test]
     fn parses_baidu_share_text() {

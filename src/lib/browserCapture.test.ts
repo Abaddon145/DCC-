@@ -119,7 +119,7 @@ describe("browser capture worker safety", () => {
   it("creates a new native port when a previous send fails instead of keeping a broken connection", async () => {
     const state = await worker();
     let oldDisconnect = () => {};
-    state.chrome.runtime.connectNative.mockReturnValueOnce({ onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (callback: () => void) => { oldDisconnect = callback; } },
+    state.chrome.runtime.connectNative.mockReturnValueOnce({ onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn((callback: () => void) => { oldDisconnect = callback; }) },
       postMessage: () => { throw new Error("Attempting to use a disconnected port object"); },
     });
     expect(await state.send({ action: "hello" })).toMatchObject({ ok: false });
