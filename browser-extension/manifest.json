@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "栈藏 · 网页采集",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "description": "主动采集网页图片、区域截图和公开视频到本地栈藏素材库。",
   "permissions": ["activeTab", "scripting", "contextMenus", "nativeMessaging", "storage"],
   "optional_host_permissions": ["https://*/*", "http://*/*"],

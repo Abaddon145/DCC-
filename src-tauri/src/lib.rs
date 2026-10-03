@@ -44,6 +44,10 @@ pub fn run_browser_capture_host() -> Result<(), String> {
     browser_capture::native_host()
 }
 
+pub fn connect_browser_capture_extension(extension_id: String) -> Result<String, String> {
+    browser_capture::register_browser_capture_host(extension_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainWindowAction {
     Ignore,
@@ -155,6 +159,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
+            if let Err(error) = browser_capture::refresh_registered_host() {
+                eprintln!("浏览器连接需要重新设置：{error}");
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {

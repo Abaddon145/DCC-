@@ -64,7 +64,7 @@ describe("browser capture extension helpers", () => {
 describe("browser capture worker safety", () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.resetModules(); });
 
-  async function worker(session: Record<string, unknown> = {}) {
+  async function worker(session: Record<string, unknown> = {}, failHello = false) {
     let receive: (value: unknown) => void = () => {};
     let listener: (message: unknown, sender: unknown, respond: (value: unknown) => void) => void = () => {};
     const messages: Record<string, unknown>[] = [];
@@ -75,11 +75,13 @@ describe("browser capture worker safety", () => {
         messages.push(message);
         const value = message.action === "hello" ? { started: false, connection: { libraryId: "library", enabled: true } }
           : message.action === "result" ? { status: "completed", result: { status: "saved" } } : {};
-        queueMicrotask(() => receive({ requestId: message.requestId, ok: true, value }));
+        queueMicrotask(() => receive(message.action === "hello" && failHello
+          ? { requestId: message.requestId, ok: false, error: "Specified native messaging host not found." }
+          : { requestId: message.requestId, ok: true, value }));
       },
     };
     const chrome = {
-      runtime: { id: "extension", getURL: (path: string) => `chrome-extension://extension/${path}`, connectNative: () => port,
+      runtime: { id: "extension", getURL: (path: string) => `chrome-extension://extension/${path}`, connectNative: vi.fn(() => port),
         onInstalled: event, onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
       contextMenus: { onClicked: event }, action: { setBadgeText: vi.fn(), setTitle: vi.fn(), openPopup: vi.fn() },
       storage: { local: { get: async () => ({ confirmedLibrary: "library" }) }, session: {
@@ -103,6 +105,28 @@ describe("browser capture worker safety", () => {
     expect(result).toMatchObject({ ok: true });
     const begin = state.messages.find(message => message.action === "begin");
     expect(begin?.capture).toMatchObject({ pageUrl: "https://example.com/?id=1", mediaUrl: "" });
+  });
+
+  it("keeps unsaved selections and opens connection setup when the native host is unavailable", async () => {
+    const state = await worker({}, true);
+    const items = [{ kind: "image", title: "未保存图片", pageUrl: "https://example.com/", mediaUrl: "https://example.com/image.png" }];
+    expect(await state.send({ action: "capture", items })).toMatchObject({ ok: false });
+    expect(state.session.pendingItems).toEqual(items);
+    expect(state.chrome.action.openPopup).toHaveBeenCalledOnce();
+    expect(state.messages.some(message => message.action === "begin")).toBe(false);
+  });
+
+  it("creates a new native port when a previous send fails instead of keeping a broken connection", async () => {
+    const state = await worker();
+    let oldDisconnect = () => {};
+    state.chrome.runtime.connectNative.mockReturnValueOnce({ onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (callback: () => void) => { oldDisconnect = callback; } },
+      postMessage: () => { throw new Error("Attempting to use a disconnected port object"); },
+    });
+    expect(await state.send({ action: "hello" })).toMatchObject({ ok: false });
+    expect(await state.send({ action: "hello" })).toMatchObject({ ok: true });
+    oldDisconnect();
+    expect(await state.send({ action: "hello" })).toMatchObject({ ok: true });
+    expect(state.chrome.runtime.connectNative).toHaveBeenCalledTimes(2);
   });
 
   it("times out an optional poster instead of silently committing a source-only success", async () => {

@@ -441,22 +441,19 @@ pub fn get_browser_capture_connection(state: State<AppState>) -> Result<Value, S
         json!({"libraryId":heartbeat["libraryId"],"name":heartbeat["name"],"pending":pending,"otherLibraries":other,"enabled":heartbeat["enabled"]}),
     )
 }
-#[tauri::command]
-pub fn register_browser_capture_host(
-    state: State<AppState>,
-    extension_id: String,
-) -> Result<String, String> {
+fn write_host_configuration(
+    root: &Path,
+    exe: &Path,
+    extension_id: &str,
+) -> Result<PathBuf, String> {
     if extension_id.len() != 32 || !extension_id.chars().all(|c| ('a'..='p').contains(&c)) {
         return Err("请输入扩展页面中的 32 位扩展 ID".into());
     }
-    let root = mailbox()?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let text = exe.to_str().ok_or("程序路径无法编码")?;
     if text.contains(['\r', '\n', '%', '"']) {
         return Err("安装路径不适合浏览器通信，请重新安装到普通目录".into());
     }
     let launcher = root.join("host.cmd");
-    fs::write(&launcher,format!("@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n\"{text}\" --browser-capture-host %*\r\n")).map_err(|e|e.to_string())?;
     let manifest = root.join("host.json");
     let mut origins = fs::read(&manifest)
         .ok()
@@ -470,10 +467,19 @@ pub fn register_browser_capture_host(
     if origins.len() > 8 {
         return Err("已连接扩展过多，请清理旧连接配置后重试".into());
     }
+    fs::write(&launcher,format!("@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n\"{text}\" --browser-capture-host %*\r\n")).map_err(|e|e.to_string())?;
     atomic_json(
         &manifest,
         &json!({"name":HOST,"description":"栈藏浏览器采集","path":launcher,"type":"stdio","allowed_origins":origins}),
     )?;
+    Ok(manifest)
+}
+
+#[tauri::command]
+pub fn register_browser_capture_host(extension_id: String) -> Result<String, String> {
+    let root = mailbox()?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let manifest = write_host_configuration(&root, &exe, &extension_id)?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -497,8 +503,32 @@ pub fn register_browser_capture_host(
             }
         }
     }
-    let _ = state;
     Ok("已为当前用户连接 Edge 和 Chrome；程序升级或更换扩展 ID 后请重新连接".into())
+}
+
+pub fn refresh_registered_host() -> Result<(), String> {
+    let manifest = mailbox()?.join("host.json");
+    if !manifest.exists() {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_slice(&fs::read(manifest).map_err(|e| e.to_string())?)
+        .map_err(|_| "浏览器连接配置损坏，请在采集收件箱重新连接")?;
+    if let Some(id) = value["allowed_origins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|origin| {
+            origin
+                .strip_prefix("chrome-extension://")?
+                .strip_suffix('/')
+        })
+        .find(|id| id.len() == 32 && id.chars().all(|c| ('a'..='p').contains(&c)))
+    {
+        // Keep explicitly authorized IDs, but point them at the newly installed binary.
+        register_browser_capture_host(id.to_owned())?;
+    }
+    Ok(())
 }
 fn read_frame(input: &mut impl Read) -> Result<Option<Value>, String> {
     let mut size = [0; 4];
@@ -809,6 +839,38 @@ mod tests {
         drop(file);
         assert!(connection(dir.path()).is_none());
     }
+    #[test]
+    fn registration_repoints_unicode_launcher_without_losing_authorized_browser_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = "a".repeat(32);
+        let second = "b".repeat(32);
+        write_host_configuration(dir.path(), Path::new("C:/旧安装/栈藏.exe"), &first).unwrap();
+        write_host_configuration(dir.path(), Path::new("C:/新安装/栈藏.exe"), &second).unwrap();
+        let manifest =
+            write_host_configuration(dir.path(), Path::new("C:/新安装/栈藏.exe"), &first).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(
+            value["allowed_origins"],
+            json!([
+                format!("chrome-extension://{first}/"),
+                format!("chrome-extension://{second}/")
+            ])
+        );
+        let launcher = fs::read_to_string(dir.path().join("host.cmd")).unwrap();
+        assert!(launcher.contains("\"C:/新安装/栈藏.exe\" --browser-capture-host %*"));
+        assert!(!launcher.contains("旧安装"));
+        for id in ["*".into(), "z".repeat(32), "a".repeat(31)] {
+            assert!(write_host_configuration(dir.path(), Path::new("C:/new.exe"), &id).is_err());
+        }
+        assert!(
+            write_host_configuration(dir.path(), Path::new("C:/%unsafe%/app.exe"), &first).is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("host.cmd")).unwrap(),
+            launcher
+        );
+    }
+
     #[test]
     fn capture_rejects_paths_credentials_and_bad_ids() {
         let mut c = Capture {
