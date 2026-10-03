@@ -74,9 +74,20 @@ pub fn save_model_thumbnail(
     state: State<AppState>,
     entry_id: String,
     bytes: Vec<u8>,
+    expected_library_id: Option<String>,
 ) -> Result<String, String> {
-    state.with_library_mut(|connection, base| {
-        media_library::save_model_thumbnail(connection, base, &entry_id, &bytes)
+    state.with_active_mut(|active| {
+        if expected_library_id
+            .as_ref()
+            .is_some_and(|id| id != &active.marker.library_id)
+        {
+            return Err("素材库已切换，未保存封面".into());
+        }
+        let connection = active
+            .connection
+            .as_mut()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        media_library::save_model_thumbnail(connection, &active.base_dir, &entry_id, &bytes)
     })
 }
 #[tauri::command]
@@ -117,9 +128,26 @@ pub fn add_media_images_to_board(
     board_id: String,
     entry_ids: Vec<String>,
     placement: ReferencePlacement,
+    expected_library_id: Option<String>,
 ) -> Result<ReferenceImageAddReport, String> {
-    state.with_library_mut(|c, base| {
-        reference_boards::add_media_images(c, base, &board_id, &entry_ids, &placement)
+    state.with_active_mut(|active| {
+        if expected_library_id
+            .as_ref()
+            .is_some_and(|id| id != &active.marker.library_id)
+        {
+            return Err("素材库已切换，未加入参考板".into());
+        }
+        let connection = active
+            .connection
+            .as_mut()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        reference_boards::add_media_images(
+            connection,
+            &active.base_dir,
+            &board_id,
+            &entry_ids,
+            &placement,
+        )
     })
 }
 #[tauri::command]
@@ -132,9 +160,29 @@ pub fn update_media_entry(
     source_url: String,
     license: String,
     tags: Vec<String>,
+    expected_library_id: Option<String>,
 ) -> Result<(), String> {
-    state.with_library(|c, _| {
-        media_library::update(c, &id, name, description, author, source_url, license, tags)
+    state.with_active_mut(|active| {
+        if expected_library_id
+            .as_ref()
+            .is_some_and(|id| id != &active.marker.library_id)
+        {
+            return Err("素材库已切换，未修改媒体".into());
+        }
+        let connection = active
+            .connection
+            .as_ref()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        media_library::update(
+            connection,
+            &id,
+            name,
+            description,
+            author,
+            source_url,
+            license,
+            tags,
+        )
     })
 }
 #[tauri::command]
@@ -145,8 +193,21 @@ pub fn delete_media_entries(state: State<AppState>, ids: Vec<String>) -> Result<
 pub fn batch_update_media_entries(
     state: State<AppState>,
     update: MediaBatchUpdate,
+    expected_library_id: Option<String>,
 ) -> Result<BatchUpdateReport, String> {
-    state.with_library_mut(|c, _| media_library::batch_update(c, update))
+    state.with_active_mut(|active| {
+        if expected_library_id
+            .as_ref()
+            .is_some_and(|id| id != &active.marker.library_id)
+        {
+            return Err("素材库已切换，未整理媒体".into());
+        }
+        let connection = active
+            .connection
+            .as_mut()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        media_library::batch_update(connection, update)
+    })
 }
 #[tauri::command]
 pub fn list_media_folders(
@@ -201,8 +262,21 @@ pub fn link_project_media(
     state: State<AppState>,
     entry_ids: Vec<String>,
     project_ids: Vec<String>,
+    expected_library_id: Option<String>,
 ) -> Result<usize, String> {
-    state.with_library(|c, _| media_library::link_projects(c, entry_ids, project_ids, true))
+    state.with_active_mut(|active| {
+        if expected_library_id
+            .as_ref()
+            .is_some_and(|id| id != &active.marker.library_id)
+        {
+            return Err("素材库已切换，未加入项目".into());
+        }
+        let connection = active
+            .connection
+            .as_ref()
+            .ok_or("数据库正在维护，请稍后重试")?;
+        media_library::link_projects(connection, entry_ids, project_ids, true)
+    })
 }
 #[tauri::command]
 pub fn unlink_project_media(
@@ -1461,7 +1535,12 @@ pub fn restore_backup(app: AppHandle, state: State<AppState>, path: String) -> R
     {
         return Err("请先收回悬浮参考板，再恢复素材库".into());
     }
-    state.with_active_mut(|active| backup::restore_library(active, &PathBuf::from(path)))
+    state.with_active_mut(|active| {
+        if state.tasks.busy() {
+            return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
+        }
+        backup::restore_library(active, &PathBuf::from(path))
+    })
 }
 
 #[tauri::command]

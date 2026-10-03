@@ -688,6 +688,26 @@ pub fn import_controlled(
     progress: &dyn Fn(usize, usize, String, &MediaImportReport),
     stop: &dyn Fn() -> bool,
 ) -> Result<MediaImportReport, String> {
+    import_controlled_with_capture(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        progress,
+        stop,
+        None,
+    )
+}
+
+pub fn import_controlled_with_capture(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+    capture: Option<&crate::browser_capture::Capture>,
+) -> Result<MediaImportReport, String> {
     if request.paths.is_empty() {
         return Ok(MediaImportReport {
             imported: 0,
@@ -783,7 +803,7 @@ pub fn import_controlled(
                     None,
                 ));
                 insert_entry(
-                    connection, &id, &request, &name, &main_id, &timestamp, files,
+                    connection, &id, &request, &name, &main_id, &timestamp, files, capture,
                 )?;
             } else {
                 let deps = if request.kind == MediaKind::Model {
@@ -897,7 +917,7 @@ pub fn import_controlled(
                     }
                 }
                 insert_entry(
-                    connection, &id, &request, &name, &main_id, &timestamp, files,
+                    connection, &id, &request, &name, &main_id, &timestamp, files, capture,
                 )?;
             }
             Ok((id, None))
@@ -1041,6 +1061,7 @@ fn insert_entry(
         Option<i64>,
         Option<i64>,
     )>,
+    capture: Option<&crate::browser_capture::Capture>,
 ) -> Result<(), String> {
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO media_entries(id,kind,folder_id,name,favorite,processing_status,primary_file_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'ready',?6,?7,?7)",params![id,request.kind.as_str(),request.folder_id,name,request.favorite as i64,main_id,timestamp]).map_err(|e|e.to_string())?;
@@ -1051,6 +1072,9 @@ fn insert_entry(
         tx.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,mime_type,file_size,checksum,width,height,duration_ms,sort_order,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![fid,id,role,logical,original,rel,mime,size,sum,w,h,d,index as i64,timestamp]).map_err(|e|e.to_string())?;
     }
     upsert_tags(&tx, id, &request.tags)?;
+    if let Some(capture) = capture {
+        crate::browser_capture::apply_source(&tx, capture, id)?;
+    }
     reindex(&tx, id)?;
     tx.commit().map_err(|e| e.to_string())
 }

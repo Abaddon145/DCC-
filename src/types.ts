@@ -1,6 +1,6 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
 export type MediaKind = "image" | "model" | "audio" | "video";
-export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
 export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
 export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
@@ -11,6 +11,7 @@ export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAd
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | { kind: "browserCapture"; request: { id: string } }
   | { kind: "assetMediaImport"; request: { assetId: string; paths: string[] } }
   | { kind: "assetMediaRetry"; request: { id: string } }
   | { kind: "modelThumbnail"; request: { entryId:string } }
@@ -381,6 +382,9 @@ export interface MediaImportRequest { kind: MediaKind; paths: string[]; folderId
 export interface MediaImportRow { path: string; status: "imported" | "duplicate" | "error"; message: string; entryId: string | null; duplicateEntryId: string | null }
 export interface MediaImportReport { imported: number; skipped: number; failed: number; rows: MediaImportRow[] }
 export interface MediaBatchUpdate { ids: string[]; folderId: string | null; clearFolder: boolean; addTags: string[]; removeTags: string[]; favorite: boolean | null }
+
+export interface BrowserCapture { id:string; title:string; pageUrl:string; kind:"image"|"video"|"link"; entryId:string|null; status:"saved"|"duplicate"|"link"|"failed"; message:string; createdAt:string; organized:boolean; thumbnailId:string|null; unavailable:boolean }
+export interface BrowserCaptureState { libraryId:string; name:string; submitted:number; otherLibraries:number; open:boolean }
 
 export type TranslationProvider = "baidu" | "deepseek";
 export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }

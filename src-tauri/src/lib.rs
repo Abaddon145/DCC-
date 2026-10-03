@@ -3,6 +3,7 @@ mod ai_store;
 mod automatic_backup;
 mod backup;
 mod bilingual;
+mod browser_capture;
 mod commands;
 mod db;
 mod fab;
@@ -38,6 +39,14 @@ mod translation_service;
 use commands::*;
 use state::AppState;
 use tauri::Manager;
+
+pub fn run_browser_capture_host() -> Result<(), String> {
+    browser_capture::native_host()
+}
+
+pub fn connect_browser_capture_extension(extension_id: String) -> Result<String, String> {
+    browser_capture::register_browser_capture_host(extension_id)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainWindowAction {
@@ -76,6 +85,28 @@ fn main_window_action(label: &str, close_requested: bool) -> MainWindowAction {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _instance = match browser_capture::application_lock() {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            if !std::env::args().any(|arg| arg == "--browser-capture-background") {
+                let _ = browser_capture::request_open();
+            }
+            return;
+        }
+        Err(error) => panic!("无法建立应用运行锁：{error}"),
+    };
+    let mut context = tauri::generate_context!();
+    if std::env::args().any(|arg| arg == "--browser-capture-background") {
+        if let Some(window) = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|window| window.label == "main")
+        {
+            window.visible = false;
+        }
+    }
     if let Ok(entry) = keyring::Entry::new("DCCAssetLibrary.BaiduNetdisk", "default") {
         let _ = entry.delete_credential();
     }
@@ -127,6 +158,29 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .setup(|app| {
+            if let Err(error) = browser_capture::refresh_registered_host() {
+                eprintln!("浏览器连接需要重新设置：{error}");
+            }
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let handle = handle.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        // This path bypasses IPC, so the capture pump independently guards maintenance.
+                        if let Ok(result) = browser_capture::pump_browser_captures(
+                            handle.clone(),
+                            handle.state::<AppState>(),
+                        ) {
+                            let _ = tauri::Emitter::emit(&handle, "browser-capture-state", result);
+                        }
+                    })
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+            });
+            Ok(())
+        })
         .on_window_event(|window, event| {
             // Calling `AppHandle::exit` from `Destroyed` re-enters window destruction on
             // Windows. That recursion terminates the process with 0xc00000fd (stack overflow).
@@ -197,6 +251,12 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    browser_capture::get_browser_capture_connection,
+                    browser_capture::pump_browser_captures,
+                    browser_capture::register_browser_capture_host,
+                    browser_capture::list_browser_captures,
+                    browser_capture::organize_browser_capture,
+                    browser_capture::create_browser_capture_note,
                     knowledge_ai::generate_note_ai,
                     knowledge_commands::set_knowledge_editing,
                     knowledge_commands::finish_knowledge_close,
@@ -434,7 +494,7 @@ pub fn run() {
                 ]);
             handler(invoke)
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("运行 Tauri 应用失败");
 }
 
