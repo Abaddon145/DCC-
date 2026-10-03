@@ -6,9 +6,18 @@ let nextRequest = 0;
 const waiting = new Map();
 let activeJob = null;
 
+function disconnect(connected, error) {
+  if (port !== connected) return;
+  port = null;
+  for (const pending of waiting.values()) { clearTimeout(pending.timeout); pending.reject(error); }
+  waiting.clear();
+  try { connected.disconnect(); } catch { /* It may already be disconnected. */ }
+}
+
 function native(action, payload = {}) {
   if (!port) {
     port = chrome.runtime.connectNative(HOST);
+    const connected = port;
     port.onMessage.addListener(message => {
       const pending = waiting.get(message.requestId);
       if (!pending) return;
@@ -16,9 +25,8 @@ function native(action, payload = {}) {
       message.ok ? pending.resolve(message.value) : pending.reject(new Error(message.error || '栈藏处理失败'));
     });
     port.onDisconnect.addListener(() => {
-      const error = chrome.runtime.lastError?.message || '栈藏连接中断'; port = null;
-      for (const pending of waiting.values()) { clearTimeout(pending.timeout); pending.reject(new Error(`${error}。请在栈藏收件箱连接扩展 ID。`)); }
-      waiting.clear();
+      const error = chrome.runtime.lastError?.message || '栈藏连接中断';
+      disconnect(connected, new Error(`${error}。请在栈藏收件箱连接扩展 ID。`));
     });
   }
   const requestId = ++nextRequest;
@@ -26,7 +34,7 @@ function native(action, payload = {}) {
     const timeout = setTimeout(() => { waiting.delete(requestId); reject(new Error('通信超时，未确认保存成功')); }, 30000);
     waiting.set(requestId, { resolve, reject, timeout });
     try { port.postMessage({ requestId, action, ...payload }); }
-    catch (error) { clearTimeout(timeout); waiting.delete(requestId); reject(error); }
+    catch (error) { disconnect(port, error); }
   });
 }
 async function progress(value) {
@@ -127,7 +135,12 @@ async function capture(items, options = {}) {
   activeJob = new AbortController();
   const results = [];
   try {
-  const hello = await native('hello');
+  let hello;
+  try { hello = await native('hello'); }
+  catch (error) {
+    // Preserve the selection until registration is repaired; no file has been submitted.
+    await chrome.storage.session.set({ pendingItems: items }); await panel(); throw error;
+  }
   const confirmed = (await chrome.storage.local.get('confirmedLibrary')).confirmedLibrary;
   if (hello.started || !confirmed || confirmed !== hello.connection.libraryId || !hello.connection.enabled) {
     await chrome.storage.session.set({ pendingItems: items }); await panel();

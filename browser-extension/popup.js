@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 let connection;
 let items = [];
 let tab;
+let checking = false;
 const send = async (action, payload = {}) => {
   const result = await chrome.runtime.sendMessage({ action, ...payload });
   if (!result?.ok) throw new Error(result?.error || '连接失败');
@@ -41,16 +42,26 @@ async function sourceTab() {
   publicUrl(current.url); return current;
 }
 async function init() {
+  if (checking) return;
+  checking = true; $('reconnect').disabled = true;
   $('extension-id').textContent = chrome.runtime.id;
   try {
+    $('connection').textContent = '正在连接栈藏…';
     const hello = await send('hello'); connection = hello.connection;
     $('connection').textContent = `目标素材库：${connection.name}${connection.enabled ? '' : '（采集已停用或素材库正在维护）'}${connection.choicesTruncated ? ' · 目标列表较多，仅展示部分；其他文件夹或项目请在应用中整理' : ''}`;
     $('confirm').checked = !hello.started && (await chrome.storage.local.get('confirmedLibrary')).confirmedLibrary === connection.libraryId;
+    $('project').replaceChildren(new Option('不关联', ''));
     for (const project of connection.projects || []) $('project').add(new Option(project.name, project.id));
     const saved = await chrome.storage.session.get(['pendingItems', 'results', 'progress']);
     renderItems(saved.pendingItems || []); renderResults(saved.results || []);
+    $('setup').open = false;
+    status('连接成功，请确认目标素材库并选择需要保存的内容。');
     if (saved.progress) showProgress(saved.progress);
-  } catch (error) { $('connection').textContent = '尚未连接软件'; status(error.message); }
+  } catch (error) {
+    connection = null; $('confirm').checked = false; update();
+    $('connection').textContent = '尚未连接软件'; $('setup').open = true;
+    status(`请先在栈藏 → 采集收件箱点击“连接浏览器”，然后点击“重新检查连接”。\n连接详情：${error.message}`);
+  } finally { checking = false; $('reconnect').disabled = false; }
 }
 function renderResults(results) {
   $('results').replaceChildren();
@@ -105,5 +116,14 @@ $('capture').addEventListener('click', () => void (async () => {
   await send('capture', { items: values, options: { folderId: $('folder').value, projectId: $('project').value, tags: $('tags').value.split(/[;；]/).map(t => t.trim()).filter(Boolean) } });
 })().catch(error => { status(error.message); update(); }));
 $('cancel').addEventListener('click', () => void send('cancel').catch(error => status(error.message)));
-$('open-app').addEventListener('click', () => void send('open').catch(error => status(error.message)));
+$('copy-id').addEventListener('click', () => void navigator.clipboard.writeText(chrome.runtime.id)
+  .then(() => status('扩展 ID 已复制，请粘贴到栈藏的“连接浏览器”。'))
+  .catch(() => status('无法自动复制，请选中上方扩展 ID，按 Ctrl+C 复制。')));
+$('reconnect').addEventListener('click', () => void init());
+$('open-app').addEventListener('click', () => void (async () => {
+  $('open-app').disabled = true;
+  try { await send('open'); await init(); }
+  catch (error) { $('setup').open = true; status(`首次连接需先从桌面或开始菜单打开栈藏，再连接浏览器。\n连接详情：${error.message}`); }
+  finally { $('open-app').disabled = false; }
+})());
 void init();
