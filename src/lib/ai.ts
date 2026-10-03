@@ -18,7 +18,7 @@ export interface AiOutput {
 export interface AiSession {
   id: string; name: string; kind: AiKind; status: string; message: string; updatedAt: string;
   request: AiRequest; context: { entries: AiEntry[]; project: unknown; categories: unknown; folders: unknown; existingTags: unknown };
-  output: AiOutput | null; estimatedTokens: number;
+  output: AiOutput | null; estimatedTokens: number; actualTokens?: number | null; sentText?: unknown;
 }
 export interface AiLaunch { kind?: AiKind; assetIds?: string[]; mediaIds?: string[]; projectId?: string; prompt?: string }
 export const aiDefaults = (locale: ContentLanguage, launch?: AiLaunch): AiRequest => ({ kind: launch?.kind ?? "plan", prompt: launch?.prompt ?? "", locale, mode: "fast", assetIds: launch?.assetIds ?? [], mediaIds: launch?.mediaIds ?? [], projectId: launch?.projectId ?? null, recallQuery: "", scope: "all" });

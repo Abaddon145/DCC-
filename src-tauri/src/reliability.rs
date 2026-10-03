@@ -10,6 +10,115 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::State;
+
+pub fn migrate_workflows(db: &rusqlite::Connection) -> Result<(), String> {
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS workflow_templates(id TEXT PRIMARY KEY,name TEXT NOT NULL,titles_json TEXT NOT NULL,updated_at TEXT NOT NULL);").map_err(|e| e.to_string())?;
+    let has_usage = tx
+        .prepare("PRAGMA table_info(ai_sessions)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|name| name == "actual_tokens");
+    if !has_usage {
+        tx.execute_batch("ALTER TABLE ai_sessions ADD COLUMN actual_tokens INTEGER;")
+            .map_err(|e| e.to_string())?;
+    }
+    tx.execute("UPDATE schema_meta SET value='19' WHERE key='schema_version' AND CAST(value AS INTEGER)<19",[]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowTemplate {
+    pub id: Option<String>,
+    pub name: String,
+    pub titles: Vec<String>,
+}
+
+fn save_workflow(
+    db: &rusqlite::Connection,
+    input: WorkflowTemplate,
+) -> Result<WorkflowTemplate, String> {
+    if input.name.trim().is_empty()
+        || input.name.chars().count() > 100
+        || input.titles.is_empty()
+        || input.titles.len() > 30
+        || input
+            .titles
+            .iter()
+            .any(|t| t.trim().is_empty() || t.chars().count() > 300)
+    {
+        return Err("请填写模板名称及 1-30 个有效任务标题".into());
+    }
+    let id = input
+        .id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    uuid::Uuid::parse_str(&id).map_err(|_| "模板标识无效")?;
+    let result = WorkflowTemplate {
+        id: Some(id.clone()),
+        name: input.name.trim().into(),
+        titles: input.titles.iter().map(|t| t.trim().into()).collect(),
+    };
+    let titles = serde_json::to_string(&result.titles).map_err(|e| e.to_string())?;
+    if input.id.is_some() {
+        if db
+            .execute(
+                "UPDATE workflow_templates SET name=?1,titles_json=?2,updated_at=?3 WHERE id=?4",
+                rusqlite::params![result.name, titles, chrono::Utc::now().to_rfc3339(), id],
+            )
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            return Err("模板已被删除，请另存为新模板".into());
+        }
+    } else {
+        db.execute(
+            "INSERT INTO workflow_templates(id,name,titles_json,updated_at) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![id, result.name, titles, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(result)
+}
+#[tauri::command]
+pub fn list_workflow_templates(state: State<AppState>) -> Result<serde_json::Value, String> {
+    let library = state.active_library_id()?;
+    state.with_library_if_id(&library,|db,_|{
+        let mut statement=db.prepare("SELECT id,name,titles_json FROM workflow_templates ORDER BY updated_at DESC,id").map_err(|e|e.to_string())?;
+        let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        let templates=rows.into_iter().map(|(id,name,titles)|Ok(WorkflowTemplate{id:Some(id),name,titles:serde_json::from_str(&titles).map_err(|_|"模板内容损坏")?})).collect::<Result<Vec<_>,String>>()?;
+        Ok(serde_json::json!({"libraryId":library,"templates":templates}))
+    })?.ok_or("素材库已切换".into())
+}
+#[tauri::command]
+pub fn save_workflow_template(
+    state: State<AppState>,
+    library_id: String,
+    input: WorkflowTemplate,
+) -> Result<WorkflowTemplate, String> {
+    state
+        .with_library_if_id(&library_id, |db, _| save_workflow(db, input))?
+        .ok_or("素材库已切换，模板未保存".into())
+}
+#[tauri::command]
+pub fn delete_workflow_template(
+    state: State<AppState>,
+    library_id: String,
+    id: String,
+) -> Result<(), String> {
+    state
+        .with_library_if_id(&library_id, |db, _| {
+            db.execute("DELETE FROM workflow_templates WHERE id=?", [id])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })?
+        .ok_or("素材库已切换".into())
+}
 #[tauri::command]
 pub fn get_interrupted_restore(state: State<AppState>) -> Result<bool, String> {
     state.with_active_mut(|active| Ok(active.base_dir.join(crate::backup::RESTORE_MARKER).exists()))
@@ -275,7 +384,13 @@ pub fn add_project_checklist(
     state: State<AppState>,
     project_id: String,
     titles: Vec<String>,
+    library_id: Option<String>,
 ) -> Result<usize, String> {
+    if let Some(id) = library_id {
+        return state
+            .with_library_mut_if_id(&id, |db, _| add_checklist(db, &project_id, titles))?
+            .ok_or("素材库已切换，任务未添加".into());
+    }
     state.with_library_mut(|db, _| add_checklist(db, &project_id, titles))
 }
 #[tauri::command]
@@ -303,6 +418,97 @@ pub fn export_diagnostics(path: String, events: Vec<DiagnosticEvent>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workflow_migration_is_idempotent_scoped_and_included_in_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("library.db");
+        let db = crate::db::open_database(&path).unwrap();
+        db.execute_batch("ALTER TABLE ai_sessions DROP COLUMN actual_tokens; UPDATE schema_meta SET value='18' WHERE key='schema_version';").unwrap();
+        migrate_workflows(&db).unwrap();
+        migrate_workflows(&db).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "19"
+        );
+        let saved = save_workflow(
+            &db,
+            WorkflowTemplate {
+                id: None,
+                name: " UE5 制作 ".into(),
+                titles: vec![" 白盒 ".into(), "材质".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.titles, vec!["白盒", "材质"]);
+        assert!(save_workflow(
+            &db,
+            WorkflowTemplate {
+                id: saved.id.clone(),
+                name: "保留".into(),
+                titles: vec![]
+            }
+        )
+        .is_err());
+        assert_eq!(
+            db.query_row("SELECT name FROM workflow_templates", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "UE5 制作"
+        );
+        let updated = save_workflow(
+            &db,
+            WorkflowTemplate {
+                id: saved.id.clone(),
+                name: "我的流程".into(),
+                titles: vec!["材质".into(), "白盒".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.id, updated.id);
+        let second = tempfile::tempdir().unwrap();
+        let other = crate::db::open_database(&second.path().join("library.db")).unwrap();
+        assert_eq!(
+            other
+                .query_row("SELECT count(*) FROM workflow_templates", [], |r| r
+                    .get::<_, usize>(0))
+                .unwrap(),
+            0
+        );
+        assert!(save_workflow(&other, updated).is_err());
+        let backup = root.path().join("workflow.dccassetlib");
+        crate::backup::export_library(&db, root.path(), &backup).unwrap();
+        db.execute("DELETE FROM workflow_templates", []).unwrap();
+        let mut active = crate::state::ActiveLibrary {
+            base_dir: root.path().into(),
+            db_path: path,
+            marker: crate::state::LibraryMarker {
+                library_id: uuid::Uuid::new_v4().to_string(),
+                name: "test".into(),
+                format_version: 1,
+                created_at: "t".into(),
+            },
+            connection: Some(db),
+        };
+        crate::backup::restore_library(&mut active, &backup).unwrap();
+        let db = active.connection.as_ref().unwrap();
+        assert_eq!(
+            db.query_row("SELECT name FROM workflow_templates", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "我的流程"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM project_tasks", [], |r| r
+                .get::<_, usize>(0))
+                .unwrap(),
+            0
+        );
+    }
     #[test]
     fn project_checklist_is_atomic_and_skips_duplicates() {
         let root = tempfile::tempdir().unwrap();

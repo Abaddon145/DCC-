@@ -40,6 +40,8 @@ import { TranslationBatchReportDialog } from "./components/TranslationBatchRepor
 import { isAssetWorkspace, readContextPage, useRequestGate, useWorkspaceState } from "./lib/workspace";
 import { SelectionSummary } from "./components/SelectionSummary";
 import { AiAssistant } from "./components/AiAssistant";
+import { ImageCompareProvider } from "./components/ImageCompare";
+import "./components/Experience.css";
 import type { AiLaunch } from "./lib/ai";
 import { TaskCenter } from "./components/TaskCenter";
 import { applyGlobalPreferences, defaultGlobalPreferences, defaultLibraryPreferences, enabledModules, moduleRegistry, shortcutMatches } from "./lib/personalization";
@@ -189,9 +191,9 @@ export default function App() {
   useEffect(() => { refreshMeta(); }, [refreshMeta]);
   useEffect(() => { const handler = (event: KeyboardEvent) => {
     const typing = Boolean((event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]"));
-    if (document.querySelector(".modal-backdrop,.lightbox")) return;
+    if (document.querySelector(".modal-backdrop,.lightbox,.command-backdrop")) return;
     if (shortcutMatches(event, personalization.global.shortcuts.commandPalette || "Ctrl+P")) { event.preventDefault(); setShowCommandPalette(true); return; }
-    if (typing || document.querySelector(".modal-backdrop,.lightbox")) return;
+    if (typing || document.querySelector(".modal-backdrop,.lightbox,.command-backdrop")) return;
     if (shortcutMatches(event, personalization.global.shortcuts.focusSearch || "Ctrl+K")) { event.preventDefault(); document.querySelector<HTMLInputElement>("[data-workspace-search]")?.focus(); }
     else if (shortcutMatches(event, personalization.global.shortcuts.settings || "Ctrl+,")) { event.preventDefault(); setShowSettings(true); }
     else if (!isAssetWorkspace(view)) return;
@@ -697,7 +699,7 @@ export default function App() {
     }} title={hasContextPane && view === item.target ? "再次点击可展开或收起导航" : undefined}><Icon size={17} />{item.label}</button>;
   };
 
-  return <div className="app-shell">
+  return <ImageCompareProvider key={libraryEpoch}><div className="app-shell">
     <aside className="sidebar">
       <nav className="workspace-history" aria-label="浏览历史"><button aria-label="后退" disabled={historyIndex===0} onClick={()=>traverseHistory(-1)}>← 后退</button><button aria-label="前进" disabled={historyIndex>=history.length-1} onClick={()=>traverseHistory(1)}>前进 →</button></nav>
       <div className="brand"><div className="brand-mark"><ArchiveRestore size={21} /></div><div><strong>栈藏</strong><span>DCC ASSET LIBRARY</span></div></div>
@@ -742,5 +744,5 @@ export default function App() {
     {assetContextMenu && <ContextMenu {...assetContextMenu} onClose={() => setAssetContextMenu(null)} />}
     <AutomaticBackupService notify={notify}/>
     <div className="toast-stack">{toasts.map(toast => <div key={toast.id} className={`toast ${toast.error ? "error" : ""}`}><span>{toast.message}</span>{toast.action && <button onClick={() => { setToasts(previous => previous.filter(item => item.id !== toast.id)); void toast.action?.(); }}>{toast.actionLabel}</button>}</div>)}</div>
-  </div>;
+  </div></ImageCompareProvider>;
 }

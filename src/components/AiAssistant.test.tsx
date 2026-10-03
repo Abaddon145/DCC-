@@ -57,6 +57,7 @@ describe("AI assistant consent and drafts", () => {
     render(<AiAssistant language="zh-CN" notify={vi.fn()} onChanged={vi.fn()} onSettings={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /整理岩石/ }));
     await screen.findByText("额度已达到上限");
+    expect(screen.getByText(/旧版本未记录完整请求消息/)).toBeInTheDocument();
     expect(aiApi.generate).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "确认发送并生成" })).not.toBeInTheDocument();
   });
@@ -69,6 +70,10 @@ describe("AI assistant consent and drafts", () => {
     fireEvent.click(await screen.findByRole("button", { name: "取消生成" }));
     expect(aiApi.cancel).toHaveBeenCalledWith("session");
     expect(aiApi.apply).not.toHaveBeenCalled();
+  });
+  it("re-prepares rejected output offline and shows actual usage without automatically sending",async()=>{
+    vi.mocked(aiApi.list).mockResolvedValue({items:[{...base,status:"failed"}],total:1});vi.mocked(aiApi.get).mockResolvedValue({...base,status:"failed",message:"不允许 changes，未应用",actualTokens:123});
+    render(<AiAssistant language="zh-CN" notify={vi.fn()} onChanged={vi.fn()} onSettings={vi.fn()}/>);fireEvent.click(await screen.findByRole("button",{name:/整理岩石/}));await screen.findByText("123 Token");fireEvent.click(screen.getByRole("button",{name:"重新准备请求"}));await screen.findByRole("button",{name:"确认发送并生成"});expect(aiApi.prepare).toHaveBeenCalledWith(base.request);expect(aiApi.generate).not.toHaveBeenCalled();expect(aiApi.apply).not.toHaveBeenCalled();
   });
   it("search only runs after confirming its concrete local query", async () => {
     const searchSession: AiSession = { ...ready, request: { ...base.request, kind: "search" }, kind: "search", output: { ...ready.output!, changes: [], searches: [{ kind: "asset", query: "tag:Rock" }] } };
