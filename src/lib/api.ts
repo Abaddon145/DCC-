@@ -3,6 +3,7 @@ import { withKnowledgeBarrier } from "./noteSaveGuard";
 import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, BatchTranslationReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate, ModelThumbnailJob } from "../types";
 import type { ProjectUnit } from "../types";
 import type { LibraryTask, LibraryTaskRequest } from "../types";
+import type { UeAsset, UeEngine, UeImportPlan, UeLink, UeNativeJob, UeSearch, UeSource, Category } from "../types";
 
 async function runLibraryTask<T>(payload: LibraryTaskRequest): Promise<T> {
   const created=await invoke<LibraryTask>("start_library_task",{payload});
@@ -18,9 +19,32 @@ async function runLibraryTask<T>(payload: LibraryTaskRequest): Promise<T> {
 
 export const assetMediaUrl = (id: string, variant: "stream" | "thumbnail" | "original" = "stream") => `http://dcc-media.localhost/${encodeURIComponent(id)}/${variant}`;
 export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localhost/library/file/${encodeURIComponent(fileId)}`;
+export const ueThumbnailUrl = (id:string,revision?:string|null) => `http://dcc-media.localhost/ue/${encodeURIComponent(id)}?revision=${encodeURIComponent(revision||"")}`;
 export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
+  listUeEngines: (extraRoot?:string) => invoke<UeEngine[]>("list_ue_engines",{extraRoot}),
+  listUeSources: () => invoke<UeSource[]>("list_ue_sources"),
+  registerUeSource: (path:string,engineVersion:string) => invoke<UeSource>("register_ue_source",{path,engineVersion}),
+  relocateUeSource: (id:string,path:string) => invoke<void>("relocate_ue_source",{id,path}),
+  searchUeAssets: (request:UeSearch) => invoke<Page<UeAsset>>("search_ue_assets",{request}),
+  selectUeAssetIds: (libraryId:string,request:UeSearch) => invoke<string[]>("select_ue_asset_ids",{libraryId,request}),
+  getUeAsset: (id:string) => invoke<UeAsset>("get_ue_asset",{id}),
+  updateUeAsset: (asset:Pick<UeAsset,"id"|"alias"|"favorite"|"folderId"|"tags">) => invoke<UeAsset>("update_ue_asset",asset),
+  revealUeAsset: (id:string) => invoke<void>("reveal_ue_asset",{id}),
+  runUeJob: (request:UeNativeJob) => runLibraryTask<{message?:string;opened?:boolean}>({kind:"ueAssets",request}),
+  prepareUeImport: (ids:string[],targetProject:string,engineRoot:string) => invoke<UeImportPlan>("prepare_ue_import",{ids,targetProject,engineRoot}),
+  listUeFolders: () => invoke<Category[]>("list_ue_folders"),
+  saveUeFolder: (id:string|null,parentId:string|null,name:string) => invoke<string>("upsert_ue_folder",{id,parentId,name}),
+  moveUeFolder: (request:MoveCategoryRequest) => invoke<void>("move_ue_folder",{request}),
+  deleteUeFolder: (id:string) => invoke<void>("delete_ue_folder",{id}),
+  moveUeAssets: (ids:string[],folderId:string|null) => invoke<void>("batch_move_ue_assets",{ids,folderId}),
+  getUeBackupSummary: () => invoke<{referenced:number;collected:number}>("get_ue_backup_summary"),
+  linkUeEntity: (libraryId:string,assetIds:string[],kind:UeLink["kind"],entityId:string,remove=false) => invoke<void>("link_ue_entity",{libraryId,assetIds,kind,entityId,remove}),
+  getUeLinks: (libraryId:string,assetId:string|null,kind:UeLink["kind"]|null=null,entityId:string|null=null) => invoke<UeLink[]>("get_ue_links",{libraryId,assetId,kind,entityId}),
+  listUeCaptures: (libraryId:string) => invoke<import("../types").UeCapture[]>("list_ue_captures",{libraryId}),
+  acceptUeCapture: (libraryId:string,id:string) => invoke<{source:UeSource;objectPaths:string[]}>("accept_ue_capture",{libraryId,id}),
+  snapshotUeToBoard: (libraryId:string,ids:string[],boardId:string) => invoke<ReferenceImageAddReport>("snapshot_ue_to_board",{libraryId,ids,boardId}),
   listBrowserCaptures: (libraryId:string,offset=0) => invoke<import("../types").Page<import("../types").BrowserCapture>>("list_browser_captures",{libraryId,offset}),
   registerBrowserCaptureHost: (extensionId:string) => invoke<string>("register_browser_capture_host",{extensionId}),
   organizeBrowserCapture: (libraryId:string,id:string) => invoke<void>("organize_browser_capture",{libraryId,id}),

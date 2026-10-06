@@ -3,6 +3,7 @@ import {noteShortcutDefaults,noteShortcutLabels,setNoteShortcuts} from "./noteSh
 
 export const moduleRegistry: Array<{ id: ModuleId; group: ModuleGroupId; label: string; description: string }> = [
   { id: "library", group: "content", label: "素材库", description: "浏览、搜索与整理全部素材" },
+  { id: "ueLibrary", group: "content", label: "UE 资产库", description: "UE 原生资产、匹配引擎缩略图、依赖预览与工程导入" },
   { id: "browserCapture", group: "content", label: "采集收件箱", description: "接收浏览器图片、视频和来源链接，再关联创作项目与笔记" },
   { id: "imageLibrary", group: "content", label: "图片库", description: "集中管理参考图、贴图和概念图" },
   { id: "modelLibrary", group: "content", label: "三维模型库", description: "管理并交互预览 GLB、GLTF、FBX、OBJ 和 STL" },
@@ -48,7 +49,7 @@ export const defaultLibraryPreferences: LibraryPreferences = {
   assetView: "grid", cardSize: "medium", coverFit: "cover", coverAspectRatio: "standard",
   cardFields: { category: true, tags: true, software: true, version: true, format: true, linkStatus: true },
   defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null, workspaceContexts: {}, rememberWorkspace: true,
-  contextPaneWidths: { library: 248, imageLibrary: 220, modelLibrary: 260, audioLibrary: 220, videoLibrary: 220 },
+  contextPaneWidths: { library: 248, ueLibrary: 248, imageLibrary: 220, modelLibrary: 260, audioLibrary: 220, videoLibrary: 220 },
   collapsedContextPanes: [], collapsedModuleGroups: ["manage"],
 };
 

@@ -630,6 +630,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "projects",
         "knowledge",
         "browserCapture",
+        "ueLibrary",
     ]
     .contains(&module_id)
     {

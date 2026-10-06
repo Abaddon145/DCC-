@@ -65,16 +65,29 @@ pub fn export_library_with_progress(
         "media-library",
         "media",
         "note-attachments",
+        "ue-library",
     ] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
         }
-        for entry in WalkDir::new(&directory)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
+        let managed_root = directory
+            .canonicalize()
+            .map_err(|e| format!("备份目录无法读取：{managed_dir}：{e}"))?;
+        if !managed_root.starts_with(base_dir.canonicalize().map_err(|e| e.to_string())?) {
+            return Err(format!("备份目录 {managed_dir} 指向素材库外部，未导出"));
+        }
+        for entry in WalkDir::new(&directory).follow_links(false) {
+            let entry = entry.map_err(|e| format!("备份文件无法读取，未忽略：{e}"))?;
+            if entry.file_type().is_symlink() {
+                return Err(format!(
+                    "备份中含目录或文件链接，未导出：{}",
+                    entry.path().display()
+                ));
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let relative = entry
                 .path()
                 .strip_prefix(base_dir)
@@ -132,13 +145,14 @@ pub fn export_library_with_progress(
 }
 
 pub const RESTORE_MARKER: &str = ".restore-pending.json";
-const RESTORE_TARGETS: [&str; 6] = [
+const RESTORE_TARGETS: [&str; 7] = [
     "library.db",
     "images",
     "reference-boards",
     "media-library",
     "media",
     "note-attachments",
+    "ue-library",
 ];
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +254,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         "media-library",
         "media",
         "note-attachments",
+        "ue-library",
     ];
     for name in directories {
         if stage.path().join(name).exists() {
@@ -602,5 +617,52 @@ mod tests {
             .by_name("media-library/image/demo/original.png")
             .is_ok());
         assert!(archive.by_name("media/asset/originals/model.glb").is_ok());
+    }
+    #[test]
+    fn native_backup_contains_managed_packages_but_not_external_references() {
+        let directory = tempdir().unwrap();
+        let base = directory.path().join("library");
+        fs::create_dir_all(base.join("ue-library/sources/collected/Content")).unwrap();
+        fs::write(
+            base.join("ue-library/sources/collected/Content/Mesh.uasset"),
+            b"native",
+        )
+        .unwrap();
+        let external = directory.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("External.uasset"), b"external").unwrap();
+        let db = db::open_database(&base.join("library.db")).unwrap();
+        db.execute("INSERT INTO ue_sources(id,name,original_path,content_root,kind,engine_version) VALUES('reference','Reference',?1,?1,'pack','5.6')",[external.to_string_lossy().to_string()]).unwrap();
+        let output = directory.path().join("native.dccassetlib");
+        export_library(&db, &base, &output).unwrap();
+        let mut archive = ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        assert!(archive
+            .by_name("ue-library/sources/collected/Content/Mesh.uasset")
+            .is_ok());
+        assert!(!archive
+            .file_names()
+            .any(|name| name.ends_with("External.uasset")));
+        let restored = tempdir().unwrap();
+        extract_and_verify(&output, restored.path()).unwrap();
+        assert_eq!(
+            fs::read(
+                restored
+                    .path()
+                    .join("ue-library/sources/collected/Content/Mesh.uasset")
+            )
+            .unwrap(),
+            b"native"
+        );
+        let restored_db = db::open_database(&restored.path().join("library.db")).unwrap();
+        assert_eq!(
+            restored_db
+                .query_row(
+                    "SELECT content_root FROM ue_sources WHERE id='reference'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            external.to_string_lossy()
+        );
     }
 }

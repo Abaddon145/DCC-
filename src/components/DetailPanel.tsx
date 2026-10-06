@@ -7,6 +7,7 @@ import { ImagePreview } from "./ImagePreview";
 import { MediaPreview } from "./MediaPreview";
 import { LibraryMediaPreview, MediaViewer, type PreviewItem } from "./MediaViewer";
 import { useImageCompare } from "./ImageCompare";
+import { UeLinkedAssets } from "./UeLinkedAssets";
 
 interface Props {
   onAi?: (id: string) => void;
@@ -26,9 +27,11 @@ interface Props {
   onAddReference?: (imageIds: string[]) => void;
   onAddProject?: (assetId: string) => void;
   onCollectMedia?: (assetId: string) => void;
+  onOpenUe?: (id:string)=>void;
+  notify?: (message:string,error?:boolean)=>void;
 }
 
-export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
+export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia,onOpenUe,notify }: Props) {
   const compare=useImageCompare();
   const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
@@ -77,6 +80,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         </dl>
         <div className={`link-check-detail ${asset.shareUrl ? asset.linkCheckStatus : "missing"}`}><div><strong>{!asset.shareUrl ? "未添加百度网盘链接" : asset.linkCheckStatus === "valid" ? "网盘链接有效" : asset.linkCheckStatus === "invalid" ? "网盘链接已失效" : asset.linkCheckStatus === "error" ? "暂时无法判断链接状态" : "网盘链接尚未检查"}</strong><span>{!asset.shareUrl ? "该素材可仅使用 Fab 来源和预览信息。" : asset.linkCheckMessage || "仅验证分享是否存在，不检查提取码。"}</span>{asset.linkCheckedAt && <small>检查于 {new Date(asset.linkCheckedAt).toLocaleString("zh-CN")}</small>}</div>{asset.shareUrl && <button className="secondary-button" disabled={checkingLink} onClick={onCheckLink}><RefreshCw size={14} className={checkingLink ? "spinning" : ""} />{checkingLink ? "检查中" : "重新检查"}</button>}</div>
         {asset.sourceUrl && <button className="source-link" onClick={onSourceOpen}>查看素材来源 <ExternalLink size={13} /></button>}
+        {onOpenUe&&notify&&<UeLinkedAssets key={asset.id} kind="asset" entityId={asset.id} onOpen={onOpenUe} notify={notify}/>}
       </div>
       <div className="detail-actions">
         {compare&&currentPreview?.type==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"asset",id:currentPreview.image.id,title:currentPreview.image.originalName})}>加入 A/B 对比</button>}

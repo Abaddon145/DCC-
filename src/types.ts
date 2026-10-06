@@ -1,9 +1,9 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
 export type MediaKind = "image" | "model" | "audio" | "video";
-export type ViewMode = "library" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "ueLibrary" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
 export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
-export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
+export type ContextPaneId = "library" | "ueLibrary" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
@@ -11,6 +11,7 @@ export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAd
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | { kind: "ueAssets"; request: UeNativeJob }
   | { kind: "browserCapture"; request: { id: string } }
   | { kind: "assetMediaImport"; request: { assetId: string; paths: string[] } }
   | { kind: "assetMediaRetry"; request: { id: string } }
@@ -21,6 +22,15 @@ export type LibraryTaskRequest =
   | { kind: "links" }
   | { kind: "backup" | "restore"; request: { path: string } }
   | { kind: "migration"; request: StorageChangeRequest };
+
+export interface UeEngine { id:string; root:string; version:string; buildId:string; toolReady:boolean }
+export interface UeSource { id:string; name:string; originalPath:string; contentRoot:string; kind:"project"|"pack"; engineVersion:string; storageMode:"reference"|"collected"; lastIndexed:string|null; assetCount:number; warnings:string[] }
+export interface UeAsset { id:string; sourceId:string; packageName:string; objectPath:string; name:string; alias:string; className:string; relativePath:string; status:"ready"|"unsupported"|"unresolved"|"missing"; message:string; favorite:boolean; folderId:string|null; thumbnail:string|null; dependencies:string[]; tags:string[] }
+export interface UeSearch { query:string; sourceId:string|null; folderId:string|null; className:string|null; favoriteOnly:boolean; offset:number; limit:number; objectPaths?:string[] }
+export interface UeNativeJob { operation:"prepareTool"|"index"|"render"|"preview"|"collect"|"import"|"installMenu"; sourceId:string|null; engineRoot:string; assetIds:string[]; planId:string|null; confirmed:boolean }
+export interface UeImportPlan { id:string; sourceId:string; ids:string[]; engineId:string; targetProject:string; contentRoot:string; files:Array<{relative:string;size:number;conflict:boolean}>; bytes:number; conflicts:number; upgrade:boolean; sourceVersion:string; targetVersion:string }
+export interface UeLink { assetId:string; assetName:string; kind:"project"|"note"|"board"|"asset"; entityId:string; label:string; available:boolean }
+export interface UeCapture { id:string; libraryId:string; project:string; engineVersion:string; objectPaths:string[] }
 export interface LibraryTask {
   id: string; libraryId: string; label: string; status: "queued"|"running"|"completed"|"stopped"|"interrupted"|"failed";
   phase: string; current: number; total: number; currentName: string; createdAt: string; updatedAt: string;

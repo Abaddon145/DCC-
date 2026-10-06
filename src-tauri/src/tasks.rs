@@ -31,6 +31,7 @@ pub enum TaskRequest {
         #[serde(rename = "entryId")]
         entry_id: String,
     },
+    UeAssets(crate::ue_assets::NativeJob),
     FabImport {
         path: String,
         mapping: HashMap<String, String>,
@@ -57,6 +58,7 @@ impl TaskRequest {
             Self::MediaImport(_) => "媒体导入",
             Self::BrowserCapture { .. } => "浏览器采集",
             Self::ModelThumbnail { .. } => "模型缩略图",
+            Self::UeAssets(_) => "UE 原生资产",
             Self::FabImport { .. } => "Fab / 表格导入",
             Self::Translation { .. } => "双语补译",
             Self::Links => "网盘链接检查",
@@ -73,6 +75,7 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::UeAssets(request) => request.validate(),
             Self::AssetMediaImport { paths, .. } if paths.len() > 100 => {
                 Err("单次预览附件导入最多 100 项".into())
             }
@@ -715,6 +718,36 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::UeAssets(request) => tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            let (base, path) = state.with_active_mut(|active| {
+                if active.marker.library_id != task.library_id {
+                    return Err("UE 任务所属素材库已切换，未执行".into());
+                }
+                Ok((active.base_dir.clone(), active.db_path.clone()))
+            })?;
+            let mut connection = open_media_worker_connection(&path)?;
+            let resource = app.path().resource_dir().ok();
+            let stop_app = app.clone();
+            let stop_id = task.id.clone();
+            let _control = crate::media::ProcessControl::new(move || {
+                stop_app.state::<AppState>().tasks.should_stop(&stop_id)
+            });
+            crate::ue_assets::execute(
+                &mut connection,
+                &base,
+                resource.as_deref(),
+                &request,
+                &|current, total, name, phase| {
+                    state
+                        .tasks
+                        .update(&task.id, current, total, name, phase, None)
+                },
+                &|| state.tasks.should_stop(&task.id),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?,
         TaskRequest::BrowserCapture { id } => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();
             let (base, path) = state.with_active_mut(|active| {

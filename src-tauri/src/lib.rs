@@ -35,6 +35,7 @@ mod state;
 mod tasks;
 mod translation;
 mod translation_service;
+mod ue_assets;
 
 use commands::*;
 use state::AppState;
@@ -130,7 +131,9 @@ pub fn run() {
                     .unwrap();
             }
             match state.with_library(|connection, base_dir| {
-                if id == "note" {
+                if id == "ue" {
+                    ue_assets::thumbnail_response(connection, base_dir, variant)
+                } else if id == "note" {
                     knowledge_files::response(connection, base_dir, variant)
                 } else if id == "library" && variant == "file" {
                     media_library::protocol_response(
@@ -251,6 +254,27 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    ue_assets::list_ue_engines,
+                    ue_assets::list_ue_sources,
+                    ue_assets::register_ue_source,
+                    ue_assets::relocate_ue_source,
+                    ue_assets::search_ue_assets,
+                    ue_assets::select_ue_asset_ids,
+                    ue_assets::get_ue_asset,
+                    ue_assets::update_ue_asset,
+                    ue_assets::reveal_ue_asset,
+                    ue_assets::prepare_ue_import,
+                    ue_assets::list_ue_folders,
+                    ue_assets::upsert_ue_folder,
+                    ue_assets::move_ue_folder,
+                    ue_assets::delete_ue_folder,
+                    ue_assets::batch_move_ue_assets,
+                    ue_assets::get_ue_backup_summary,
+                    ue_assets::link_ue_entity,
+                    ue_assets::get_ue_links,
+                    ue_assets::list_ue_captures,
+                    ue_assets::accept_ue_capture,
+                    ue_assets::snapshot_ue_to_board,
                     browser_capture::get_browser_capture_connection,
                     browser_capture::pump_browser_captures,
                     browser_capture::register_browser_capture_host,

@@ -46,6 +46,7 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     const GROUPS: [&[&str]; 4] = [
         &[
             "library",
+            "ueLibrary",
             "browserCapture",
             "imageLibrary",
             "modelLibrary",
@@ -126,7 +127,12 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     value.context_pane_widths.retain(|id, width| {
         if !matches!(
             id.as_str(),
-            "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary"
+            "library"
+                | "ueLibrary"
+                | "imageLibrary"
+                | "modelLibrary"
+                | "audioLibrary"
+                | "videoLibrary"
         ) {
             return false;
         }
@@ -136,7 +142,12 @@ pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
     value.collapsed_context_panes.retain(|id| {
         matches!(
             id.as_str(),
-            "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary"
+            "library"
+                | "ueLibrary"
+                | "imageLibrary"
+                | "modelLibrary"
+                | "audioLibrary"
+                | "videoLibrary"
         )
     });
     value.collapsed_context_panes.sort();
@@ -450,7 +461,19 @@ pub fn list_tags(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    let mut statement = connection.prepare("SELECT t.id,t.locale,t.name,COUNT(a.id),COUNT(DISTINCT a.id) FROM localized_tags t LEFT JOIN asset_localized_tags at ON at.tag_id=t.id LEFT JOIN assets a ON a.id=at.asset_id AND a.deleted_at IS NULL WHERE t.locale=?1 AND t.name LIKE ?2 ESCAPE '\\' GROUP BY t.id ORDER BY COUNT(a.id) DESC,t.name COLLATE NOCASE LIMIT ?3 OFFSET ?4").map_err(|e| e.to_string())?;
+    let native = if connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ue_asset_tags')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(|e| e.to_string())?
+    {
+        " + (SELECT count(*) FROM ue_asset_tags ut JOIN ue_assets u ON u.id=ut.asset_id WHERE ut.tag_id=t.id AND u.status<>'missing')"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT t.id,t.locale,t.name,(SELECT count(*) FROM asset_localized_tags at JOIN assets a ON a.id=at.asset_id WHERE at.tag_id=t.id AND a.deleted_at IS NULL) + (SELECT count(*) FROM media_entry_tags mt JOIN media_entries m ON m.id=mt.entry_id WHERE mt.tag_id=t.id AND m.deleted_at IS NULL){native} AS uses,(SELECT count(*) FROM asset_localized_tags at JOIN assets a ON a.id=at.asset_id WHERE at.tag_id=t.id AND a.deleted_at IS NULL) FROM localized_tags t WHERE t.locale=?1 AND t.name LIKE ?2 ESCAPE '\\' ORDER BY uses DESC,t.name COLLATE NOCASE LIMIT ?3 OFFSET ?4")).map_err(|e| e.to_string())?;
     let items = statement
         .query_map(
             params![locale, pattern, limit.clamp(1, 200), offset.max(0)],
@@ -508,6 +531,12 @@ pub fn rename_tag(
         ));
     }
     let affected = tag_asset_ids(connection, &[id.to_string()])?;
+    let media = tag_entity_ids(
+        connection,
+        &[id.to_string()],
+        "media_entry_tags",
+        "entry_id",
+    )?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction
         .execute(
@@ -517,6 +546,9 @@ pub fn rename_tag(
         .map_err(|e| e.to_string())?;
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
+    }
+    for id in media {
+        crate::media_library::reindex(&transaction, &id)?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     let _ = old;
@@ -567,9 +599,21 @@ pub fn merge_tags(
         }
     }
     let affected = tag_asset_ids(connection, &sources)?;
+    let media = tag_entity_ids(connection, &sources, "media_entry_tags", "entry_id")?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     for source in &sources {
         transaction.execute("INSERT OR IGNORE INTO asset_localized_tags(asset_id,tag_id) SELECT asset_id,?1 FROM asset_localized_tags WHERE tag_id=?2", params![target_id,source]).map_err(|e| e.to_string())?;
+        transaction.execute("INSERT OR IGNORE INTO media_entry_tags(entry_id,tag_id) SELECT entry_id,?1 FROM media_entry_tags WHERE tag_id=?2", params![target_id,source]).map_err(|e| e.to_string())?;
+        if transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ue_asset_tags')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            transaction.execute("INSERT OR IGNORE INTO ue_asset_tags(asset_id,tag_id) SELECT asset_id,?1 FROM ue_asset_tags WHERE tag_id=?2", params![target_id,source]).map_err(|e| e.to_string())?;
+        }
         transaction
             .execute("DELETE FROM localized_tags WHERE id=?1", [source])
             .map_err(|e| e.to_string())?;
@@ -577,6 +621,9 @@ pub fn merge_tags(
     rewrite_collection_tag_ids(&transaction, &sources, Some(target_id))?;
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
+    }
+    for id in media {
+        crate::media_library::reindex(&transaction, &id)?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(TagMutationReport {
@@ -601,6 +648,7 @@ pub fn delete_tags(
         });
     }
     let affected = tag_asset_ids(connection, &ids)?;
+    let media = tag_entity_ids(connection, &ids, "media_entry_tags", "entry_id")?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     for id in &ids {
         transaction
@@ -609,6 +657,9 @@ pub fn delete_tags(
     }
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
+    }
+    for id in media {
+        crate::media_library::reindex(&transaction, &id)?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(TagMutationReport {
@@ -622,7 +673,19 @@ pub fn delete_unused_tags(
     locale: &str,
 ) -> Result<TagMutationReport, String> {
     let locale = if locale == "en" { "en" } else { "zh-CN" };
-    let removed = connection.execute("DELETE FROM localized_tags WHERE locale=?1 AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id)", [locale]).map_err(|e| e.to_string())?;
+    let native = if connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ue_asset_tags')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(|e| e.to_string())?
+    {
+        " AND NOT EXISTS(SELECT 1 FROM ue_asset_tags ut WHERE ut.tag_id=localized_tags.id)"
+    } else {
+        ""
+    };
+    let removed = connection.execute(&format!("DELETE FROM localized_tags WHERE locale=?1 AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id){native}"), [locale]).map_err(|e| e.to_string())?;
     Ok(TagMutationReport {
         affected_assets: 0,
         removed_tags: removed,
@@ -630,6 +693,14 @@ pub fn delete_unused_tags(
 }
 
 fn tag_asset_ids(connection: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
+    tag_entity_ids(connection, ids, "asset_localized_tags", "asset_id")
+}
+fn tag_entity_ids(
+    connection: &Connection,
+    ids: &[String],
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, String> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -639,7 +710,7 @@ fn tag_asset_ids(connection: &Connection, ids: &[String]) -> Result<Vec<String>,
         .join(",");
     let mut statement = connection
         .prepare(&format!(
-            "SELECT DISTINCT asset_id FROM asset_localized_tags WHERE tag_id IN ({marks})"
+            "SELECT DISTINCT {column} FROM {table} WHERE tag_id IN ({marks})"
         ))
         .map_err(|e| e.to_string())?;
     let values = statement
@@ -703,6 +774,31 @@ fn rewrite_collection_tag_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_tags_keep_media_and_native_links_when_merged_or_cleaned() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = db::open_database(&directory.path().join("library.db")).unwrap();
+        db.execute_batch("INSERT INTO localized_tags(id,locale,name,normalized_name) VALUES('source','zh-CN','石头','石头'),('target','zh-CN','岩石','岩石'),('unused','zh-CN','空','空');
+            INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('media','image','图片','file','now','now');
+            INSERT INTO media_entry_tags(entry_id,tag_id) VALUES('media','source');
+            INSERT INTO ue_sources(id,name,original_path,content_root,kind,engine_version) VALUES('source-ue','工程','test','Content','pack','5.6');
+            INSERT INTO ue_assets(id,source_id,package_name,object_path,name,class_name,relative_path,status) VALUES('ue','source-ue','/Game/Mesh','/Game/Mesh.Mesh','Mesh','StaticMesh','Mesh.uasset','ready');
+            INSERT INTO ue_asset_tags(asset_id,tag_id) VALUES('ue','source');").unwrap();
+        merge_tags(&mut db, vec!["source".into()], "target").unwrap();
+        for table in ["media_entry_tags", "ue_asset_tags"] {
+            assert_eq!(
+                db.query_row(&format!("SELECT tag_id FROM {table}"), [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "target"
+            );
+        }
+        assert_eq!(delete_unused_tags(&db, "zh-CN").unwrap().removed_tags, 1);
+        assert_eq!(
+            list_tags(&db, "zh-CN", "岩石", 0, 20).unwrap().items[0].usage_count,
+            2
+        );
+    }
     use rusqlite::Connection;
     #[test]
     fn library_preferences_keep_library_first_and_unknown_modules() {

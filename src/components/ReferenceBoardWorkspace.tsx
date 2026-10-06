@@ -6,6 +6,7 @@ import type { ReferenceBoardDetail, ReferenceBoardItem, ReferenceBoardItemTransf
 import { api } from "../lib/api";
 import { arrangeItems, cloneItems, reorderItems, type BoardView } from "../lib/referenceBoard";
 import { ReferenceCanvas, type ReferenceCanvasHandle } from "./ReferenceCanvas";
+import { UeLinkedAssets } from "./UeLinkedAssets";
 
 interface Props {
   initialBoard: ReferenceBoardDetail;
@@ -14,15 +15,17 @@ interface Props {
   onDetach?: (boardId: string) => Promise<void>;
   onChanged?: () => void;
   notify: (message: string, error?: boolean) => void;
+  onOpenUe?: (id:string)=>void;
 }
 
-export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack, onDetach, onChanged, notify }: Props) {
+export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack, onDetach, onChanged, notify,onOpenUe }: Props) {
   const [board, setBoard] = useState(initialBoard);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toolbarVisible, setToolbarVisible] = useState(true);
   const [pinned, setPinned] = useState(true);
+  const [ueLinksOpen,setUeLinksOpen]=useState(false);
   const canvas = useRef<ReferenceCanvasHandle>(null);
   const boardRef = useRef(board);
   const persistedIds = useRef(new Set(initialBoard.items.map(item => item.id)));
@@ -195,6 +198,7 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
     <label className="reference-background" title="背景颜色"><input type="color" value={board.background} onChange={event => { setBoard(current => ({ ...current, background: event.target.value })); markDirty(); }} /></label>
     <button title="导出 PNG" onClick={() => void exportPng()}><Download size={16} /></button>
     {!floating && <button title="分离为悬浮窗口" onClick={() => void detach()}><Unplug size={16} /></button>}
+    {onOpenUe&&!floating&&<button title="关联 UE 原生资产" onClick={()=>setUeLinksOpen(true)}>UE</button>}
     {floating && <><button title={pinned ? "取消置顶" : "始终置顶"} onClick={async () => { const next = !pinned; try { await api.setReferenceWindowAlwaysOnTop(next); setPinned(next); } catch (error) { notify(String(error), true); } }}>{pinned ? <Pin size={16} /> : <PinOff size={16} />}</button><button title="收回主窗口" onClick={() => void attach()}><RotateCcw size={16} /></button><button title="关闭并收回" className="danger" onClick={() => void attach()}><X size={16} /></button></>}
   </div>;
 
@@ -209,6 +213,7 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
   return <div className={`reference-workspace ${floating ? "floating" : ""}`} onPointerDownCapture={dragFloatingWindow}>
     {floating && <div className="reference-window-drag-strip" data-tauri-drag-region>{toolbarVisible && toolbars}<span data-tauri-drag-region /></div>}
     {!floating && toolbars}
+    {ueLinksOpen&&onOpenUe&&<div className="modal-backdrop" onPointerDown={event=>{if(event.target===event.currentTarget)setUeLinksOpen(false);}}><section className="modal-card" role="dialog" aria-modal="true" aria-label="参考板关联 UE 资产"><button onClick={()=>setUeLinksOpen(false)}>关闭</button><UeLinkedAssets kind="board" entityId={board.id} notify={notify} onOpen={id=>void saveNow().then(()=>onOpenUe(id)).catch(error=>notify(String(error),true))}/></section></div>}
     <ReferenceCanvas ref={canvas} items={board.items} view={{ x: board.viewX, y: board.viewY, scale: board.viewScale }} background={board.background} selectedIds={selectedIds} onSelectionChange={setSelectedIds} onItemsLive={items => setBoard(current => ({ ...current, items }))} onItemsCommit={commitItems} onViewChange={(view: BoardView, commit) => { setBoard(current => ({ ...current, viewX: view.x, viewY: view.y, viewScale: view.scale })); if (commit) markDirty(); }} />
     {!board.items.length && <div className="reference-empty-overlay"><FolderOpen size={34} /><strong>把参考图片放到这里</strong><span>从素材库加入、拖入本地图片，或粘贴剪贴板截图</span><button className="primary-button" onClick={() => void chooseImages()}><ImagePlus size={16} />选择图片</button></div>}
   </div>;

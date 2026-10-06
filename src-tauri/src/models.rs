@@ -74,6 +74,7 @@ pub struct SearchRequest {
 pub fn default_module_order() -> Vec<String> {
     [
         "library",
+        "ueLibrary",
         "browserCapture",
         "imageLibrary",
         "modelLibrary",
@@ -303,6 +304,7 @@ fn default_startup_module() -> String {
 fn default_context_pane_widths() -> HashMap<String, i64> {
     [
         ("library", 248),
+        ("ueLibrary", 248),
         ("imageLibrary", 220),
         ("modelLibrary", 260),
         ("audioLibrary", 220),

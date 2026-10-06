@@ -1,6 +1,6 @@
 # 第三方组件与许可证
 
-栈藏 DCC 素材库 v0.17.0 随安装包或前端产物使用以下第三方组件：
+栈藏 DCC 素材库 v0.21.0 测试版随安装包或前端产物使用以下第三方组件：
 
 ## FFmpeg / FFprobe 9.0.2
 
@@ -29,6 +29,16 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 - 完整许可证随安装包以 `TIPTAP-LICENSE.txt` 分发。
 
 ## 产品参考
+
+UE 资产库的产品交互参考 UE5Box，独立实现；不包含 UE5Box 的代码、素材或品牌资源。
+
+## Kura 原生缩略图桥接
+
+- 上游：https://github.com/Yashashin/Kura
+- 固定提交：`f8f6d06bf2a626f94cb10b0104b71ce80c6c5458`
+- 许可证：MIT；完整许可证位于 `ue-tools/StackAssetBridge/KURA-LICENSE.txt`。
+- 复用最小原生缩略图组件，并加入匹配版本、真实对象路径、完整 Editor 渲染与失败校验；没有复制 Kura UI。
+- 不捆绑 Unreal Engine。辅助工具由用户已安装并有权使用的 UE / C++ 工具链本地编译，遵守 Epic 的相应许可。
 
 ## Mind Elixir 5.15.1
 

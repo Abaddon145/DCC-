@@ -23,6 +23,7 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
   if(command==="list_notebooks")return [];
   if(command==="get_note_backlinks")return [];
   if(command==="get_note_references")return [];
+  if(command==="get_ue_links")return [];
   if(command==="get_note")return note;
   if(command==="save_note")return {...note,...args?.input as object,revision:2};
   if(command==="list_note_revisions")return [{id:"history",noteId:note.id,title:"旧版标题",pinned:false,createdAt:note.createdAt}];

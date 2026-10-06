@@ -12,6 +12,10 @@ coverage/
 note-attachments/
 *.tsbuildinfo
 .env
+ue-library/
+ue-bridge/
+ue-jobs/
+ue-capture/
 .env.*
 !.env.example
 app-settings.json

@@ -796,6 +796,7 @@ fn ensure_library(path: &Path, name: &str, allow_legacy: bool) -> Result<(), Str
     fs::create_dir_all(path.join("images/thumbnails")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("reference-boards")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("media-library")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(path.join("ue-library")).map_err(|e| e.to_string())?;
     fs::create_dir_all(path.join("safety-backups")).map_err(|e| e.to_string())?;
     let marker_path = path.join(MARKER_FILE);
     if !marker_path.exists() {
@@ -883,6 +884,10 @@ fn migrate_library(
         copy_tree_verified(
             &active.base_dir.join("note-attachments"),
             &stage.join("note-attachments"),
+        )?;
+        copy_tree_verified(
+            &active.base_dir.join("ue-library"),
+            &stage.join("ue-library"),
         )?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {

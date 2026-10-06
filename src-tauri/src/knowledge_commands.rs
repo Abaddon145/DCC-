@@ -451,6 +451,7 @@ pub fn search_note_reference_targets(
             "asset"=>"SELECT id,name FROM assets WHERE deleted_at IS NULL AND name LIKE ?1 ESCAPE '!' ORDER BY updated_at DESC LIMIT 30",
             "media"=>"SELECT id,name FROM media_entries WHERE deleted_at IS NULL AND name LIKE ?1 ESCAPE '!' ORDER BY updated_at DESC LIMIT 30",
             "project"=>"SELECT id,name FROM projects WHERE name LIKE ?1 ESCAPE '!' ORDER BY updated_at DESC LIMIT 30",
+            "ue"=>"SELECT id,COALESCE(NULLIF(alias,''),name) FROM ue_assets WHERE (name LIKE ?1 ESCAPE '!' OR alias LIKE ?1 ESCAPE '!' OR package_name LIKE ?1 ESCAPE '!') ORDER BY name COLLATE NOCASE LIMIT 30",
             _=>return Err("未知引用类型".into()),
         };
         let filter=format!("%{}%",query.trim().replace('!',"!!").replace('%',"!%").replace('_',"!_"));

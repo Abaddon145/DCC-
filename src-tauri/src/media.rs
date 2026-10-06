@@ -171,9 +171,17 @@ fn read_process_stream(mut reader: impl std::io::Read) -> Vec<u8> {
     }
     bytes
 }
-fn process_output(
+pub(crate) fn process_output(
     command: &mut Command,
     timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    process_output_with_progress(command, timeout, &|| {}, false)
+}
+pub(crate) fn process_output_with_progress(
+    command: &mut Command,
+    timeout: std::time::Duration,
+    progress: &dyn Fn(),
+    stop_tree: bool,
 ) -> Result<std::process::Output, String> {
     quiet(command);
     command
@@ -187,23 +195,38 @@ fn process_output(
     let out = std::thread::spawn(move || read_process_stream(stdout));
     let err = std::thread::spawn(move || read_process_stream(stderr));
     let started = std::time::Instant::now();
+    let stop_child = |child: &mut std::process::Child| {
+        #[cfg(windows)]
+        if stop_tree {
+            let mut stop = Command::new("taskkill.exe");
+            quiet(&mut stop);
+            // Only this owned PID and its descendants, never all UE processes on the machine.
+            let _ = stop
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .output();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let mut last_progress = started;
     let result = loop {
         if process_stopped() {
-            let _ = child.kill();
-            let _ = child.wait();
-            break Err("媒体处理已安全停止".into());
+            stop_child(&mut child);
+            break Err("外部处理已安全停止".into());
         }
         if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            break Err("媒体引擎处理超时，请检查文件后重试".into());
+            stop_child(&mut child);
+            break Err("外部处理超时，请检查文件后重试".into());
+        }
+        if last_progress.elapsed() >= std::time::Duration::from_millis(500) {
+            progress();
+            last_progress = std::time::Instant::now();
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_child(&mut child);
                 break Err(e.to_string());
             }
         }

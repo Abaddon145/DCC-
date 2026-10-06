@@ -1,0 +1,14 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.21.0",
+  "FriendlyName": "栈藏 UE 资产桥接",
+  "Description": "Editor-only indexing and native thumbnails for Stack DCC Asset Library.",
+  "Category": "Editor",
+  "CanContainContent": false,
+  "Modules": [{ "Name": "StackAssetBridge", "Type": "Editor", "LoadingPhase": "PostEngineInit" }],
+  "Plugins": [
+    { "Name": "PythonScriptPlugin", "Enabled": true },
+    { "Name": "EditorScriptingUtilities", "Enabled": true }
+  ]
+}

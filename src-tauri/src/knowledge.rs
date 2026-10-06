@@ -168,6 +168,7 @@ pub fn references(db: &Connection, note_id: &str) -> Result<Vec<NoteReference>> 
             "asset" => "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1 AND deleted_at IS NULL)",
             "media" => "SELECT EXISTS(SELECT 1 FROM media_entries WHERE id=?1 AND deleted_at IS NULL)",
             "project" => "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            "ue" => "SELECT EXISTS(SELECT 1 FROM ue_assets WHERE id=?1 AND status<>'missing')",
             _ => return Err("未知引用类型".into()),
         };
         let available = db.query_row(sql,[&target_id],|r|r.get(0)).map_err(error)?;
@@ -477,7 +478,7 @@ pub(crate) fn inspect_document(
             let kind = attrs["kind"].as_str().unwrap_or("");
             let id = attrs["targetId"].as_str().unwrap_or("");
             let label = attrs["label"].as_str().unwrap_or("");
-            if !["note", "asset", "media", "project"].contains(&kind)
+            if !["note", "asset", "media", "project", "ue"].contains(&kind)
                 || Uuid::parse_str(id).is_err()
                 || label.len() > 2000
             {

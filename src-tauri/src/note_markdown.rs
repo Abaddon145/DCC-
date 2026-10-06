@@ -139,7 +139,7 @@ fn collect(
                 let url = url::Url::parse(href).map_err(|_| "引用链接无效")?;
                 let kind = url.host_str().unwrap_or("");
                 let id = url.path().trim_matches('/');
-                if !["note", "asset", "media", "project"].contains(&kind)
+                if !["note", "asset", "media", "project", "ue"].contains(&kind)
                     || Uuid::parse_str(id).is_err()
                 {
                     return Err("引用链接无效".into());
