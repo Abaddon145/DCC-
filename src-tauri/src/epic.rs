@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 const MAX_PROJECT_BYTES: u64 = 1024 * 1024;
 const LIBRARY_CHANGED: &str = "素材库已切换，请重新打开素材的 Epic 添加入口";
+static EPIC_NAVIGATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -109,6 +110,18 @@ fn registered_listing(connection: &Connection, asset_id: &str) -> Result<Uuid, S
 
 fn epic_listing_url(listing_id: Uuid) -> String {
     format!("com.epicgames.launcher://fab/plugins/egl/listings/{listing_id}")
+}
+
+fn request_epic_navigation(
+    listing_id: Uuid,
+    mut dispatch: impl FnMut(&str) -> Result<(), String>,
+    handoff: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    dispatch("com.epicgames.launcher://ue/library")?;
+    handoff()?;
+    let url = epic_listing_url(listing_id);
+    dispatch(&url)?;
+    Ok(url)
 }
 
 #[tauri::command]
@@ -385,17 +398,35 @@ pub async fn open_fab_in_epic(
     expected_library_id: String,
 ) -> Result<EpicOpenResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        in_library(&app.state::<AppState>(), &expected_library_id, |connection, _| {
-        let listing_id = registered_listing(connection, &asset_id)?;
+        let _navigation = EPIC_NAVIGATION
+            .try_lock()
+            .map_err(|_| "Epic 正在切换商品，请等待当前定位请求完成后重试")?;
+        let state = app.state::<AppState>();
+        let listing_id = in_library(&state, &expected_library_id, |connection, _| {
+            registered_listing(connection, &asset_id)
+        })?;
         check_epic_protocol()?;
-        let url = epic_listing_url(listing_id);
-        open::that(&url).map_err(|error| format!("无法打开 Epic 商品入口：{error}"))?;
+        let url = request_epic_navigation(
+            listing_id,
+            |url| in_library(&state, &expected_library_id, |connection, _| {
+                if registered_listing(connection, &asset_id)? != listing_id {
+                    return Err("素材的 Fab 来源已改变，请重新打开 Epic 添加入口".into());
+                }
+                open::that(url).map_err(|error| format!("无法打开 Epic 商品入口：{error}"))
+            }),
+            || {
+                // ponytail: two-second handoff verified in this warm Launcher session;
+                // no documented ready callback exists. Slow startup still needs manual retry.
+                // Wait outside the library lock; never restart Epic or touch its cache.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                Ok(())
+            },
+        )?;
         Ok(EpicOpenResult {
             listing_id: listing_id.to_string(),
             url,
             requested: true,
-            message: "已向 Epic 发出 Fab 商品定位请求，尚未确认商品页面是否加载。请核对商品后点击“添加到工程”并选择版本和目标工程；尚未发起下载或安装。若仍停在库首页，可重试定位或使用下方的手动入口。".into(),
-        })
+            message: "已通过 UE 库重新交接并发出 Fab 商品定位请求，尚未确认商品页面是否加载。请核对商品后点击“添加到工程”并选择版本和目标工程；尚未发起下载或安装。Epic 启动或加载较慢时，可在就绪后重试定位，无需关闭 Epic。".into(),
         })
     })
     .await
@@ -405,6 +436,103 @@ pub async fn open_fab_in_epic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_epic_requests_leave_fab_before_each_product_and_wait_for_handoff() {
+        let trace = std::cell::RefCell::new(Vec::new());
+        let first = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        let second = Uuid::parse_str("5d9d932b-9e6e-42d0-8afc-45249e7535a5").unwrap();
+        // The same listing must also navigate away: Epic can reject it as "Already at location".
+        for listing in [first, second, second] {
+            let url = request_epic_navigation(
+                listing,
+                |url| {
+                    trace.borrow_mut().push(url.to_string());
+                    Ok(())
+                },
+                || {
+                    trace.borrow_mut().push("handoff".into());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(url, epic_listing_url(listing));
+        }
+        assert_eq!(
+            trace.into_inner(),
+            [first, second, second]
+                .into_iter()
+                .flat_map(|id| [
+                    "com.epicgames.launcher://ue/library".to_string(),
+                    "handoff".to_string(),
+                    epic_listing_url(id),
+                ])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn failed_epic_handoff_or_changed_listing_does_not_dispatch_the_product() {
+        let listing = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        let trace = std::cell::RefCell::new(Vec::new());
+        let error = request_epic_navigation(
+            listing,
+            |url| {
+                trace.borrow_mut().push(url.to_string());
+                Ok(())
+            },
+            || Err(LIBRARY_CHANGED.into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, LIBRARY_CHANGED);
+        assert_eq!(*trace.borrow(), ["com.epicgames.launcher://ue/library"]);
+
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE assets(id TEXT,source_url TEXT,fab_listing_id TEXT,deleted_at TEXT);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO assets VALUES('asset',?1,?2,NULL)",
+                [
+                    format!("https://www.fab.com/listings/{listing}"),
+                    listing.to_string(),
+                ],
+            )
+            .unwrap();
+        trace.borrow_mut().clear();
+        let error = request_epic_navigation(
+            listing,
+            |url| {
+                registered_listing(&connection, "asset")?;
+                trace.borrow_mut().push(url.to_string());
+                Ok(())
+            },
+            || {
+                connection
+                    .execute("UPDATE assets SET deleted_at='now'", [])
+                    .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("已删除"));
+        assert_eq!(*trace.borrow(), ["com.epicgames.launcher://ue/library"]);
+
+        let handoff_called = std::cell::Cell::new(false);
+        assert!(request_epic_navigation(
+            listing,
+            |_| Err("Epic 协议调用失败".into()),
+            || {
+                handoff_called.set(true);
+                Ok(())
+            },
+        )
+        .is_err());
+        assert!(!handoff_called.get());
+    }
 
     #[test]
     fn epic_url_only_contains_a_validated_database_listing_uuid() {

@@ -131,4 +131,19 @@ describe("Epic Fab assisted project flow", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("未能发出商品定位请求"));
     expect(localStorage.getItem("dcc-epic-add:library-1")).toBeNull();
   });
+  it("keeps both location buttons disabled throughout the Epic page handoff", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof api.openFabInEpic>>) => void;
+    vi.mocked(api.openFabInEpic).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    show(); await waitFor(() => expect(screen.getByRole("button", { name: "定位 Fab 商品" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "定位 Fab 商品" }));
+    await waitFor(() => expect(api.openFabInEpic).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "正在切换 Epic 页面并定位…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重试定位" })).toBeDisabled();
+    expect(screen.getByText(/正在切换 Epic 页面，请等待定位请求完成/)).toHaveAttribute("role", "status");
+    fireEvent.click(screen.getByRole("button", { name: "重试定位" }));
+    expect(api.openFabInEpic).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ listingId: options.listingId, url: options.epicUrl, requested: true, message: "已发送请求，尚未确认商品已加载。" }));
+    expect(screen.getByRole("button", { name: "定位 Fab 商品" })).toBeEnabled();
+    expect(screen.getByText("已发送请求，尚未确认商品已加载。")).toBeInTheDocument();
+  });
 });

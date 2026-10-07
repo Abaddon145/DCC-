@@ -131,7 +131,8 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
         {target && relation === "older" && <p className="form-warning">所选素材版本低于工程版本，允许继续，但可能需要转换或出现兼容性问题。请先备份工程。</p>}
         {target && relation === "newer" && <p className="form-warning">素材版本高于工程版本，不能继续。请选择更早的官方版本或更高版本的工程。</p>}
         <p className="form-warning">工程路径和所选版本不会自动传给 Epic。请在 Epic 中再次选择目标工程与版本；插件或完整工程可能显示“安装插件”或“创建工程”。</p>
-        <p>定位请求不代表 Epic 已显示商品或开始安装。如果仍停在库首页，可重试定位、复制商品名在 Fab 库搜索，或手动打开官方商品页。</p>
+        <p>定位时会先切到 UE 库，再打开所选 Fab 商品，以避免连续切换失效。无需关闭 Epic；请求不代表商品已加载或开始安装。启动较慢时，请等 Epic 就绪后重试。</p>
+        {busy === "opening" && <p role="status"><RefreshCw size={14} className="spinning"/>正在切换 Epic 页面，请等待定位请求完成…</p>}
         <div className="epic-fallback-actions">
           <button className="secondary-button" disabled={!canOpen} onClick={() => void launch()}><RefreshCw size={14}/>重试定位</button>
           <button className="secondary-button" disabled={!!busy || !context.current} onClick={() => void fallback("copy")}><Copy size={14}/>复制商品名</button>
@@ -140,7 +141,7 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
         {error && <p role="alert" className="form-error">{error}</p>}
         {message && <p role="status">{message}</p>}
       </div>
-      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? "正在发出定位请求…" : "定位 Fab 商品"}</button></footer>
+      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? "正在切换 Epic 页面并定位…" : "定位 Fab 商品"}</button></footer>
     </section>
   </div>;
 }
