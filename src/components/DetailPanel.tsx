@@ -95,7 +95,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>
       </div>
       {lightbox && <MediaViewer items={previews} initialIndex={selectedPreview} title={shownName} onClose={() => setLightbox(false)} />}
-      {epicOpen && createPortal(<EpicFabDialog assetId={asset.id} title={shownName} onClose={() => setEpicOpen(false)}/>, document.body)}
+      {epicOpen && createPortal(<EpicFabDialog assetId={asset.id} title={shownName} productName={asset.localizations.en?.name.trim() || shownName} onClose={() => setEpicOpen(false)}/>, document.body)}
       {referenceMenu && onAddReference && createPortal(<><button className="popover-dismiss-layer" aria-label="关闭菜单" onClick={() => setReferenceMenu(null)} /><div className="reference-portal-menu" style={referenceMenu}>{currentPreview?.type === "image" && <button onClick={() => { onAddReference([currentPreview.image.id]); setReferenceMenu(null); }}>加入当前图片</button>}<button onClick={() => { onAddReference(asset.images.map(image => image.id)); setReferenceMenu(null); }}>加入全部预览图</button></div></>, document.body)}
     </>}
   </aside>;

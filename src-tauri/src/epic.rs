@@ -47,7 +47,7 @@ pub struct UeProjectTarget {
 pub struct EpicOpenResult {
     pub listing_id: String,
     pub url: String,
-    pub opened: bool,
+    pub requested: bool,
     pub message: String,
 }
 
@@ -108,7 +108,7 @@ fn registered_listing(connection: &Connection, asset_id: &str) -> Result<Uuid, S
 }
 
 fn epic_listing_url(listing_id: Uuid) -> String {
-    format!("com.epicgames.launcher://ue/Fab/product/{listing_id}")
+    format!("com.epicgames.launcher://fab/plugins/egl/listings/{listing_id}")
 }
 
 #[tauri::command]
@@ -393,8 +393,8 @@ pub async fn open_fab_in_epic(
         Ok(EpicOpenResult {
             listing_id: listing_id.to_string(),
             url,
-            opened: true,
-            message: "已打开 Epic 商品入口，请在 Epic 中核对素材版本、选择目标工程并点击 Add to Project。尚未发起下载或确认安装。".into(),
+            requested: true,
+            message: "已向 Epic 发出 Fab 商品定位请求，尚未确认商品页面是否加载。请核对商品后点击“添加到工程”并选择版本和目标工程；尚未发起下载或安装。若仍停在库首页，可重试定位或使用下方的手动入口。".into(),
         })
         })
     })
@@ -426,7 +426,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             epic_listing_url(registered_listing(&connection, "asset").unwrap()),
-            format!("com.epicgames.launcher://ue/Fab/product/{id}")
+            format!("com.epicgames.launcher://fab/plugins/egl/listings/{id}")
         );
         for source in [
             format!("https://evil.example/listings/{id}"),

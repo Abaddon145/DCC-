@@ -474,4 +474,4 @@ export interface UeProjectTarget {
   name: string; path: string; engineAssociation: string | null; engineVersion: string | null;
   available: boolean; warnings: string[];
 }
-export interface EpicOpenResult { listingId: string; url: string; opened: boolean; message: string }
+export interface EpicOpenResult { listingId: string; url: string; requested: boolean; message: string }

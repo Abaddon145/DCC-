@@ -1,7 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, FolderOpen, RefreshCw, X } from "lucide-react";
+import { Copy, ExternalLink, FolderOpen, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { knowledgeApi } from "../lib/knowledge";
 import { useRequestGate } from "../lib/workspace";
 import type { FabUeOptions, UeProjectTarget } from "../types";
 
@@ -13,8 +14,8 @@ export function ueVersionRelation(packageVersion: string, projectVersion: string
   return difference === 0 ? "same" : difference < 0 ? "older" : "newer";
 }
 
-interface Props { assetId: string; title: string; onClose: () => void }
-export function EpicFabDialog({ assetId, title, onClose }: Props) {
+interface Props { assetId: string; title: string; productName?: string; onClose: () => void }
+export function EpicFabDialog({ assetId, title, productName = title, onClose }: Props) {
   const gate = useRequestGate();
   const dialog = useRef<HTMLElement>(null);
   const context = useRef<{ libraryId: string; enabled: boolean } | null>(null);
@@ -22,13 +23,13 @@ export function EpicFabDialog({ assetId, title, onClose }: Props) {
   const [targets, setTargets] = useState<UeProjectTarget[]>([]);
   const [selectedPath, setSelectedPath] = useState("");
   const [version, setVersion] = useState("");
-  const [busy, setBusy] = useState<"loading" | "picking" | "opening" | null>("loading");
+  const [busy, setBusy] = useState<"loading" | "picking" | "opening" | "fallback" | null>("loading");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const target = targets.find(item => item.path === selectedPath);
   const relation = ueVersionRelation(version, target?.engineVersion || null);
   const canOpen = !!context.current && !!options && !!target?.available && relation !== "newer" && (!options.supportedVersions.length || !!version) && !busy;
-  const close = () => { gate.invalidate(); onClose(); };
+  const close = () => { gate.invalidate(); context.current = null; onClose(); };
 
   const remember = (path: string, selectedVersion: string) => {
     if (!context.current?.enabled) return;
@@ -94,8 +95,19 @@ export function EpicFabDialog({ assetId, title, onClose }: Props) {
       if (!checked.available || ueVersionRelation(version, checked.engineVersion) === "newer") throw new Error("工程不可用或版本已变更，请重新核对目标工程。");
       const result = await api.openFabInEpic(assetId, bound.libraryId);
       if (!gate.isCurrent(ticket)) return;
-      if (result.opened) remember(checked.path, version);
-      setMessage(result.message);
+      if (result.requested) { remember(checked.path, version); setMessage(result.message); }
+      else setError(result.message);
+    } catch (reason) { if (gate.isCurrent(ticket)) setError(String(reason)); }
+    finally { if (gate.isCurrent(ticket)) setBusy(null); }
+  };
+  const fallback = async (action: "copy" | "web") => {
+    const bound = context.current;
+    if (!bound || busy || (action === "web" && !options)) return;
+    const ticket = gate.begin(); setBusy("fallback"); setError(""); setMessage("");
+    try {
+      if (action === "copy") await knowledgeApi(bound.libraryId).writeClipboard(productName);
+      else await api.openExternal(options!.canonicalUrl);
+      if (gate.isCurrent(ticket)) setMessage(action === "copy" ? "商品名已复制，可在 Epic 的 Fab 库中搜索。" : "已请求打开官方商品页，可在页面核对购买记录与支持版本。");
     } catch (reason) { if (gate.isCurrent(ticket)) setError(String(reason)); }
     finally { if (gate.isCurrent(ticket)) setBusy(null); }
   };
@@ -107,7 +119,7 @@ export function EpicFabDialog({ assetId, title, onClose }: Props) {
       <header><div><span className="eyebrow">EPIC · FAB</span><h2>添加到 UE 工程</h2></div><button className="icon-button" aria-label="关闭 Epic 添加窗口" onClick={close}><X size={18}/></button></header>
       <div className="epic-fab-body">
         <p className="epic-asset-title">{title}</p>
-        <p>这里核对工程与版本，随后在 Epic Games Launcher 中完成下载或添加。需使用已购买此素材的 Epic 账号。</p>
+        <p>这里核对工程与版本，再定位 Epic 中的 Fab 商品。请在商品页点击“添加到工程”并确认目标工程；需使用已购买此素材的 Epic 账号。</p>
         {busy === "loading" && <p role="status"><RefreshCw size={14} className="spinning"/>正在读取 Fab 支持版本和已登记工程…</p>}
         <label>目标 UE 工程<select disabled={!!busy} value={selectedPath} onChange={event => { setSelectedPath(event.target.value); setMessage(""); const next = targets.find(item => item.path === event.target.value); const same = options?.supportedVersions.find(item => ueVersionRelation(item, next?.engineVersion || null) === "same"); if (same) setVersion(same); }}><option value="">请选择工程</option>{targets.map(item => <option key={item.path} value={item.path} disabled={!item.available}>{item.projectName ? `${item.projectName} · ` : ""}{item.name}{item.available ? "" : "（路径失效）"}</option>)}</select></label>
         <button className="secondary-button" disabled={!!busy || !context.current} onClick={() => void chooseProject()}><FolderOpen size={15}/>{busy === "picking" ? "正在检查…" : "选择其他 .uproject"}</button>
@@ -119,10 +131,16 @@ export function EpicFabDialog({ assetId, title, onClose }: Props) {
         {target && relation === "older" && <p className="form-warning">所选素材版本低于工程版本，允许继续，但可能需要转换或出现兼容性问题。请先备份工程。</p>}
         {target && relation === "newer" && <p className="form-warning">素材版本高于工程版本，不能继续。请选择更早的官方版本或更高版本的工程。</p>}
         <p className="form-warning">工程路径和所选版本不会自动传给 Epic。请在 Epic 中再次选择目标工程与版本；插件或完整工程可能显示“安装插件”或“创建工程”。</p>
+        <p>定位请求不代表 Epic 已显示商品或开始安装。如果仍停在库首页，可重试定位、复制商品名在 Fab 库搜索，或手动打开官方商品页。</p>
+        <div className="epic-fallback-actions">
+          <button className="secondary-button" disabled={!canOpen} onClick={() => void launch()}><RefreshCw size={14}/>重试定位</button>
+          <button className="secondary-button" disabled={!!busy || !context.current} onClick={() => void fallback("copy")}><Copy size={14}/>复制商品名</button>
+          <button className="secondary-button" disabled={!!busy || !context.current || !options} onClick={() => void fallback("web")}><ExternalLink size={14}/>打开官方商品页</button>
+        </div>
         {error && <p role="alert" className="form-error">{error}</p>}
         {message && <p role="status">{message}</p>}
       </div>
-      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? "正在打开…" : "打开 Epic 添加流程"}</button></footer>
+      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? "正在发出定位请求…" : "定位 Fab 商品"}</button></footer>
     </section>
   </div>;
 }
