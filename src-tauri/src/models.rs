@@ -831,6 +831,8 @@ pub struct AssetDetail {
     pub media_library: Vec<LinkedMediaPreview>,
     pub created_at: String,
     pub localizations: HashMap<String, LocalizedAssetText>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub single_import_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

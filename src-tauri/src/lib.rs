@@ -6,6 +6,7 @@ mod bilingual;
 mod browser_capture;
 mod commands;
 mod db;
+mod epic;
 mod fab;
 mod file_digest;
 mod glossary;
@@ -251,6 +252,10 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    epic::get_fab_ue_options,
+                    epic::list_ue_project_targets,
+                    epic::inspect_ue_project,
+                    epic::open_fab_in_epic,
                     browser_capture::get_browser_capture_connection,
                     browser_capture::pump_browser_captures,
                     browser_capture::register_browser_capture_host,

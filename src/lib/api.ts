@@ -3,6 +3,7 @@ import { withKnowledgeBarrier } from "./noteSaveGuard";
 import type { AssetDetail, AssetInput, AssetMedia, ImportMapping, ImportPreview, ImportReport, BatchTranslationReport, LibraryMeta, Page, AssetCard, SearchRequest, LibraryLocationState, StorageChangeRequest, ParsedShareText, DuplicateMatch, BatchAssetUpdate, BatchUpdateReport, HealthSummary, HealthIssueRequest, FabMetadata, FabDuplicateMatch, ContentLanguage, TranslationSettings, TranslationRequest, TranslationPreview, TranslationTestResult, TranslationTerm, TranslationTermInput, TranslationTermImportReport, LinkCheckReport, LinkCheckResult, MoveCategoryRequest, MoveResult, UndoMoveResult, ReferenceBoardSummary, ReferenceBoardDetail, ReferencePlacement, ReferenceImageAddReport, ReferenceBoardItem, ReferenceBoardChanges, ReferenceExportOptions, PersonalizationState, GlobalPreferences, LibraryPreferences, SmartCollection, SmartCollectionInput, TagUsage, TagMutationReport, AssetSelection, DeleteRequest, DeleteResult, TrashBatch, ProjectSummary, CreativeProject, ProjectInput, ProjectUnitInput, ProjectTaskInput, ProjectTask, ProjectAssetUpdate, ProjectBoardLink, ProjectPathInput, ProjectPathShortcut, ProjectPathCheck, ProjectTaskStatus, MediaEntry, MediaEntryDetail, MediaSearchRequest, MediaImportRequest, MediaImportReport, MediaFolder, MediaKind, MediaBatchUpdate, ModelThumbnailJob } from "../types";
 import type { ProjectUnit } from "../types";
 import type { LibraryTask, LibraryTaskRequest } from "../types";
+import type { FabUeOptions, UeProjectTarget, EpicOpenResult } from "../types";
 
 async function runLibraryTask<T>(payload: LibraryTaskRequest): Promise<T> {
   const created=await invoke<LibraryTask>("start_library_task",{payload});
@@ -21,6 +22,10 @@ export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localho
 export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
+  getFabUeOptions: (assetId: string, expectedLibraryId: string) => invoke<FabUeOptions>("get_fab_ue_options", { assetId, expectedLibraryId }),
+  listUeProjectTargets: (expectedLibraryId: string) => invoke<UeProjectTarget[]>("list_ue_project_targets", { expectedLibraryId }),
+  inspectUeProject: (path: string, expectedLibraryId: string) => invoke<UeProjectTarget>("inspect_ue_project", { path, expectedLibraryId }),
+  openFabInEpic: (assetId: string, expectedLibraryId: string) => invoke<EpicOpenResult>("open_fab_in_epic", { assetId, expectedLibraryId }),
   listBrowserCaptures: (libraryId:string,offset=0) => invoke<import("../types").Page<import("../types").BrowserCapture>>("list_browser_captures",{libraryId,offset}),
   registerBrowserCaptureHost: (extensionId:string) => invoke<string>("register_browser_capture_host",{extensionId}),
   organizeBrowserCapture: (libraryId:string,id:string) => invoke<void>("organize_browser_capture",{libraryId,id}),
@@ -41,7 +46,7 @@ export const api = {
   search: (request: SearchRequest) => invoke<Page<AssetCard>>("search_assets", { request }),
   selectAssetIds: (request: SearchRequest) => invoke<AssetSelection>("select_asset_ids", { request }),
   getAsset: (id: string, contentLanguage: ContentLanguage) => invoke<AssetDetail>("get_asset", { id, contentLanguage }),
-  saveAsset: (input: AssetInput) => invoke<AssetDetail>("upsert_asset", { input }),
+  saveAsset: (input: AssetInput, expectedLibraryId: string) => invoke<AssetDetail>("upsert_asset", { input, expectedLibraryId }),
   deleteAsset: (id: string) => invoke<void>("delete_asset", { id }),
   setFavorite: (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite }),
   addCategory: (name: string, parentId: string | null) => invoke<string>("upsert_category", { id: null, name, parentId }),

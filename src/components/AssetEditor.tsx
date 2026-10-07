@@ -59,6 +59,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const [pendingMediaPaths, setPendingMediaPaths] = useState<string[]>([]);
   const [mediaBusy, setMediaBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+  const savingRef = useRef(false);
+  const fetchingFabRef = useRef(false);
   const categoryOptions = useMemo(() => flattenCategories(categories), [categories]);
 
   const addPaths = (paths: string[]) => setForm(prev => {
@@ -162,7 +164,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   };
 
   const fetchFab = async () => {
-    if (!fabUrl.trim() || fetchingFab) return;
+    if (!fabUrl.trim() || fetchingFabRef.current || savingRef.current) return;
+    fetchingFabRef.current = true;
     setFetchingFab(true); setFabStatus(null); setFabDuplicate(null);
     try {
       const duplicate = await api.checkFabUrl(fabUrl.trim(), asset?.id);
@@ -172,39 +175,26 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         return;
       }
       const metadata = await api.fetchFabMetadata(fabUrl.trim());
-      let next = applyFabMetadata(form, metadata);
-      setForm(next);
-      const settings = await api.getTranslationSettings();
-      let translationNote = "";
-      if (settings.fabAutoTranslate && settings.configured) {
-        try {
-          const preview = await api.translateAssetFields({ sourceLanguage: "en", targetLanguage: "zh-CN", fields: next.localizations.en || blankLocalized() });
-          const existing = next.localizations["zh-CN"] || blankLocalized();
-          const merged = { name: existing.name || preview.fields.name, description: existing.description || preview.fields.description, license: existing.license || preview.fields.license, tags: existing.tags.length ? existing.tags : preview.fields.tags };
-          next = { ...next, localizations: { ...next.localizations, "zh-CN": merged } };
-          setForm(next);
-          translationNote = preview.warnings.length ? ` 翻译提示：${preview.warnings.join("；")}` : " 已自动补齐中文版本。";
-        } catch (error) { translationNote = ` 在线翻译未完成：${String(error)}`; }
-      } else if (settings.fabAutoTranslate && !settings.configured) translationNote = " 尚未配置在线翻译，已跳过中文翻译。";
-      setForm(next);
+      setForm(previous => applyFabMetadata(previous, metadata));
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
-      const categoryNote = !form.categoryId && metadata.suggestedCategoryPath.length ? ` 保存时将自动归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
-      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${translationNote}` });
+      const categoryNote = !asset && metadata.suggestedCategoryPath.length ? ` 未手选分类时，保存将归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
+      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""} 保存时自动补齐缺失的中英版本。` });
     } catch (error) {
       setFabStatus({ kind: "error", message: String(error) });
-    } finally { setFetchingFab(false); }
+    } finally { fetchingFabRef.current = false; setFetchingFab(false); }
   };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (savingRef.current || fetchingFabRef.current || translating) return;
     const parsedSize = parseSize(sizeText);
     const display = form.localizations[form.contentLanguage] || form.localizations[form.contentLanguage === "en" ? "zh-CN" : "en"] || blankLocalized();
     const next = { ...form, name: display.name, description: display.description, tags: display.tags, license: display.license, sizeBytes: Number.isNaN(parsedSize) ? -1 : parsedSize };
     const validation = validateAsset(next);
     setErrors(validation.errors); setWarnings(validation.warnings);
     if (Object.keys(validation.errors).length) return;
-    setSaving(true);
+    savingRef.current = true; setSaving(true);
     try {
       const duplicate = next.shareUrl.trim() ? await api.checkShareUrl(next.shareUrl) : null;
       if (duplicate && duplicate.id !== asset?.id) {
@@ -221,16 +211,17 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         catch(error) { window.alert(`素材已保存，但部分预览附件导入失败：${String(error)}`); }
       }
       onClose();
-    } finally { setSaving(false); }
+    } finally { savingRef.current = false; setSaving(false); }
   };
 
   return <div className="modal-backdrop"><section className="editor-modal" role="dialog" aria-modal="true">
-    <header className="modal-header"><div><span className="eyebrow">{asset ? "编辑条目" : "录入素材"}</span><h2>{asset?.name || "添加新素材"}</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
+    <header className="modal-header"><div><span className="eyebrow">{asset ? "编辑条目" : "录入素材"}</span><h2>{asset?.name || "添加新素材"}</h2></div><button className="icon-button" disabled={saving} onClick={onClose}><X size={19} /></button></header>
     <form ref={formRef} onSubmit={submit} className="editor-form">
+      <fieldset disabled={saving || translating} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, flexShrink: 0 }}>
       <div className="form-section"><h3>基本信息</h3>
         <div className="fab-import-panel">
           <div className="fab-import-copy"><Sparkles size={17} /><div><strong>从 Fab 自动填充</strong><span>读取名称、描述、作者、标签、许可、格式和 UE 版本</span></div></div>
-          <div className="fab-import-controls"><input value={fabUrl} onChange={event => { setFabUrl(event.target.value); setFabDuplicate(null); setFabStatus(null); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
+          <div className="fab-import-controls"><input disabled={fetchingFab} value={fabUrl} onChange={event => { setFabUrl(event.target.value); setFabDuplicate(null); setFabStatus(null); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
           {fabStatus && <div className={`fab-import-status ${fabStatus.kind}`}>{fabStatus.message}{fabDuplicate?.location === "library" && onOpenExisting && <button type="button" className="secondary-button" onClick={() => onOpenExisting(fabDuplicate.assetId)}>打开现有素材</button>}</div>}
         </div>
         <div className="language-editor-bar"><div className="language-tabs"><button type="button" className={editLanguage === "zh-CN" ? "active" : ""} onClick={() => setEditLanguage("zh-CN")}>中文</button><button type="button" className={editLanguage === "en" ? "active" : ""} onClick={() => setEditLanguage("en")}>English</button></div><button type="button" className="secondary-button" disabled={translating} onClick={() => void requestTranslation(editLanguage)}><Languages size={15} />{translating ? "正在翻译…" : editLanguage === "en" ? "翻译到中文" : "Translate to English"}</button></div>
@@ -247,7 +238,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label><span>格式</span><input value={form.formats.join("; ")} onChange={e => update("formats", splitValues(e.target.value))} placeholder="uasset; FBX" /></label>
         <label><span>素材大小</span><input value={sizeText} onChange={e => setSizeText(e.target.value)} placeholder="例如 2.4 GB" />{errors.sizeBytes && <small className="field-error">{errors.sizeBytes}</small>}</label>
         <label><span>{editLanguage === "zh-CN" ? "中文许可" : "English license"}</span><input value={localized.license} onChange={e => updateLocalized("license", e.target.value)} placeholder="个人/商用、CC0…" /></label>
-        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => update("sourceUrl", e.target.value)} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
+        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>百度网盘</h3><button type="button" className="secondary-button" onClick={parseClipboard}><ClipboardPaste size={15} />从剪贴板解析</button></div><div className="form-grid">
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
@@ -268,7 +259,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         {!!pendingMediaPaths.length&&<div className="pending-media-list">{pendingMediaPaths.map(path=><div key={path}><FileVideo size={14}/><span>{path.split(/[\\/]/).at(-1)}</span><button type="button" onClick={()=>setPendingMediaPaths(previous=>previous.filter(value=>value!==path))}><X size={13}/></button></div>)}</div>}
         <div className="media-editor-list">{media.map((item,index)=><div className={`media-editor-item ${item.isCover ? "cover" : ""}`} key={item.id}><MediaPreview media={item} className="editor-thumb" /><div className="media-editor-info"><strong>{item.originalName}</strong><span>{item.kind === "video" ? "视频" : item.kind === "audio" ? "音频" : "3D 模型"} · {item.processingStatus === "ready" ? "可预览" : item.processingStatus === "error" ? "处理失败" : "处理中"}</span>{item.processingMessage && <small>{item.processingMessage}</small>}</div><button type="button" className="cover-toggle" onClick={()=>void setMediaCover(item.id)}><Star size={13} fill={item.isCover?"currentColor":"none"}/>{item.isCover?"封面":"设为封面"}</button><div className="image-order"><button type="button" onClick={()=>void moveMedia(index,-1)} disabled={index===0}><ArrowUp size={13}/></button><button type="button" onClick={()=>void moveMedia(index,1)} disabled={index===media.length-1}><ArrowDown size={13}/></button>{item.processingStatus==="error"&&<button type="button" title="重试处理" onClick={()=>void retryMedia(item.id)}><RefreshCw size={13}/></button>}<button type="button" onClick={()=>void deleteMedia(item.id)}><Trash2 size={13}/></button></div></div>)}</div>
       </div>
-      <footer className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}><Save size={17} />{saving ? "正在保存…" : "保存素材"}</button></footer>
+      </fieldset>
+      <footer className="modal-footer"><button type="button" className="secondary-button" disabled={saving} onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving || fetchingFab || translating}><Save size={17} />{saving ? "正在保存并补齐双语…" : "保存素材"}</button></footer>
     </form>
   </section></div>;
 }

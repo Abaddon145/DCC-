@@ -11,6 +11,7 @@ export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAd
 export type ContentLanguage = "zh-CN" | "en";
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | { kind: "ueAssets"; request: unknown }
   | { kind: "browserCapture"; request: { id: string } }
   | { kind: "assetMediaImport"; request: { assetId: string; paths: string[] } }
   | { kind: "assetMediaRetry"; request: { id: string } }
@@ -197,6 +198,7 @@ export interface AssetMedia {
 }
 
 export interface AssetDetail extends AssetCard {
+  singleImportWarnings?: string[];
   description: string;
   categoryId: string | null;
   sizeBytes: number | null;
@@ -462,3 +464,14 @@ export interface ReferenceBoardChanges {
 export interface ReferencePlacement { x: number; y: number }
 export interface ReferenceImageAddReport { items: ReferenceBoardItem[]; skipped: number; warnings: string[] }
 export interface ReferenceExportOptions { scale: number }
+
+export interface FabUeOptions {
+  assetId: string; listingId: string; canonicalUrl: string; epicUrl: string;
+  supportedVersions: string[]; versionStatus: "known" | "partial" | "unknown"; warnings: string[];
+}
+export interface UeProjectTarget {
+  projectId: string | null; pathId: string | null; projectName: string | null;
+  name: string; path: string; engineAssociation: string | null; engineVersion: string | null;
+  available: boolean; warnings: string[];
+}
+export interface EpicOpenResult { listingId: string; url: string; opened: boolean; message: string }

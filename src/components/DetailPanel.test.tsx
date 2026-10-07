@@ -5,6 +5,7 @@ import type { AssetDetail } from "../types";
 
 vi.mock("./ImagePreview", () => ({ ImagePreview: ({ alt }: { alt: string }) => <img alt={alt} /> }));
 vi.mock("./ImageLightbox", () => ({ ImageLightbox: () => null }));
+vi.mock("./EpicFabDialog", () => ({ EpicFabDialog: ({ onClose }: { onClose: () => void }) => <div role="dialog" aria-label="通过 Epic 添加到 UE 工程"><button onClick={onClose}>关闭 Epic 添加窗口</button></div> }));
 
 const asset: AssetDetail = {
   id: "1", name: "中文素材", categoryName: null, tags: ["环境"], dccTools: ["Unreal Engine"], versions: ["5.5"], formats: ["uasset"], favorite: false,
@@ -20,6 +21,16 @@ const asset: AssetDetail = {
 const handlers = { onClose: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn(), onFavorite: vi.fn(), onOpen: vi.fn(), onSourceOpen: vi.fn(), onCopy: vi.fn(), onCheckLink: vi.fn(), checkingLink: false };
 
 describe("DetailPanel bilingual content", () => {
+  it("offers Epic for Fab assets without requiring a local file and keeps detail open on modal Escape", () => {
+    const onClose = vi.fn();
+    render(<DetailPanel asset={{ ...asset, fabListingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", sourceUrl: "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a" }} contentLanguage="zh-CN" loading={false} {...handlers} onClose={onClose}/>);
+    fireEvent.click(screen.getByRole("button", { name: "通过 Epic 添加到 UE 工程" }));
+    expect(screen.getByRole("dialog", { name: "通过 Epic 添加到 UE 工程" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭 Epic 添加窗口" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("temporarily switches detail content without changing the global preference", () => {
     render(<DetailPanel asset={asset} contentLanguage="zh-CN" loading={false} {...handlers} />);
     expect(screen.getByRole("heading", { name: "中文素材" })).toBeInTheDocument();

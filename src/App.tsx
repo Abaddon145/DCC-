@@ -72,6 +72,13 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [initialShare, setInitialShare] = useState<ParsedShareText | null>(null);
   const [libraryEpoch,setLibraryEpoch]=useState(0);
+  const librarySaveEpoch = useRef(0);
+  const [activeLibraryId, setActiveLibraryId] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api.getWorkspaceContext("library").then(value => { if (active) setActiveLibraryId(value.libraryId); }).catch(() => { if (active) setActiveLibraryId(null); });
+    return () => { active = false; };
+  }, [libraryEpoch]);
   const [knowledgeProjectId,setKnowledgeProjectId]=useState<string|null>(null);
   const [knowledgeInitialId,setKnowledgeInitialId]=useState<string|null>(null);
   const [navigation,setNavigation]=useWorkspaceState("navigation",{view:"library" as ViewMode},libraryEpoch);
@@ -448,7 +455,17 @@ export default function App() {
     pointerDragCleanup.current = cleanup;
   };
   const saveAsset = async (input: AssetInput) => {
-    try { const saved = await api.saveAsset(input); setSelectedId(saved.id); setDetail(saved); notify(input.id ? "素材已更新" : "素材已添加"); await refreshAll(); if (view === "health") refreshHealth(); return saved; }
+    const epoch = libraryEpoch;
+    try {
+      if (epoch !== librarySaveEpoch.current) throw new Error("素材库已切换，请重新打开录入窗口");
+      if (!activeLibraryId) throw new Error("正在连接素材库，请稍后重新保存");
+      const saved = await api.saveAsset(input, activeLibraryId);
+      if (epoch !== librarySaveEpoch.current) return saved;
+      setSelectedId(saved.id); setDetail(saved);
+      const warnings = saved.singleImportWarnings || [];
+      notify(warnings.length ? `素材已保存，待处理：${warnings.join("；")}` : input.id ? "素材已更新" : "素材已添加", warnings.length > 0);
+      await refreshAll(); if (view === "health") refreshHealth(); return saved;
+    }
     catch (error) { notify(`保存失败：${String(error)}`, true); throw error; }
   };
   const toggleFavorite = async (item: { id: string; favorite: boolean }) => {
@@ -560,6 +577,8 @@ export default function App() {
 
   const libraryChanged = async () => {
     setKnowledgeProjectId(null);setKnowledgeInitialId(null);
+    librarySaveEpoch.current += 1;
+    setActiveLibraryId(null); setEditor(null); setInitialShare(null); setShowQuickAdd(false);
     setLibraryEpoch(value=>value+1);setHistory(["library"]);setHistoryIndex(0);window.dispatchEvent(new Event("library-location-changed"));detailGate.invalidate();pointerDragCleanup.current?.(); setSelectedId(null); setDetail(null); setSelectedIds(new Set()); setSelectionMode(false); setTranslationReport(null); setActiveDrag(null); setDragPoint(null); setToasts(previous => previous.filter(item => item.kind !== "move")); setView("library"); setQueryInput("");
     const nextPersonalization = await api.getPersonalization(); setPersonalization(nextPersonalization); applyGlobalPreferences(nextPersonalization.global);
     const context = nextPersonalization.library.lastContext;
@@ -734,7 +753,7 @@ export default function App() {
     {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onMediaImported={async id=>{setDetail(await api.getAsset(id,contentLanguage));await refreshAll();}} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
     {showImport && <ImportDialog onClose={() => setShowImport(false)} onImported={() => { void refreshAll(); if (view === "health") void refreshHealth(); }} notify={notify} />}
     {(translatingBatch || translationReport) && <TranslationBatchReportDialog report={translationReport} progress={translationProgress} busy={translatingBatch} onClose={() => setTranslationReport(null)} onRetry={ids => void translateSelected(ids)} />}
-    {showQuickAdd && <QuickAddDialog onClose={() => setShowQuickAdd(false)} notify={notify} onParsed={parsed => { setInitialShare(parsed); setShowQuickAdd(false); setEditor("new"); }} onOpenExisting={id => { setShowQuickAdd(false); selectAsset(id); }} />}
+    {showQuickAdd && <QuickAddDialog onClose={() => setShowQuickAdd(false)} notify={notify} onParsed={parsed => { if (libraryEpoch !== librarySaveEpoch.current) return; setInitialShare(parsed); setShowQuickAdd(false); setEditor("new"); }} onOpenExisting={id => { if (libraryEpoch !== librarySaveEpoch.current) return; setShowQuickAdd(false); selectAsset(id); }} />}
     {categoryEditor && <HierarchyNameDialog kind="分类" editing={Boolean(categoryEditor.id)} name={categoryEditor.name} busy={savingCategory} onNameChange={name => setCategoryEditor(previous => previous && { ...previous, name })} onClose={() => setCategoryEditor(null)} onSubmit={() => void saveCategory()} />}
     {showSettings && <StorageSettings initialTab="appearance" onClose={() => setShowSettings(false)} onLibraryChanged={libraryChanged} notify={notify} libraryLocked={Boolean(detachedBoardId)} onPersonalizationChanged={personalizationChanged} />}
     {referencePicker && <ReferenceBoardPicker imageIds={referencePicker.imageIds} title={referencePicker.title} lockedBoardId={detachedBoardId} onClose={() => setReferencePicker(null)} notify={notify} />}

@@ -34,4 +34,19 @@ describe("Fab metadata", () => {
     expect(isFabUrl(metadata.canonicalUrl)).toBe(true);
     expect(isFabUrl("https://example.com/listings/id")).toBe(false);
   });
+  it("keeps the source URL and listing ID aligned when explicitly reading another Fab product", () => {
+    const result = applyFabMetadata({ ...asset, sourceUrl: "https://www.fab.com/listings/11111111-1111-1111-1111-111111111111", fabListingId: "11111111-1111-1111-1111-111111111111" }, metadata);
+    expect(result.sourceUrl).toBe(metadata.canonicalUrl);
+    expect(result.fabListingId).toBe(metadata.listingId);
+  });
+  it("places mixed Fab source fields into the matching language and keeps manual classifications", () => {
+    const result = applyFabMetadata({ ...asset, categoryId: "manual" }, { ...metadata, name: "中文庭院", description: "Quiet courtyard", tags: ["庭院", "Garden"] });
+    expect(result.localizations["zh-CN"]?.name).toBe("中文庭院");
+    expect(result.localizations["zh-CN"]?.description).toBe("本地说明");
+    expect(result.localizations.en?.name).toBe("");
+    expect(result.localizations.en?.description).toBe("Quiet courtyard");
+    expect(result.categoryId).toBe("manual");
+    expect(result.autoCategoryPath).toEqual([]);
+    expect(applyFabMetadata({ ...asset, id: "existing" }, metadata).autoCategoryPath).toEqual([]);
+  });
 });

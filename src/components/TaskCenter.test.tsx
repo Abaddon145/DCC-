@@ -26,4 +26,13 @@ describe("TaskCenter",()=>{
    vi.mocked(api.listLibraryTasks).mockResolvedValue([task({status:"interrupted",payload:{kind:"translation",request:{ids:["a"]}}})]);vi.spyOn(window,"confirm").mockReturnValue(false);
    render(<TaskCenter notify={vi.fn()}/>);fireEvent.click(screen.getByRole("button",{name:"任务中心"}));fireEvent.click(await screen.findByRole("button",{name:"继续 / 重试失败项"}));expect(api.retryLibraryTask).not.toHaveBeenCalled();
  });
+ it.each(["completed","interrupted"] as const)("keeps %s UE history inspectable without replay",async status=>{
+   const history=task({label:"UE 原生资产",status,payload:{kind:"ueAssets",request:{operation:"index",futureField:{nested:[1,true,null]}}}});
+   vi.mocked(api.listLibraryTasks).mockResolvedValue([history]);vi.mocked(api.getLibraryTask).mockResolvedValue(history);
+   render(<TaskCenter notify={vi.fn()}/>);fireEvent.click(screen.getByRole("button",{name:"任务中心"}));
+   expect(await screen.findByText("旧版 UE 任务 · 只读历史")).toBeInTheDocument();
+   const readOnly=screen.getByRole("button",{name:"只读历史"});expect(readOnly).toBeDisabled();fireEvent.click(readOnly);
+   expect(api.retryLibraryTask).not.toHaveBeenCalled();expect(api.cancelLibraryTask).not.toHaveBeenCalled();
+   fireEvent.click(screen.getByRole("button",{name:/UE 原生资产/}));expect(await screen.findByText("文件-0")).toBeInTheDocument();
+ });
 });

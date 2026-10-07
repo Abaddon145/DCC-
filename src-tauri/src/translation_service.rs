@@ -132,6 +132,8 @@ pub struct TranslationService {
     blocked: Mutex<HashMap<String, Blocked>>,
     #[cfg(test)]
     mock: Option<Box<dyn Fn(&str, &str) -> Result<Reply, Failure> + Send + Sync>>,
+    #[cfg(test)]
+    mock_configured: Option<bool>,
 }
 impl TranslationService {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -145,9 +147,15 @@ impl TranslationService {
             blocked: Mutex::new(HashMap::new()),
             #[cfg(test)]
             mock: None,
+            #[cfg(test)]
+            mock_configured: None,
         })
     }
     pub fn configured(&self, provider: &str) -> bool {
+        #[cfg(test)]
+        if let Some(configured) = self.mock_configured {
+            return configured;
+        }
         #[cfg(test)]
         if self.mock.is_some() {
             return true;
@@ -157,6 +165,27 @@ impl TranslationService {
             "deepseek" => deepseek_key().is_ok(),
             _ => false,
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(path: &Path, configured: bool) -> Self {
+        let mut service = Self::open(path).unwrap();
+        service.mock_configured = Some(configured);
+        service.mock = Some(Box::new(|_, text| {
+            Ok(Reply {
+                values: text
+                    .split('\n')
+                    .map(|value| {
+                        if value == "Quiet courtyard" {
+                            "安静庭院".into()
+                        } else {
+                            format!("译文：{value}")
+                        }
+                    })
+                    .collect(),
+                used: 1,
+            })
+        }));
+        service
     }
     pub fn clear_blocks(&self) {
         if let Ok(mut b) = self.blocked.lock() {

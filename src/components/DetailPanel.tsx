@@ -7,6 +7,7 @@ import { ImagePreview } from "./ImagePreview";
 import { MediaPreview } from "./MediaPreview";
 import { LibraryMediaPreview, MediaViewer, type PreviewItem } from "./MediaViewer";
 import { useImageCompare } from "./ImageCompare";
+import { EpicFabDialog } from "./EpicFabDialog";
 
 interface Props {
   onAi?: (id: string) => void;
@@ -32,6 +33,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
   const compare=useImageCompare();
   const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
+  const [epicOpen, setEpicOpen] = useState(false);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
   const [referenceMenu, setReferenceMenu] = useState<{ left: number; top: number } | null>(null);
   const referenceButton = useRef<HTMLButtonElement>(null);
@@ -42,11 +44,12 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
     const cover = previews.findIndex(item => item.type === "image" ? item.image.isCover : item.type === "media" ? item.media.isCover : false);
     setSelectedPreview(cover >= 0 ? cover : 0);
     setLightbox(false);
+    setEpicOpen(false);
     setReferenceMenu(null);
     setDetailLanguage(contentLanguage);
   }, [asset?.id]);
-  useEffect(() => { const handler=(event:KeyboardEvent)=>{ if(event.code!=="Space" || !asset || !previews.length || (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")) return; event.preventDefault(); setLightbox(true); }; window.addEventListener("keydown",handler); return()=>window.removeEventListener("keydown",handler); },[asset,previews.length]);
-  useEffect(() => { if (!asset) return; const handler = (event: KeyboardEvent) => { if (event.key === "Escape" && !lightbox && !referenceMenu) onClose(); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [asset, lightbox, referenceMenu, onClose]);
+  useEffect(() => { const handler=(event:KeyboardEvent)=>{ if(event.code!=="Space" || epicOpen || !asset || !previews.length || (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")) return; event.preventDefault(); setLightbox(true); }; window.addEventListener("keydown",handler); return()=>window.removeEventListener("keydown",handler); },[asset,previews.length,epicOpen]);
+  useEffect(() => { if (!asset) return; const handler = (event: KeyboardEvent) => { if (event.key === "Escape" && !lightbox && !referenceMenu && !epicOpen) onClose(); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [asset, lightbox, referenceMenu, epicOpen, onClose]);
   if (!asset && !loading) return null;
   const currentPreview = previews[selectedPreview] || previews[0];
   const preferred = asset?.localizations[detailLanguage];
@@ -79,6 +82,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         {asset.sourceUrl && <button className="source-link" onClick={onSourceOpen}>查看素材来源 <ExternalLink size={13} /></button>}
       </div>
       <div className="detail-actions">
+        {(asset.fabListingId || /^https?:\/\/(?:www\.)?fab\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?listings\/[0-9a-f-]{36}(?:[/?#]|$)/i.test(asset.sourceUrl)) && <button className="secondary-button epic-detail-action" onClick={() => setEpicOpen(true)}><ExternalLink size={17}/>通过 Epic 添加到 UE 工程</button>}
         {compare&&currentPreview?.type==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"asset",id:currentPreview.image.id,title:currentPreview.image.originalName})}>加入 A/B 对比</button>}
         {compare&&currentPreview?.type==="library"&&currentPreview.media.kind==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"media",id:currentPreview.media.primaryFileId,title:currentPreview.media.name})}>加入 A/B 对比</button>}
         <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
@@ -91,6 +95,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>
       </div>
       {lightbox && <MediaViewer items={previews} initialIndex={selectedPreview} title={shownName} onClose={() => setLightbox(false)} />}
+      {epicOpen && createPortal(<EpicFabDialog assetId={asset.id} title={shownName} onClose={() => setEpicOpen(false)}/>, document.body)}
       {referenceMenu && onAddReference && createPortal(<><button className="popover-dismiss-layer" aria-label="关闭菜单" onClick={() => setReferenceMenu(null)} /><div className="reference-portal-menu" style={referenceMenu}>{currentPreview?.type === "image" && <button onClick={() => { onAddReference([currentPreview.image.id]); setReferenceMenu(null); }}>加入当前图片</button>}<button onClick={() => { onAddReference(asset.images.map(image => image.id)); setReferenceMenu(null); }}>加入全部预览图</button></div></>, document.body)}
     </>}
   </aside>;
