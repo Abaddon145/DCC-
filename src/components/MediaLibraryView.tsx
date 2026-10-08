@@ -169,7 +169,8 @@ function MediaResults({items,total,loading,blocked,view,selected,selectionMode,o
   const lastSelected=useRef<number|null>(null);const restored=useRef(false);
   useEffect(()=>{const node=scroll.current;if(loading||!node||restored.current)return;node.scrollTop=restoreScroll;restored.current=true},[loading,restoreScroll,items.length]);
   const [width,setWidth]=useState(900);
-  useEffect(()=>{const node=scroll.current;if(!node)return;const observer=new ResizeObserver(entries=>setWidth(entries[0].contentRect.width));observer.observe(node);return()=>observer.disconnect()},[]);
+  const hasItems=items.length>0;
+  useEffect(()=>{const node=scroll.current;if(!node)return;const observer=new ResizeObserver(entries=>setWidth(entries[0].contentRect.width));observer.observe(node);return()=>observer.disconnect()},[hasItems]);
   const columns=view==="list"?1:Math.max(1,Math.floor(width/225));
   const rows=Math.ceil(items.length/columns);
   const virtualizer=useVirtualizer({count:rows,getScrollElement:()=>scroll.current,estimateSize:()=>view==="list"?86:236,overscan:view==="list"?8:3});

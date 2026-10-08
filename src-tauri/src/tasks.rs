@@ -12,6 +12,9 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+const UE_TASK_HISTORY_ONLY: &str =
+    "此 UE 任务来自较新版本，当前版本只保留历史，不能提交、继续或重新执行";
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
@@ -31,6 +34,8 @@ pub enum TaskRequest {
         #[serde(rename = "entryId")]
         entry_id: String,
     },
+    // Keep v0.21 requests intact when opening its journal in v0.20.
+    UeAssets(Value),
     FabImport {
         path: String,
         mapping: HashMap<String, String>,
@@ -57,6 +62,7 @@ impl TaskRequest {
             Self::MediaImport(_) => "媒体导入",
             Self::BrowserCapture { .. } => "浏览器采集",
             Self::ModelThumbnail { .. } => "模型缩略图",
+            Self::UeAssets(_) => "UE 原生资产（只读历史）",
             Self::FabImport { .. } => "Fab / 表格导入",
             Self::Translation { .. } => "双语补译",
             Self::Links => "网盘链接检查",
@@ -73,6 +79,7 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             Self::AssetMediaImport { paths, .. } if paths.len() > 100 => {
                 Err("单次预览附件导入最多 100 项".into())
             }
@@ -292,6 +299,59 @@ impl TaskRegistry {
             .find(|t| t.id == id)
             .cloned()
             .ok_or("任务不存在".into())
+    }
+    // Single-entry saves already attempted translation. Record the terminal result
+    // without queuing it again; only an explicit retry may make another request.
+    pub(crate) fn record_translation_result(
+        &self,
+        library_id: String,
+        report: BatchTranslationReport,
+    ) -> Result<(), String> {
+        let timestamp = Utc::now().to_rfc3339();
+        let pending = report.pending > 0;
+        let task = LibraryTask {
+            id: Uuid::new_v4().to_string(),
+            library_id,
+            label: "单条录入 · 双语补齐".into(),
+            status: if pending { "failed" } else { "completed" }.into(),
+            phase: if pending {
+                "待补译"
+            } else {
+                "双语已完整"
+            }
+            .into(),
+            current: report.rows.len(),
+            total: report.rows.len(),
+            current_name: report
+                .rows
+                .first()
+                .map(|row| row.name.clone())
+                .unwrap_or_default(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            cancellable: false,
+            message: if pending {
+                "素材已保存，双语未完成；查看结果后可手动重试。"
+            } else {
+                "素材与双语信息已保存。"
+            }
+            .into(),
+            payload: TaskRequest::Translation {
+                ids: report.rows.iter().map(|row| row.asset_id.clone()).collect(),
+            },
+            result: Some(serde_json::to_value(report).map_err(|e| e.to_string())?),
+            stop_requested: false,
+        };
+        let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let Some(warning) = &store.persistence_warning {
+            return Err(warning.clone());
+        }
+        store.entries.push(task);
+        if let Err(error) = self.persist(&store) {
+            store.entries.pop();
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn submit(
         &self,
@@ -608,8 +668,9 @@ pub fn start_library_task(
     app: AppHandle,
     state: tauri::State<AppState>,
     payload: TaskRequest,
+    expected_library_id: Option<String>,
 ) -> Result<LibraryTask, String> {
-    start_library_task_for_library(app, state, payload, None)
+    start_library_task_for_library(app, state, payload, expected_library_id.as_deref())
 }
 pub fn start_library_task_for_library(
     app: AppHandle,
@@ -644,6 +705,9 @@ pub fn retry_library_task(
     id: String,
 ) -> Result<LibraryTask, String> {
     let previous = state.tasks.get(&id)?;
+    if matches!(previous.payload, TaskRequest::UeAssets(_)) {
+        return Err(UE_TASK_HISTORY_ONLY.into());
+    }
     if previous.library_id != state.active_library_id()? {
         return Err("请先打开任务所属的素材库".into());
     }
@@ -715,6 +779,7 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
         TaskRequest::BrowserCapture { id } => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();
             let (base, path) = state.with_active_mut(|active| {
@@ -1241,6 +1306,67 @@ mod tests {
         assert!(restored.list("other").unwrap().is_empty());
     }
     #[test]
+    fn v21_ue_history_preserves_payload_and_allows_translation_without_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (translation, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::Translation {
+                    ids: vec!["a".into()],
+                },
+            )
+            .unwrap();
+        let mut translation = serde_json::to_value(translation).unwrap();
+        translation["status"] = serde_json::json!("running");
+        translation["result"] = serde_json::json!({"rows":[{"assetId":"a","status":"complete"}]});
+        let mut ue = translation.clone();
+        ue["id"] = serde_json::json!("ue-history");
+        ue["label"] = serde_json::json!("UE 原生资产");
+        ue["payload"] = serde_json::json!({"kind":"ueAssets","request":{
+            "operation":"index","sourceId":"source","engineRoot":"fixture-engine",
+            "assetIds":["asset"],"planId":null,"confirmed":false,
+            "futureField":{"nested":[1,true,null]}
+        }});
+        let expected_payload = ue["payload"].clone();
+        fs::write(
+            &path,
+            serde_json::to_vec(&vec![translation.clone(), ue]).unwrap(),
+        )
+        .unwrap();
+
+        let restored = TaskRegistry::load(path.clone());
+        let (new_task, launch) = restored
+            .submit(
+                "library".into(),
+                TaskRequest::Translation {
+                    ids: vec!["b".into()],
+                },
+            )
+            .unwrap_or_else(|error| panic!("混合历史应允许补译提交：{error}"));
+        assert!(launch);
+        assert!(restored.warning().is_none());
+        assert_eq!(restored.list("library").unwrap().len(), 3);
+        let old_translation = restored.get(translation["id"].as_str().unwrap()).unwrap();
+        assert_eq!(old_translation.status, "interrupted");
+        assert_eq!(old_translation.result.unwrap(), translation["result"]);
+        let old_ue = restored.get("ue-history").unwrap();
+        assert_eq!(old_ue.status, "interrupted");
+        assert!(old_ue.payload.validate().is_err());
+        assert!(restored.submit("library".into(), old_ue.payload).is_err());
+        assert_eq!(restored.claim().unwrap().id, new_task.id);
+        assert!(restored.claim().is_none());
+        let saved: Vec<Value> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .find(|task| task["id"] == "ue-history")
+                .unwrap()["payload"],
+            expected_payload
+        );
+    }
+    #[test]
     fn corrupt_journal_is_preserved_and_blocks_new_tasks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.json");
@@ -1251,6 +1377,30 @@ mod tests {
             .submit("library".into(), TaskRequest::Links)
             .is_err());
         assert_eq!(fs::read(path).unwrap(), b"broken journal");
+    }
+    #[test]
+    fn unknown_kinds_and_invalid_known_payloads_still_preserve_and_block_journals() {
+        for payload in [
+            serde_json::json!({"kind":"futureTask","request":{"value":1}}),
+            serde_json::json!({"kind":"translation","request":{"ids":42}}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tasks.json");
+            let registry = TaskRegistry::load(path.clone());
+            let (task, _) = registry
+                .submit("library".into(), TaskRequest::Links)
+                .unwrap();
+            let mut task = serde_json::to_value(task).unwrap();
+            task["payload"] = payload;
+            let bytes = serde_json::to_vec(&vec![task]).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let restored = TaskRegistry::load(path.clone());
+            assert!(restored.warning().is_some());
+            assert!(restored
+                .submit("library".into(), TaskRequest::Links)
+                .is_err());
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
     }
     #[test]
     fn failed_checkpoint_stops_cancellable_work() {

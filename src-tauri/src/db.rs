@@ -1144,6 +1144,7 @@ pub fn get_asset(
         media,
         media_library,
         localizations,
+        single_import_warnings: Vec::new(),
     })
 }
 
@@ -1246,13 +1247,16 @@ pub fn upsert_asset(
         .transpose()?;
     let existing_listing_id = connection
         .query_row(
-            "SELECT fab_listing_id FROM assets WHERE id=?1",
+            "SELECT fab_listing_id,source_url FROM assets WHERE id=?1",
             [&id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .filter(|value| !value.is_empty());
+        .filter(|(listing_id, source_url)| {
+            !listing_id.is_empty() && source_url.trim() == input.source_url.trim()
+        })
+        .map(|(listing_id, _)| listing_id);
     let fab_listing_id = source_listing_id
         .or(supplied_listing_id)
         .or(existing_listing_id)
@@ -1436,7 +1440,7 @@ pub fn upsert_asset(
     }
 }
 
-fn validate_input(input: &AssetInput) -> Result<(), String> {
+pub(crate) fn validate_input(input: &AssetInput) -> Result<(), String> {
     if input
         .localizations
         .values()
@@ -2936,6 +2940,40 @@ mod tests {
         fs::create_dir_all(dir.path().join("images/thumbnails")).unwrap();
         let connection = open_database(&dir.path().join("test.db")).unwrap();
         (dir, connection)
+    }
+
+    #[test]
+    fn retains_legacy_fab_id_only_while_source_is_unchanged() {
+        let (dir, mut connection) = setup();
+        let mut input: AssetInput = serde_json::from_value(serde_json::json!({
+            "name":"Legacy material", "description":"", "categoryId":null, "tags":[],
+            "dccTools":[], "versions":[], "formats":[], "sizeBytes":null, "author":"",
+            "sourceUrl":"https://example.com/legacy-material", "fabListingId":"06003f78-9a59-4fb8-abbc-14dc276f0b4a",
+            "license":"", "shareUrl":"", "extractionCode":"", "favorite":false,
+            "images":[], "localizations":{}, "contentLanguage":"en"
+        })).unwrap();
+        let saved = upsert_asset(&mut connection, dir.path(), input.clone()).unwrap();
+        input.id = Some(saved.card.id.clone());
+        input.fab_listing_id = None;
+        assert_eq!(
+            upsert_asset(&mut connection, dir.path(), input.clone())
+                .unwrap()
+                .fab_listing_id,
+            saved.fab_listing_id
+        );
+        input.source_url = "https://example.com/replaced-material".into();
+        assert_eq!(
+            upsert_asset(&mut connection, dir.path(), input)
+                .unwrap()
+                .fab_listing_id,
+            ""
+        );
+        assert_eq!(
+            get_asset(&connection, &saved.card.id, false, "en")
+                .unwrap()
+                .fab_listing_id,
+            ""
+        );
     }
 
     #[test]

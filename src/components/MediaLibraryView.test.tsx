@@ -35,6 +35,22 @@ describe("MediaLibraryView folder creation", () => {
     vi.mocked(api.pendingModelThumbnails).mockResolvedValue([]);
   });
 
+  it("measures the media grid after asynchronous loading and follows window resizing", async () => {
+    let resize!: (entries: { contentRect: { width: number } }[]) => void;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: typeof resize) { resize = callback; }
+      observe() { resize([{ contentRect: { width: 450 } }]); }
+      disconnect() {}
+    });
+    const image = { id: "image-1", kind: "image" as const, folderId: null, name: "灯光参考", description: "", author: "", sourceUrl: "", license: "", favorite: false, processingStatus: "ready", processingMessage: "", format: "png", fileSize: 1024, tags: [], thumbnailFileId: null, primaryFileId: "main-1", createdAt: "2026-01-01", updatedAt: "2026-01-01" };
+    vi.mocked(api.searchMediaEntries).mockResolvedValue({ items: [image], total: 1, offset: 0, limit: 160 });
+    const { container } = render(<MediaLibraryView kind="image" onNotify={vi.fn()} paneWidth={220} paneCollapsed={false} onPaneWidthChange={vi.fn()} onPaneCollapsedChange={vi.fn()} />);
+    await screen.findByRole("button", { name: /灯光参考/ });
+    await waitFor(() => expect(container.querySelector<HTMLElement>(".media-virtual-row")!.style.gridTemplateColumns).toBe("repeat(2,minmax(0,1fr))"));
+    act(() => resize([{ contentRect: { width: 225 } }]));
+    expect(container.querySelector<HTMLElement>(".media-virtual-row")!.style.gridTemplateColumns).toBe("repeat(1,minmax(0,1fr))");
+  });
+
   it("opens a folder name dialog without collapsing the pane, then saves", async () => {
     const onPaneCollapsedChange = vi.fn();
     render(<MediaLibraryView kind="image" onNotify={vi.fn()} paneWidth={220} paneCollapsed={false} onPaneWidthChange={vi.fn()} onPaneCollapsedChange={onPaneCollapsedChange} />);

@@ -1055,29 +1055,30 @@ fn path_text(path: &Path) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn test_state(path: &Path) -> AppState {
+    ensure_library(path, "测试库", false).unwrap();
+    AppState {
+        knowledge_editing: AtomicBool::new(false),
+        tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
+        translation_service: crate::translation_service::TranslationService::for_test(
+            &path.join("translation-cache.sqlite"),
+            false,
+        ),
+        settings_path: path.join("settings.json"),
+        settings: Mutex::new(AppSettings::default()),
+        startup_warning: Mutex::new(None),
+        active: Mutex::new(open_library(path).unwrap()),
+        link_check_job: Mutex::new(None),
+        pending_move_undo: Mutex::new(None),
+        reference_window_board: Mutex::new(None),
+        glossary: Mutex::new(GlossaryStore::load(path.join("translation-glossary.json"))),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    fn test_state(path: &Path) -> AppState {
-        ensure_library(path, "测试库", false).unwrap();
-        AppState {
-            knowledge_editing: AtomicBool::new(false),
-            tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
-            translation_service: crate::translation_service::TranslationService::open(
-                &path.join("translation-cache.sqlite"),
-            )
-            .unwrap(),
-            settings_path: path.join("settings.json"),
-            settings: Mutex::new(AppSettings::default()),
-            startup_warning: Mutex::new(None),
-            active: Mutex::new(open_library(path).unwrap()),
-            link_check_job: Mutex::new(None),
-            pending_move_undo: Mutex::new(None),
-            reference_window_board: Mutex::new(None),
-            glossary: Mutex::new(GlossaryStore::load(path.join("translation-glossary.json"))),
-        }
-    }
     #[test]
     fn creates_and_validates_library_marker() {
         let dir = tempdir().unwrap();

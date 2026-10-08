@@ -2,14 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowDown, ArrowUp, ClipboardPaste, FileVideo, ImagePlus, Languages, RefreshCw, Save, Sparkles, Star, Trash2, X } from "lucide-react";
-import type { AssetDetail, AssetInput, AssetMedia, Category, ContentLanguage, FabDuplicateMatch, ImageInput, LocalizedAssetText, ParsedShareText, TranslationPreview } from "../types";
+import type { AssetDetail, AssetInput, AssetMedia, Category, ContentLanguage, FabDuplicateMatch, ImageInput, LocalizedAssetText, ParsedShareText, SingleAssetSaveOptions, TranslationPreview } from "../types";
 import { formatBytes, parseSize, splitValues, validateAsset } from "../lib/validation";
 import { ImagePreview } from "./ImagePreview";
 import { api } from "../lib/api";
 import { applyFabMetadata, isFabUrl } from "../lib/fab";
 import { MediaPreview } from "./MediaPreview";
+import { missingTranslationFields, useFabTranslationSettings } from "../lib/bilingual";
+import { useRequestGate } from "../lib/workspace";
 
-interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput) => Promise<AssetDetail | void>; onMediaImported?: (id:string)=>Promise<void>; onOpenExisting?: (id: string) => void }
+interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput, options?: SingleAssetSaveOptions) => Promise<AssetDetail | void>; onMediaImported?: (id:string)=>Promise<void>; onOpenExisting?: (id: string) => void; onRetryTranslation?: (id: string) => Promise<AssetDetail> }
 
 const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", tags: [], license: "" });
 
@@ -42,7 +44,12 @@ function flattenCategories(categories: Category[]) {
   walk(null, 0); return result;
 }
 
-export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onMediaImported, onOpenExisting }: Props) {
+export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onMediaImported, onOpenExisting, onRetryTranslation }: Props) {
+  const gate = useRequestGate();
+  const policy = useFabTranslationSettings();
+  const [fabRead, setFabRead] = useState(false);
+  const [saveResult, setSaveResult] = useState<AssetDetail | null>(null);
+  const [saveError, setSaveError] = useState("");
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
   const [editLanguage, setEditLanguage] = useState<ContentLanguage>(contentLanguage);
   const [sizeText, setSizeText] = useState(asset?.sizeBytes ? formatBytes(asset.sizeBytes) : "");
@@ -59,7 +66,18 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const [pendingMediaPaths, setPendingMediaPaths] = useState<string[]>([]);
   const [mediaBusy, setMediaBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+  const savingRef = useRef(false);
+  const fetchingFabRef = useRef(false);
   const categoryOptions = useMemo(() => flattenCategories(categories), [categories]);
+  const initialDraft = useRef(JSON.stringify({ form, sizeText, pendingMediaPaths }));
+  const completeBilingual = !asset || fabRead;
+  const autoTranslate = policy.settings?.fabAutoTranslate ?? false;
+  const willTranslate = completeBilingual && (!isFabUrl(form.sourceUrl) || autoTranslate);
+  const close = () => {
+    if (savingRef.current) return;
+    if (!saveResult && initialDraft.current !== JSON.stringify({ form, sizeText, pendingMediaPaths }) && !window.confirm("还有未保存的素材内容，确定放弃本次编辑？")) return;
+    gate.invalidate(); onClose();
+  };
 
   const addPaths = (paths: string[]) => setForm(prev => {
     const imagePaths = paths.filter(path => /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(path));
@@ -162,51 +180,45 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   };
 
   const fetchFab = async () => {
-    if (!fabUrl.trim() || fetchingFab) return;
+    if (!fabUrl.trim() || fetchingFabRef.current || savingRef.current) return;
+    fetchingFabRef.current = true;
+    const ticket = gate.begin();
     setFetchingFab(true); setFabStatus(null); setFabDuplicate(null);
     try {
       const duplicate = await api.checkFabUrl(fabUrl.trim(), asset?.id);
+      if (!gate.isCurrent(ticket)) return;
       if (duplicate) {
         setFabDuplicate(duplicate);
         setFabStatus({ kind: "error", message: duplicate.location === "trash" ? `“${duplicate.assetName}”已在回收站，请先恢复或永久删除后再录入。` : `“${duplicate.assetName}”已存在于${duplicate.categoryPath ? `“${duplicate.categoryPath}”` : "素材库"}，不会重复录入。` });
         return;
       }
       const metadata = await api.fetchFabMetadata(fabUrl.trim());
-      let next = applyFabMetadata(form, metadata);
-      setForm(next);
-      const settings = await api.getTranslationSettings();
-      let translationNote = "";
-      if (settings.fabAutoTranslate && settings.configured) {
-        try {
-          const preview = await api.translateAssetFields({ sourceLanguage: "en", targetLanguage: "zh-CN", fields: next.localizations.en || blankLocalized() });
-          const existing = next.localizations["zh-CN"] || blankLocalized();
-          const merged = { name: existing.name || preview.fields.name, description: existing.description || preview.fields.description, license: existing.license || preview.fields.license, tags: existing.tags.length ? existing.tags : preview.fields.tags };
-          next = { ...next, localizations: { ...next.localizations, "zh-CN": merged } };
-          setForm(next);
-          translationNote = preview.warnings.length ? ` 翻译提示：${preview.warnings.join("；")}` : " 已自动补齐中文版本。";
-        } catch (error) { translationNote = ` 在线翻译未完成：${String(error)}`; }
-      } else if (settings.fabAutoTranslate && !settings.configured) translationNote = " 尚未配置在线翻译，已跳过中文翻译。";
-      setForm(next);
+      if (!gate.isCurrent(ticket)) return;
+      setForm(previous => applyFabMetadata(previous, metadata));
+      setFabRead(true);
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
-      const categoryNote = !form.categoryId && metadata.suggestedCategoryPath.length ? ` 保存时将自动归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
-      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${translationNote}` });
+      const categoryNote = metadata.suggestedCategoryPath.length ? ` 未手选分类时，保存将归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
+      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}` });
     } catch (error) {
-      setFabStatus({ kind: "error", message: String(error) });
-    } finally { setFetchingFab(false); }
+      if (gate.isCurrent(ticket)) setFabStatus({ kind: "error", message: String(error) });
+    } finally { if (gate.isCurrent(ticket)) { fetchingFabRef.current = false; setFetchingFab(false); } }
   };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (savingRef.current || fetchingFabRef.current || translating || policy.busy || saveResult) return;
     const parsedSize = parseSize(sizeText);
     const display = form.localizations[form.contentLanguage] || form.localizations[form.contentLanguage === "en" ? "zh-CN" : "en"] || blankLocalized();
     const next = { ...form, name: display.name, description: display.description, tags: display.tags, license: display.license, sizeBytes: Number.isNaN(parsedSize) ? -1 : parsedSize };
     const validation = validateAsset(next);
     setErrors(validation.errors); setWarnings(validation.warnings);
     if (Object.keys(validation.errors).length) return;
-    setSaving(true);
+    savingRef.current = true; setSaving(true); setSaveError("");
+    const ticket = gate.begin();
     try {
       const duplicate = next.shareUrl.trim() ? await api.checkShareUrl(next.shareUrl) : null;
+      if (!gate.isCurrent(ticket)) return;
       if (duplicate && duplicate.id !== asset?.id) {
         setErrors(current => ({ ...current, shareUrl: `该链接已属于“${duplicate.name}”` }));
         return;
@@ -215,24 +227,49 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         ...next,
         images: next.images.map(({ previewDataUrl: _previewDataUrl, remoteUrl: _remoteUrl, ...image }) => image)
       };
-      const saved=await onSave(payload);
+      const saved=await onSave(payload, { completeBilingual: fabRead, autoTranslate });
+      if (!gate.isCurrent(ticket)) return;
+      if (saved) { setSaveResult(saved); setForm(toInput(saved, contentLanguage)); setEditLanguage(contentLanguage); }
       if (saved && pendingMediaPaths.length) {
         try { await api.importAssetMedia(saved.id,pendingMediaPaths); await onMediaImported?.(saved.id); }
-        catch(error) { window.alert(`素材已保存，但部分预览附件导入失败：${String(error)}`); }
+        catch(error) { if (gate.isCurrent(ticket)) setSaveError(`素材已保存，但部分预览附件导入失败：${String(error)}`); }
       }
-      onClose();
-    } finally { setSaving(false); }
+      if (!saved) onClose();
+    } catch (error) { if (gate.isCurrent(ticket)) setSaveError(`保存未完成：${String(error)}`); }
+    finally { if (gate.isCurrent(ticket)) { savingRef.current = false; setSaving(false); } }
   };
 
+  const retryTranslation = async () => {
+    if (!saveResult || !onRetryTranslation || savingRef.current) return;
+    const ticket = gate.begin(); savingRef.current = true; setSaving(true); setSaveError("");
+    try {
+      const updated = await onRetryTranslation(saveResult.id);
+      if (gate.isCurrent(ticket)) { setSaveResult(updated); setForm(toInput(updated, contentLanguage)); }
+    } catch (error) { if (gate.isCurrent(ticket)) setSaveError(`素材已保存，重试补译未完成：${String(error)}`); }
+    finally { if (gate.isCurrent(ticket)) { savingRef.current = false; setSaving(false); } }
+  };
+  const pendingFields = saveResult ? missingTranslationFields(saveResult.localizations) : [];
+
   return <div className="modal-backdrop"><section className="editor-modal" role="dialog" aria-modal="true">
-    <header className="modal-header"><div><span className="eyebrow">{asset ? "编辑条目" : "录入素材"}</span><h2>{asset?.name || "添加新素材"}</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></header>
+    <header className="modal-header"><div><span className="eyebrow">{asset ? "编辑条目" : "录入素材"}</span><h2>{asset?.name || "添加新素材"}</h2></div><button className="icon-button" aria-label="关闭素材编辑器" disabled={saving} onClick={close}><X size={19} /></button></header>
     <form ref={formRef} onSubmit={submit} className="editor-form">
+      {saveError && <p className="form-warning" role="alert">{saveError}</p>}
+      {saveResult && <section className="single-import-result" aria-label="素材保存结果">
+        <strong>{pendingFields.length ? "素材已保存，双语尚未完整" : "素材已保存"}</strong>
+        <p>{pendingFields.length ? `待补译：${pendingFields.join("、")}` : "已有原文对应的中英字段已齐全。"}</p>
+        <p>分类：{saveResult.categoryName || "未分类"}</p>
+        {saveResult.singleImportWarnings?.map((warning, index) => <p key={index}>{warning}</p>)}
+        <div className="translation-actions">{!!pendingFields.length && onRetryTranslation && <button type="button" className="secondary-button" disabled={saving} onClick={() => void retryTranslation()}>{saving ? "正在补译…" : "重试缺失译文"}</button>}<button type="button" className="secondary-button" disabled={saving} onClick={() => { onClose(); window.dispatchEvent(new Event("open-task-center")); }}>查看任务记录</button></div>
+      </section>}
+      <fieldset disabled={saving || translating || !!saveResult} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, flexShrink: 0 }}>
       <div className="form-section"><h3>基本信息</h3>
         <div className="fab-import-panel">
           <div className="fab-import-copy"><Sparkles size={17} /><div><strong>从 Fab 自动填充</strong><span>读取名称、描述、作者、标签、许可、格式和 UE 版本</span></div></div>
-          <div className="fab-import-controls"><input value={fabUrl} onChange={event => { setFabUrl(event.target.value); setFabDuplicate(null); setFabStatus(null); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
+          <div className="fab-import-controls"><input disabled={fetchingFab} value={fabUrl} onChange={event => { setFabUrl(event.target.value); setFabDuplicate(null); setFabStatus(null); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void fetchFab(); } }} placeholder="https://www.fab.com/listings/…" /><button type="button" className="secondary-button" disabled={!fabUrl.trim() || fetchingFab} onClick={fetchFab}>{fetchingFab ? "正在读取…" : "读取并填充"}</button></div>
           {fabStatus && <div className={`fab-import-status ${fabStatus.kind}`}>{fabStatus.message}{fabDuplicate?.location === "library" && onOpenExisting && <button type="button" className="secondary-button" onClick={() => onOpenExisting(fabDuplicate.assetId)}>打开现有素材</button>}</div>}
         </div>
+        <div className="import-translation-option"><label><input type="checkbox" disabled={policy.busy || !policy.settings} checked={autoTranslate} onChange={event => void policy.toggle(event.target.checked)} />Fab 自动补齐中英双语</label><span>{policy.busy ? "正在读取或保存翻译设置…" : autoTranslate ? completeBilingual ? "保存时自动补齐缺失的中英版本；不会覆盖已有内容。" : "普通编辑不自动补译；重新读取 Fab 后保存会补齐。" : "自动补译已关闭；Fab 保存仅保留现有内容，缺失字段会标记待补译。"}</span></div>
+        {policy.error && <p className="form-warning" role="alert">{policy.error}</p>}
         <div className="language-editor-bar"><div className="language-tabs"><button type="button" className={editLanguage === "zh-CN" ? "active" : ""} onClick={() => setEditLanguage("zh-CN")}>中文</button><button type="button" className={editLanguage === "en" ? "active" : ""} onClick={() => setEditLanguage("en")}>English</button></div><button type="button" className="secondary-button" disabled={translating} onClick={() => void requestTranslation(editLanguage)}><Languages size={15} />{translating ? "正在翻译…" : editLanguage === "en" ? "翻译到中文" : "Translate to English"}</button></div>
         <p className="translation-estimate">待译 {translationCharacters.toLocaleString("zh-CN")} 字符 · 约 {translationTokens.toLocaleString("zh-CN")} Token；仅为粗略预估，缓存和术语命中可减少请求，实际以服务返回用量为准。</p>
         {translation && <div className="translation-preview"><div><strong>翻译预览 · {translation.characterCount ?? translation.preview.characterCount} 字符</strong><span>勾选需要写入 {translation.target === "zh-CN" ? "中文" : "English"} 版本的字段；已有内容默认不覆盖。</span></div>{translation.preview.appliedTerms.length > 0 && <div className="translation-term-summary"><strong>术语库已校正 {translation.preview.appliedTerms.reduce((sum, item) => sum + item.count, 0)} 处</strong><span>{translation.preview.appliedTerms.map(item => `${item.source} → ${item.target}${item.count > 1 ? ` ×${item.count}` : ""}`).join("；")}</span></div>}{(["name", "description", "tags", "license"] as const).map(key => <label key={key}><input type="checkbox" checked={translation.selected.has(key)} onChange={event => setTranslation(current => { if (!current) return current; const selected = new Set(current.selected); event.target.checked ? selected.add(key) : selected.delete(key); return { ...current, selected }; })} /><span>{({ name: "名称", description: "描述", tags: "标签", license: "许可" } as const)[key]}</span><em>{Array.isArray(translation.preview.fields[key]) ? (translation.preview.fields[key] as string[]).join("；") : translation.preview.fields[key] as string || "—"}</em></label>)}{translation.preview.warnings.map(item => <small key={item}>{item}</small>)}<div className="translation-actions"><button type="button" className="secondary-button" onClick={() => setTranslation(null)}>取消</button><button type="button" className="primary-button" disabled={!translation.selected.size} onClick={applyTranslation}>应用所选译文</button></div></div>}
@@ -247,7 +284,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label><span>格式</span><input value={form.formats.join("; ")} onChange={e => update("formats", splitValues(e.target.value))} placeholder="uasset; FBX" /></label>
         <label><span>素材大小</span><input value={sizeText} onChange={e => setSizeText(e.target.value)} placeholder="例如 2.4 GB" />{errors.sizeBytes && <small className="field-error">{errors.sizeBytes}</small>}</label>
         <label><span>{editLanguage === "zh-CN" ? "中文许可" : "English license"}</span><input value={localized.license} onChange={e => updateLocalized("license", e.target.value)} placeholder="个人/商用、CC0…" /></label>
-        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => update("sourceUrl", e.target.value)} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
+        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setFabRead(false); setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>百度网盘</h3><button type="button" className="secondary-button" onClick={parseClipboard}><ClipboardPaste size={15} />从剪贴板解析</button></div><div className="form-grid">
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
@@ -268,7 +305,8 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         {!!pendingMediaPaths.length&&<div className="pending-media-list">{pendingMediaPaths.map(path=><div key={path}><FileVideo size={14}/><span>{path.split(/[\\/]/).at(-1)}</span><button type="button" onClick={()=>setPendingMediaPaths(previous=>previous.filter(value=>value!==path))}><X size={13}/></button></div>)}</div>}
         <div className="media-editor-list">{media.map((item,index)=><div className={`media-editor-item ${item.isCover ? "cover" : ""}`} key={item.id}><MediaPreview media={item} className="editor-thumb" /><div className="media-editor-info"><strong>{item.originalName}</strong><span>{item.kind === "video" ? "视频" : item.kind === "audio" ? "音频" : "3D 模型"} · {item.processingStatus === "ready" ? "可预览" : item.processingStatus === "error" ? "处理失败" : "处理中"}</span>{item.processingMessage && <small>{item.processingMessage}</small>}</div><button type="button" className="cover-toggle" onClick={()=>void setMediaCover(item.id)}><Star size={13} fill={item.isCover?"currentColor":"none"}/>{item.isCover?"封面":"设为封面"}</button><div className="image-order"><button type="button" onClick={()=>void moveMedia(index,-1)} disabled={index===0}><ArrowUp size={13}/></button><button type="button" onClick={()=>void moveMedia(index,1)} disabled={index===media.length-1}><ArrowDown size={13}/></button>{item.processingStatus==="error"&&<button type="button" title="重试处理" onClick={()=>void retryMedia(item.id)}><RefreshCw size={13}/></button>}<button type="button" onClick={()=>void deleteMedia(item.id)}><Trash2 size={13}/></button></div></div>)}</div>
       </div>
-      <footer className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}><Save size={17} />{saving ? "正在保存…" : "保存素材"}</button></footer>
+      </fieldset>
+      <footer className="modal-footer"><button type="button" className={saveResult ? "primary-button" : "secondary-button"} disabled={saving} onClick={close}>{saveResult ? "完成" : "取消"}</button>{!saveResult && <button type="submit" className="primary-button" disabled={saving || fetchingFab || translating || policy.busy || (isFabUrl(form.sourceUrl) && !policy.settings)}><Save size={17} />{saving ? willTranslate ? "正在保存并补齐双语…" : "正在保存素材…" : "保存素材"}</button>}</footer>
     </form>
   </section></div>;
 }

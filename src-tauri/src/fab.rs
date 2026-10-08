@@ -14,11 +14,7 @@ const MAX_PREVIEW_IMAGES: usize = 30;
 pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     let listing_id = listing_id_from_url(raw_url)?;
     let canonical_url = format!("https://www.fab.com/listings/{listing_id}");
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("无法初始化网络请求：{error}"))?;
+    let client = request_client()?;
 
     let api_url = format!("https://www.fab.com/i/listings/{listing_id}");
     let listing = get_json(&client, &api_url, &canonical_url).await?;
@@ -29,7 +25,7 @@ pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
             let Some(code) = asset_format
                 .pointer("/assetFormatType/code")
                 .and_then(Value::as_str)
-                .filter(|code| !code.is_empty())
+                .filter(|code| *code == "unreal-engine")
             else {
                 continue;
             };
@@ -61,6 +57,103 @@ pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     Ok(metadata)
 }
 
+fn request_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("无法初始化网络请求：{error}"))
+}
+
+pub(crate) async fn fetch_ue_versions(
+    listing_id: Uuid,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let canonical_url = format!("https://www.fab.com/listings/{listing_id}");
+    let detail = get_json(
+        &request_client()?,
+        &format!("https://www.fab.com/i/listings/{listing_id}/asset-formats/unreal-engine"),
+        &canonical_url,
+    )
+    .await?;
+    Ok(ue_versions_from_detail(&detail))
+}
+
+pub(crate) fn normalize_ue_version(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .strip_prefix("UE_")
+        .or_else(|| raw.trim().strip_prefix("UE "))
+        .unwrap_or(raw.trim())
+        .replace('_', ".");
+    let parts: Vec<_> = cleaned.split('.').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let major: u32 = parts[0].parse().ok()?;
+    let minor: u32 = parts[1].parse().ok()?;
+    if !(4..=99).contains(&major) || minor > 99 {
+        return None;
+    }
+    if parts.len() == 3 && parts[2].parse::<u32>().ok()? > 999 {
+        return None;
+    }
+    Some(format!("{major}.{minor}"))
+}
+
+fn ue_versions_from_detail(detail: &Value) -> (Vec<String>, Vec<String>) {
+    let unknown = || {
+        (
+            Vec::new(),
+            vec!["Fab 未提供可确认的 UE 支持版本，请在 Epic 中核对。".into()],
+        )
+    };
+    if detail
+        .pointer("/assetFormatType/code")
+        .is_some_and(|code| code.as_str() != Some("unreal-engine"))
+    {
+        return unknown();
+    }
+    let Some(artifacts) = detail.get("versions").and_then(Value::as_array) else {
+        return unknown();
+    };
+    let mut versions = Vec::new();
+    let mut incomplete = artifacts.is_empty();
+    for artifact in artifacts {
+        let Some(supported) = artifact.get("engineVersions").and_then(Value::as_array) else {
+            incomplete = true;
+            continue;
+        };
+        incomplete |= supported.is_empty();
+        for raw in supported {
+            if let Some(version) = raw.as_str().and_then(normalize_ue_version) {
+                versions.push(version);
+            } else {
+                incomplete = true;
+            }
+        }
+    }
+    versions.sort_by_key(|version| {
+        let mut parts = version
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    });
+    versions.dedup();
+    if versions.is_empty() {
+        return unknown();
+    }
+    let warnings = if incomplete {
+        vec!["Fab 的部分 UE 文件未提供可确认的支持版本；请在 Epic 中核对完整列表。".into()]
+    } else {
+        Vec::new()
+    };
+    (versions, warnings)
+}
+
 pub fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
     let parsed = Url::parse(raw_url.trim()).map_err(|_| "请输入完整的 Fab 商品网址")?;
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
@@ -83,7 +176,7 @@ pub fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
 }
 
 async fn get_json(client: &Client, url: &str, referer: &str) -> Result<Value, String> {
-    let response = client
+    let mut response = client
         .get(url)
         .header(header::ACCEPT, "application/json, text/plain, */*")
         .header(header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,zh-CN;q=0.5")
@@ -100,12 +193,19 @@ async fn get_json(client: &Client, url: &str, referer: &str) -> Result<Value, St
         return Err("Fab 返回了不安全的重定向，已停止读取".into());
     }
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取 Fab 数据失败：{error}"))?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
+    if response.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES as u64 {
         return Err("Fab 返回的数据过大，已停止读取".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取 Fab 数据失败：{error}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("Fab 返回的数据过大，已停止读取".into());
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let body = String::from_utf8_lossy(&bytes);
     if body.contains("cf_challenge") || body.contains("challenge-platform") {
@@ -616,6 +716,55 @@ mod tests {
         let mut versions = Vec::new();
         collect_versions(&detail, &mut versions);
         assert_eq!(unique(versions), vec!["5.3", "5.4", "5.5"]);
+    }
+
+    #[test]
+    fn ue_support_detail_is_numeric_sorted_and_not_a_package_version_list() {
+        let detail = serde_json::json!({
+            "assetFormatType": {"code": "unreal-engine"},
+            "versions": [
+                {"version": "Marketplace 2026 release", "engineVersions": ["UE_5.10", "UE_5.4.2", "UE_4_27"]},
+                {"engineVersions": ["UE_5.4", "UE 5.3"]}
+            ],
+            "assetFormats": [{"assetFormatType": {"code": "unity"}, "versions": [{"engineVersions": ["6.0"]}]}]
+        });
+        let (versions, warnings) = ue_versions_from_detail(&detail);
+        assert_eq!(versions, vec!["4.27", "5.3", "5.4", "5.10"]);
+        assert!(warnings.is_empty());
+        assert_eq!(normalize_ue_version("5.4.2"), Some("5.4".into()));
+        for invalid in [
+            "2022.3",
+            "5",
+            "5.4-beta",
+            "5..4",
+            "{custom-engine}",
+            "5.4.0.1",
+            "5.4.1000",
+        ] {
+            assert!(normalize_ue_version(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn incomplete_or_unrecognized_ue_support_remains_unknown_or_partial() {
+        let (versions, warnings) = ue_versions_from_detail(&serde_json::json!({"versions": [
+            {"engineVersions": ["UE_5.4", "future-format", 5]},
+            {"name": "missing support"}
+        ]}));
+        assert_eq!(versions, vec!["5.4"]);
+        assert!(!warnings.is_empty());
+        for detail in [
+            serde_json::json!({"assetFormatType": {"code": "unity"}, "versions": [{"engineVersions": ["5.4"]}]}),
+            serde_json::json!({"assetFormatType": {"code": 4}, "versions": [{"engineVersions": ["5.4"]}]}),
+            serde_json::json!({"versions": []}),
+            serde_json::json!({"versions": [{"engineVersions": ["unknown"]}]}),
+            serde_json::json!({"supportedVersions": ["5.4"], "assetFormats": [{"versions": [{"engineVersions": ["5.4"]}]}]}),
+            serde_json::Value::Null,
+        ] {
+            let (versions, warnings) = ue_versions_from_detail(&detail);
+            assert!(versions.is_empty());
+            assert!(!warnings.is_empty());
+        }
     }
 
     #[test]
