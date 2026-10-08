@@ -1,8 +1,8 @@
 /* Existing app tokens remain authoritative. Layers: tray 46, image viewer 47. */
 :root { --feedback-duration:160ms; --feedback-ease:cubic-bezier(.2,.7,.2,1); }
-.primary-button,.secondary-button,.icon-button { transition:opacity var(--feedback-duration),transform var(--feedback-duration) var(--feedback-ease); }
+.primary-button,.secondary-button,.icon-button { transition:background-color var(--feedback-duration),border-color var(--feedback-duration),color var(--feedback-duration),opacity var(--feedback-duration),transform var(--feedback-duration) var(--feedback-ease); }
 .primary-button:active:not(:disabled),.secondary-button:active:not(:disabled),.icon-button:active:not(:disabled) { transform:translateY(1px); }
-.modal-card,.command-palette,.read-failure,.toast { animation:feedback-enter var(--feedback-duration) var(--feedback-ease); }
+.modal-card,.editor-modal,.import-modal,.settings-modal,.quick-capture-modal,.command-palette,.read-failure,.toast { animation:feedback-enter var(--feedback-duration) var(--feedback-ease); }
 @keyframes feedback-enter { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:translateY(0); } }
 .read-failure { gap:16px;flex-wrap:wrap; }
 .load-feedback { min-height:48px; }
@@ -14,7 +14,7 @@
 .ai-error>p:last-child { color:var(--text-primary); }
 .ai-recovery { display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0 20px; }
 .ai-recovery p { flex-basis:100%;color:var(--text-muted);font-size:12px;line-height:1.7; }
-.ai-session-heading { position:sticky;top:-28px;padding:14px 0;background:var(--bg);z-index:2; }
+.ai-session-heading { position:sticky;top:-28px;padding:14px 0;background:var(--bg);z-index:2;overflow-wrap:anywhere }
 .ai-mode-grid>button:disabled { opacity:1; }
 .ai-mode-grid>button:not(.active):disabled { color:var(--text-muted); }
 .workflow-dialog { width:min(940px,calc(100vw - 40px));max-height:calc(100dvh - 48px);overflow:auto; }
