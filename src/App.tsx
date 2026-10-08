@@ -454,19 +454,34 @@ export default function App() {
     window.addEventListener("keydown", handleKeyDown);
     pointerDragCleanup.current = cleanup;
   };
-  const saveAsset = async (input: AssetInput) => {
+  const saveAsset = async (input: AssetInput, options?: import("./types").SingleAssetSaveOptions) => {
     const epoch = libraryEpoch;
     try {
       if (epoch !== librarySaveEpoch.current) throw new Error("素材库已切换，请重新打开录入窗口");
       if (!activeLibraryId) throw new Error("正在连接素材库，请稍后重新保存");
-      const saved = await api.saveAsset(input, activeLibraryId);
+      const saved = await api.saveAsset(input, activeLibraryId, options);
       if (epoch !== librarySaveEpoch.current) return saved;
       setSelectedId(saved.id); setDetail(saved);
       const warnings = saved.singleImportWarnings || [];
       notify(warnings.length ? `素材已保存，待处理：${warnings.join("；")}` : input.id ? "素材已更新" : "素材已添加", warnings.length > 0);
-      await refreshAll(); if (view === "health") refreshHealth(); return saved;
+      window.dispatchEvent(new Event("library-task-started"));
+      try { await refreshAll(); if (view === "health") await refreshHealth(); }
+      catch (error) { notify(`素材已保存，但列表刷新失败：${String(error)}`, true); }
+      return saved;
     }
     catch (error) { notify(`保存失败：${String(error)}`, true); throw error; }
+  };
+  const retrySingleTranslation = async (id: string) => {
+    const epoch = libraryEpoch;
+    if (!activeLibraryId) throw new Error("正在连接素材库，请稍后重试");
+    const report = await api.batchTranslateMissingAssets([id], activeLibraryId);
+    if (epoch !== librarySaveEpoch.current) throw new Error("素材库已切换，请在原素材库查看补译结果");
+    const updated = await api.getAsset(id, contentLanguage);
+    if (epoch !== librarySaveEpoch.current) throw new Error("素材库已切换");
+    updated.singleImportWarnings = report.rows.find(row => row.assetId === id)?.messages || [];
+    setDetail(previous => previous?.id === id ? updated : previous);
+    void refreshAll().catch(error => notify(`补译结果已保存，但刷新失败：${String(error)}`, true));
+    return updated;
   };
   const toggleFavorite = async (item: { id: string; favorite: boolean }) => {
     const favorite = !item.favorite;
@@ -490,8 +505,11 @@ export default function App() {
   };
   const translateSelected = async (ids: string[]) => {
     if (!ids.length || translatingBatch) return;
+    const epoch = libraryEpoch;
+    const boundLibrary = activeLibraryId;
     setTranslatingBatch(true);
     try {
+      if (!boundLibrary) throw new Error("正在连接素材库，请稍后重试");
       let characters = 0, tokens = 0;
       for (let start = 0; start < ids.length; start += 5000) {
         const estimate = await api.estimateMissingTranslations(ids.slice(start, start + 5000));
@@ -502,9 +520,17 @@ export default function App() {
       if (!settings.configured && !window.confirm("尚未配置在线翻译凭据。继续会生成待补译报告，但不会得到译文，是否继续？")) return;
       setTranslatingBatch(true); setTranslationProgress(null); setTranslationReport(null);
       const reports: BatchTranslationReport[] = [];
-      for (let start = 0; start < ids.length; start += 5000) reports.push(await api.batchTranslateMissingAssets(ids.slice(start, start + 5000)));
+      for (let start = 0; start < ids.length; start += 5000) {
+        if (epoch !== librarySaveEpoch.current) throw new Error("素材库已切换，已停止提交补译");
+        reports.push(await api.batchTranslateMissingAssets(ids.slice(start, start + 5000), boundLibrary));
+      }
+      if (epoch !== librarySaveEpoch.current) return;
       const report = { completed: reports.reduce((sum, item) => sum + item.completed, 0), pending: reports.reduce((sum, item) => sum + item.pending, 0), skipped: reports.reduce((sum, item) => sum + item.skipped, 0), rows: reports.flatMap(item => item.rows) };
       setTranslationReport(report);
+      if (selectedId && ids.includes(selectedId)) {
+        const updated = await api.getAsset(selectedId, contentLanguage);
+        if (epoch === librarySaveEpoch.current) setDetail(previous => previous?.id === updated.id ? updated : previous);
+      }
       await refreshAll(); if (view === "health") await refreshHealth();
       notify(`双语补译完成 ${report.completed} 项，待补译 ${report.pending} 项`);
     } catch (error) { notify(`补译失败：${String(error)}`, true); }
@@ -749,9 +775,9 @@ export default function App() {
       </section></div>}
     </WorkspaceBoundary></main>
 
-    {!mediaKind && view !== "browserCapture" && view !== "knowledge" && view !== "aiAssistant" && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <>{selectedId && <button className="inspector-backdrop" aria-label="关闭素材详情" onClick={closeAssetDetail} />}<DetailPanel onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "organize", assetIds: [id] }) : undefined} asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={closeAssetDetail} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} /></>}
-    {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onMediaImported={async id=>{setDetail(await api.getAsset(id,contentLanguage));await refreshAll();}} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
-    {showImport && <ImportDialog onClose={() => setShowImport(false)} onImported={() => { void refreshAll(); if (view === "health") void refreshHealth(); }} notify={notify} />}
+    {!mediaKind && view !== "browserCapture" && view !== "knowledge" && view !== "aiAssistant" && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <>{selectedId && <button className="inspector-backdrop" aria-label="关闭素材详情" onClick={closeAssetDetail} />}<DetailPanel onTranslate={id => void translateSelected([id])} translating={translatingBatch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "organize", assetIds: [id] }) : undefined} asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={closeAssetDetail} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} /></>}
+    {editor && <AssetEditor asset={editor === "edit" ? detail : null} contentLanguage={contentLanguage} initialShare={editor === "new" ? initialShare : null} categories={meta.categories} saveShortcut={personalization.global.shortcuts.saveAsset || "Ctrl+S"} onClose={() => { setEditor(null); setInitialShare(null); }} onSave={saveAsset} onRetryTranslation={retrySingleTranslation} onMediaImported={async id=>{setDetail(await api.getAsset(id,contentLanguage));await refreshAll();}} onOpenExisting={id => { setEditor(null); setInitialShare(null); void selectAsset(id); }} />}
+    {showImport && <ImportDialog expectedLibraryId={activeLibraryId || undefined} onClose={() => setShowImport(false)} onImported={() => { void refreshAll(); if (view === "health") void refreshHealth(); }} notify={notify} />}
     {(translatingBatch || translationReport) && <TranslationBatchReportDialog report={translationReport} progress={translationProgress} busy={translatingBatch} onClose={() => setTranslationReport(null)} onRetry={ids => void translateSelected(ids)} />}
     {showQuickAdd && <QuickAddDialog onClose={() => setShowQuickAdd(false)} notify={notify} onParsed={parsed => { if (libraryEpoch !== librarySaveEpoch.current) return; setInitialShare(parsed); setShowQuickAdd(false); setEditor("new"); }} onOpenExisting={id => { if (libraryEpoch !== librarySaveEpoch.current) return; setShowQuickAdd(false); selectAsset(id); }} />}
     {categoryEditor && <HierarchyNameDialog kind="分类" editing={Boolean(categoryEditor.id)} name={categoryEditor.name} busy={savingCategory} onNameChange={name => setCategoryEditor(previous => previous && { ...previous, name })} onClose={() => setCategoryEditor(null)} onSubmit={() => void saveCategory()} />}

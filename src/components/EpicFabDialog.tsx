@@ -14,8 +14,8 @@ export function ueVersionRelation(packageVersion: string, projectVersion: string
   return difference === 0 ? "same" : difference < 0 ? "older" : "newer";
 }
 
-interface Props { assetId: string; title: string; productName?: string; onClose: () => void }
-export function EpicFabDialog({ assetId, title, productName = title, onClose }: Props) {
+interface Props { assetId: string; title: string; productName?: string; mode?: "quick" | "project"; onClose: () => void }
+export function EpicFabDialog({ assetId, title, productName = title, mode = "project", onClose }: Props) {
   const gate = useRequestGate();
   const dialog = useRef<HTMLElement>(null);
   const context = useRef<{ libraryId: string; enabled: boolean } | null>(null);
@@ -26,9 +26,11 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
   const [busy, setBusy] = useState<"loading" | "picking" | "opening" | "fallback" | null>("loading");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const launching = useRef(false);
+  const [recovering, setRecovering] = useState(false);
   const target = targets.find(item => item.path === selectedPath);
   const relation = ueVersionRelation(version, target?.engineVersion || null);
-  const canOpen = !!context.current && !!options && !!target?.available && relation !== "newer" && (!options.supportedVersions.length || !!version) && !busy;
+  const canOpen = !!context.current && !busy && (mode === "quick" || (!!options && !!target?.available && relation !== "newer" && (!options.supportedVersions.length || !!version)));
   const close = () => { gate.invalidate(); context.current = null; onClose(); };
 
   const remember = (path: string, selectedVersion: string) => {
@@ -41,6 +43,7 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
       const value = await api.getWorkspaceContext("library");
       if (!gate.isCurrent(ticket)) return;
       context.current = value;
+      if (mode === "quick") return;
       const [fab, projects] = await Promise.allSettled([api.getFabUeOptions(assetId, value.libraryId), api.listUeProjectTargets(value.libraryId)]);
       if (!gate.isCurrent(ticket)) return;
       let recent: { path?: string; version?: string } = {};
@@ -70,7 +73,7 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
     window.addEventListener("library-location-changed", changed);
     void load();
     return () => { gate.invalidate(); window.removeEventListener("library-location-changed", changed); previousFocus?.focus(); };
-  }, [assetId]);
+  }, [assetId, mode]);
   const chooseProject = async () => {
     const bound = context.current; if (!bound) return;
     const ticket = gate.begin(); setBusy("picking"); setError(""); setMessage("");
@@ -85,20 +88,25 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
     } catch (reason) { if (gate.isCurrent(ticket)) setError(String(reason)); }
     finally { if (gate.isCurrent(ticket)) setBusy(null); }
   };
-  const launch = async () => {
-    if (!canOpen || !context.current || !target) return;
+  const launch = async (recover = false) => {
+    if (!canOpen || !context.current || launching.current) return;
+    launching.current = true; setRecovering(recover);
     const bound = context.current; const ticket = gate.begin(); setBusy("opening"); setError(""); setMessage("");
     try {
-      const checked = await api.inspectUeProject(target.path, bound.libraryId);
+      let checked: UeProjectTarget | undefined;
+      if (mode === "project") {
+        if (!target) return;
+        checked = await api.inspectUeProject(target.path, bound.libraryId);
+        if (!gate.isCurrent(ticket)) return;
+        setTargets(previous => previous.map(item => item.path === checked!.path ? checked! : item));
+        if (!checked.available || ueVersionRelation(version, checked.engineVersion) === "newer") throw new Error("工程不可用或版本已变更，请重新核对目标工程。");
+      }
+      const result = await api.openFabInEpic(assetId, bound.libraryId, recover);
       if (!gate.isCurrent(ticket)) return;
-      setTargets(previous => previous.map(item => item.path === checked.path ? checked : item));
-      if (!checked.available || ueVersionRelation(version, checked.engineVersion) === "newer") throw new Error("工程不可用或版本已变更，请重新核对目标工程。");
-      const result = await api.openFabInEpic(assetId, bound.libraryId);
-      if (!gate.isCurrent(ticket)) return;
-      if (result.requested) { remember(checked.path, version); setMessage(result.message); }
+      if (result.requested) { if (checked) remember(checked.path, version); setMessage(result.message); }
       else setError(result.message);
     } catch (reason) { if (gate.isCurrent(ticket)) setError(String(reason)); }
-    finally { if (gate.isCurrent(ticket)) setBusy(null); }
+    finally { launching.current = false; if (gate.isCurrent(ticket)) setBusy(null); }
   };
   const fallback = async (action: "copy" | "web") => {
     const bound = context.current;
@@ -112,13 +120,14 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
     finally { if (gate.isCurrent(ticket)) setBusy(null); }
   };
   return <div className="modal-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) close(); }}>
-    <section ref={dialog} className="modal-card epic-fab-dialog" role="dialog" aria-modal="true" aria-label="通过 Epic 添加到 UE 工程" onKeyDown={event => {
+    <section ref={dialog} className="modal-card epic-fab-dialog" role="dialog" aria-modal="true" aria-label={mode === "quick" ? "快速定位 Fab 商品" : "通过 Epic 添加到 UE 工程"} onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
       if (event.key === "Tab") { const buttons = dialog.current?.querySelectorAll<HTMLElement>("button:not(:disabled),select:not(:disabled)"); if (!buttons?.length) return; const first = buttons[0], last = buttons[buttons.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
     }}>
-      <header><div><span className="eyebrow">EPIC · FAB</span><h2>添加到 UE 工程</h2></div><button className="icon-button" aria-label="关闭 Epic 添加窗口" onClick={close}><X size={18}/></button></header>
+      <header><div><span className="eyebrow">EPIC · FAB</span><h2>{mode === "quick" ? "快速定位 Fab 商品" : "添加到 UE 工程"}</h2></div><button className="icon-button" aria-label="关闭 Epic 添加窗口" onClick={close}><X size={18}/></button></header>
       <div className="epic-fab-body">
         <p className="epic-asset-title">{title}</p>
+        {mode === "project" && <>
         <p>这里核对工程与版本，再定位 Epic 中的 Fab 商品。请在商品页点击“添加到工程”并确认目标工程；需使用已购买此素材的 Epic 账号。</p>
         {busy === "loading" && <p role="status"><RefreshCw size={14} className="spinning"/>正在读取 Fab 支持版本和已登记工程…</p>}
         <label>目标 UE 工程<select disabled={!!busy} value={selectedPath} onChange={event => { setSelectedPath(event.target.value); setMessage(""); const next = targets.find(item => item.path === event.target.value); const same = options?.supportedVersions.find(item => ueVersionRelation(item, next?.engineVersion || null) === "same"); if (same) setVersion(same); }}><option value="">请选择工程</option>{targets.map(item => <option key={item.path} value={item.path} disabled={!item.available}>{item.projectName ? `${item.projectName} · ` : ""}{item.name}{item.available ? "" : "（路径失效）"}</option>)}</select></label>
@@ -131,17 +140,20 @@ export function EpicFabDialog({ assetId, title, productName = title, onClose }: 
         {target && relation === "older" && <p className="form-warning">所选素材版本低于工程版本，允许继续，但可能需要转换或出现兼容性问题。请先备份工程。</p>}
         {target && relation === "newer" && <p className="form-warning">素材版本高于工程版本，不能继续。请选择更早的官方版本或更高版本的工程。</p>}
         <p className="form-warning">工程路径和所选版本不会自动传给 Epic。请在 Epic 中再次选择目标工程与版本；插件或完整工程可能显示“安装插件”或“创建工程”。</p>
-        <p>定位时会先切到 UE 库，再打开所选 Fab 商品，以避免连续切换失效。无需关闭 Epic；请求不代表商品已加载或开始安装。启动较慢时，请等 Epic 就绪后重试。</p>
-        {busy === "opening" && <p role="status"><RefreshCw size={14} className="spinning"/>正在切换 Epic 页面，请等待定位请求完成…</p>}
+        </>}
+        <p>直接定位当前商品。若 Epic 没有切换，可点击“恢复定位”；恢复时会经过 UE 库。请在 Epic 商品页核对名称，再选择工程与版本。</p>
+        {mode === "quick" && busy === "loading" && <p role="status">正在连接素材库…</p>}
+        {busy === "opening" && <p role="status"><RefreshCw size={14} className="spinning"/>{recovering ? "正在恢复定位，请等待 Epic 切换页面…" : "正在发送商品定位请求…"}</p>}
         <div className="epic-fallback-actions">
           <button className="secondary-button" disabled={!canOpen} onClick={() => void launch()}><RefreshCw size={14}/>重试定位</button>
+          <button className="secondary-button" disabled={!canOpen} onClick={() => void launch(true)}>定位无响应？恢复定位</button>
           <button className="secondary-button" disabled={!!busy || !context.current} onClick={() => void fallback("copy")}><Copy size={14}/>复制商品名</button>
           <button className="secondary-button" disabled={!!busy || !context.current || !options} onClick={() => void fallback("web")}><ExternalLink size={14}/>打开官方商品页</button>
         </div>
         {error && <p role="alert" className="form-error">{error}</p>}
         {message && <p role="status">{message}</p>}
       </div>
-      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? "正在切换 Epic 页面并定位…" : "定位 Fab 商品"}</button></footer>
+      <footer><button className="secondary-button" onClick={close}>关闭</button><button className="primary-button" disabled={!canOpen} onClick={() => void launch()}><ExternalLink size={16}/>{busy === "opening" ? recovering ? "正在恢复定位…" : "正在定位…" : "定位 Fab 商品"}</button></footer>
     </section>
   </div>;
 }

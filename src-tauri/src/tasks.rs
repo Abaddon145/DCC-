@@ -300,6 +300,59 @@ impl TaskRegistry {
             .cloned()
             .ok_or("任务不存在".into())
     }
+    // Single-entry saves already attempted translation. Record the terminal result
+    // without queuing it again; only an explicit retry may make another request.
+    pub(crate) fn record_translation_result(
+        &self,
+        library_id: String,
+        report: BatchTranslationReport,
+    ) -> Result<(), String> {
+        let timestamp = Utc::now().to_rfc3339();
+        let pending = report.pending > 0;
+        let task = LibraryTask {
+            id: Uuid::new_v4().to_string(),
+            library_id,
+            label: "单条录入 · 双语补齐".into(),
+            status: if pending { "failed" } else { "completed" }.into(),
+            phase: if pending {
+                "待补译"
+            } else {
+                "双语已完整"
+            }
+            .into(),
+            current: report.rows.len(),
+            total: report.rows.len(),
+            current_name: report
+                .rows
+                .first()
+                .map(|row| row.name.clone())
+                .unwrap_or_default(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            cancellable: false,
+            message: if pending {
+                "素材已保存，双语未完成；查看结果后可手动重试。"
+            } else {
+                "素材与双语信息已保存。"
+            }
+            .into(),
+            payload: TaskRequest::Translation {
+                ids: report.rows.iter().map(|row| row.asset_id.clone()).collect(),
+            },
+            result: Some(serde_json::to_value(report).map_err(|e| e.to_string())?),
+            stop_requested: false,
+        };
+        let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let Some(warning) = &store.persistence_warning {
+            return Err(warning.clone());
+        }
+        store.entries.push(task);
+        if let Err(error) = self.persist(&store) {
+            store.entries.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
     pub fn submit(
         &self,
         library_id: String,
@@ -615,8 +668,9 @@ pub fn start_library_task(
     app: AppHandle,
     state: tauri::State<AppState>,
     payload: TaskRequest,
+    expected_library_id: Option<String>,
 ) -> Result<LibraryTask, String> {
-    start_library_task_for_library(app, state, payload, None)
+    start_library_task_for_library(app, state, payload, expected_library_id.as_deref())
 }
 pub fn start_library_task_for_library(
     app: AppHandle,

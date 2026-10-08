@@ -47,6 +47,7 @@ describe("Fab metadata", () => {
     expect(result.localizations.en?.description).toBe("Quiet courtyard");
     expect(result.categoryId).toBe("manual");
     expect(result.autoCategoryPath).toEqual([]);
-    expect(applyFabMetadata({ ...asset, id: "existing" }, metadata).autoCategoryPath).toEqual([]);
+    expect(applyFabMetadata({ ...asset, id: "existing" }, metadata).autoCategoryPath).toEqual(["环境", "花园"]);
+    expect(applyFabMetadata({ ...asset, id: "existing", categoryId: "manual" }, metadata).autoCategoryPath).toEqual([]);
   });
 });

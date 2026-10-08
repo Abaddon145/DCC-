@@ -5,8 +5,8 @@ import type { ProjectUnit } from "../types";
 import type { LibraryTask, LibraryTaskRequest } from "../types";
 import type { FabUeOptions, UeProjectTarget, EpicOpenResult } from "../types";
 
-async function runLibraryTask<T>(payload: LibraryTaskRequest): Promise<T> {
-  const created=await invoke<LibraryTask>("start_library_task",{payload});
+async function runLibraryTask<T>(payload: LibraryTaskRequest, expectedLibraryId?: string): Promise<T> {
+  const created=await invoke<LibraryTask>("start_library_task",{payload, ...(expectedLibraryId ? { expectedLibraryId } : {})});
   window.dispatchEvent(new Event("library-task-started"));
   for (;;) {
     const task=await invoke<LibraryTask>("get_library_task",{id:created.id});
@@ -25,7 +25,7 @@ export const api = {
   getFabUeOptions: (assetId: string, expectedLibraryId: string) => invoke<FabUeOptions>("get_fab_ue_options", { assetId, expectedLibraryId }),
   listUeProjectTargets: (expectedLibraryId: string) => invoke<UeProjectTarget[]>("list_ue_project_targets", { expectedLibraryId }),
   inspectUeProject: (path: string, expectedLibraryId: string) => invoke<UeProjectTarget>("inspect_ue_project", { path, expectedLibraryId }),
-  openFabInEpic: (assetId: string, expectedLibraryId: string) => invoke<EpicOpenResult>("open_fab_in_epic", { assetId, expectedLibraryId }),
+  openFabInEpic: (assetId: string, expectedLibraryId: string, recover = false) => invoke<EpicOpenResult>("open_fab_in_epic", { assetId, expectedLibraryId, recover }),
   listBrowserCaptures: (libraryId:string,offset=0) => invoke<import("../types").Page<import("../types").BrowserCapture>>("list_browser_captures",{libraryId,offset}),
   registerBrowserCaptureHost: (extensionId:string) => invoke<string>("register_browser_capture_host",{extensionId}),
   organizeBrowserCapture: (libraryId:string,id:string) => invoke<void>("organize_browser_capture",{libraryId,id}),
@@ -46,7 +46,7 @@ export const api = {
   search: (request: SearchRequest) => invoke<Page<AssetCard>>("search_assets", { request }),
   selectAssetIds: (request: SearchRequest) => invoke<AssetSelection>("select_asset_ids", { request }),
   getAsset: (id: string, contentLanguage: ContentLanguage) => invoke<AssetDetail>("get_asset", { id, contentLanguage }),
-  saveAsset: (input: AssetInput, expectedLibraryId: string) => invoke<AssetDetail>("upsert_asset", { input, expectedLibraryId }),
+  saveAsset: (input: AssetInput, expectedLibraryId: string, options?: import("../types").SingleAssetSaveOptions) => invoke<AssetDetail>("upsert_asset", { input, expectedLibraryId, ...options }),
   deleteAsset: (id: string) => invoke<void>("delete_asset", { id }),
   setFavorite: (id: string, favorite: boolean) => invoke<void>("set_favorite", { id, favorite }),
   addCategory: (name: string, parentId: string | null) => invoke<string>("upsert_category", { id: null, name, parentId }),
@@ -91,8 +91,8 @@ export const api = {
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
   copyCode: (id: string) => invoke<void>("copy_extraction_code", { id }),
   inspectImport: (path: string, mapping: ImportMapping = {}) => invoke<ImportPreview>("preview_import", { path, mapping }),
-  commitImport: (path: string, mapping: ImportMapping, autoTranslate: boolean) => runLibraryTask<ImportReport>({kind:"fabImport",request:{path,mapping,autoTranslate}}),
-  batchTranslateMissingAssets: (ids: string[]) => runLibraryTask<BatchTranslationReport>({kind:"translation",request:{ids}}),
+  commitImport: (path: string, mapping: ImportMapping, autoTranslate: boolean, expectedLibraryId?: string) => runLibraryTask<ImportReport>({kind:"fabImport",request:{path,mapping,autoTranslate}}, expectedLibraryId),
+  batchTranslateMissingAssets: (ids: string[], expectedLibraryId?: string) => runLibraryTask<BatchTranslationReport>({kind:"translation",request:{ids}}, expectedLibraryId),
   exportTemplate: (path: string) => invoke<void>("export_import_template", { path }),
   exportBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"backup",request:{path}})),
   restoreBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"restore",request:{path}})),

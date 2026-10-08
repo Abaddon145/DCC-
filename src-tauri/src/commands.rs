@@ -809,14 +809,34 @@ pub async fn upsert_asset(
     state: State<'_, AppState>,
     input: AssetInput,
     expected_library_id: String,
+    complete_bilingual: Option<bool>,
+    auto_translate: Option<bool>,
 ) -> Result<AssetDetail, String> {
-    save_single_asset(&state, input, &expected_library_id).await
+    save_single_asset_with_options(
+        &state,
+        input,
+        &expected_library_id,
+        complete_bilingual.unwrap_or(false),
+        auto_translate,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn save_single_asset(
+    state: &AppState,
+    input: AssetInput,
+    expected_library_id: &str,
+) -> Result<AssetDetail, String> {
+    save_single_asset_with_options(state, input, expected_library_id, false, None).await
+}
+
+async fn save_single_asset_with_options(
     state: &AppState,
     mut input: AssetInput,
     expected_library_id: &str,
+    complete_bilingual: bool,
+    auto_translate: Option<bool>,
 ) -> Result<AssetDetail, String> {
     let library_id = expected_library_id.to_string();
     if state.active_library_id()? != library_id {
@@ -828,6 +848,7 @@ pub(crate) async fn save_single_asset(
         .ok()
         .map(|id| id.to_string());
     let is_fab_source = source_listing_id.is_some();
+    let complete_bilingual = is_new || (complete_bilingual && is_fab_source);
     if let (Some(source_id), Some(supplied_id)) = (&source_listing_id, &input.fab_listing_id) {
         if uuid::Uuid::parse_str(supplied_id)
             .ok()
@@ -913,15 +934,15 @@ pub(crate) async fn save_single_asset(
             Err(error) => warnings.push(format!("Fab 自动读取未完成，已保留原文：{error}")),
         }
     }
-    if !is_new {
+    if !complete_bilingual {
         input.auto_category_path.clear();
     }
     if state.active_library_id()? != library_id {
         return Err("保存过程中已切换素材库，已停止补译和写入".into());
     }
     db::validate_input(&input)?;
-    if is_new {
-        if !is_fab_source || state.preferences()?.1 {
+    if complete_bilingual {
+        if !is_fab_source || auto_translate.unwrap_or(state.preferences()?.1) {
             warnings.extend(
                 translate_missing_localizations(state, &mut input.localizations, &library_id).await,
             );
@@ -938,6 +959,23 @@ pub(crate) async fn save_single_asset(
             db::upsert_asset(connection, base_dir, input)
         })?
         .ok_or("保存过程中已切换素材库，已停止写入")?;
+    if complete_bilingual {
+        let pending = !bilingual::pending_fields(&saved.localizations).is_empty();
+        let report = BatchTranslationReport {
+            completed: usize::from(!pending),
+            pending: usize::from(pending),
+            skipped: 0,
+            rows: vec![BatchTranslationRow {
+                asset_id: saved.card.id.clone(),
+                name: saved.card.name.clone(),
+                status: if pending { "pending" } else { "complete" }.into(),
+                messages: warnings.clone(),
+            }],
+        };
+        if let Err(error) = state.tasks.record_translation_result(library_id, report) {
+            warnings.push(format!("素材已保存，但任务结果记录失败：{error}"));
+        }
+    }
     saved.single_import_warnings = warnings;
     Ok(saved)
 }
@@ -1061,6 +1099,7 @@ pub async fn import_asset_media(
         app.clone(),
         state,
         crate::tasks::TaskRequest::AssetMediaImport { asset_id, paths },
+        None,
     )?;
     serde_json::from_value(crate::tasks::await_task_result(&app, &task.id).await?)
         .map_err(|e| e.to_string())
@@ -1081,6 +1120,7 @@ pub async fn retry_asset_media(
         app.clone(),
         state,
         crate::tasks::TaskRequest::AssetMediaRetry { id },
+        None,
     )?;
     serde_json::from_value(crate::tasks::await_task_result(&app, &task.id).await?)
         .map_err(|e| e.to_string())
@@ -2523,10 +2563,115 @@ mod tests {
             .single_import_warnings
             .iter()
             .any(|warning| warning.contains("待补译：中文名称")));
+        let history = state
+            .tasks
+            .list(&state.active_library_id().unwrap())
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "a saved source-only asset must retain its completion result"
+        );
+        let result = state.tasks.get(&history[0].id).unwrap().result.unwrap();
+        assert_eq!(result["rows"][0]["assetId"], saved.card.id);
+        assert_eq!(result["rows"][0]["status"], "pending");
+        let restored = crate::tasks::TaskRegistry::load(directory.path().join("task-journal.json"));
+        assert_eq!(
+            restored.get(&history[0].id).unwrap().result.unwrap(),
+            result
+        );
+        assert!(
+            !restored.busy(),
+            "recorded results must not restart paid requests"
+        );
         assert_eq!(
             state.translation_service.usage().unwrap().deepseek_tokens,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn single_save_reread_reuses_bulk_category_and_preserves_manual_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_state(directory.path());
+        state.translation_service = crate::translation_service::TranslationService::for_test(
+            &directory.path().join("available-translation.sqlite"),
+            true,
+        );
+        let library_id = state.active_library_id().unwrap();
+        let mut input = single_fab_input();
+        input.auto_category_path.clear();
+        input.localizations.get_mut("en").unwrap().description = "Quiet courtyard".into();
+        input.localizations.insert(
+            "zh-CN".into(),
+            LocalizedAssetText {
+                name: "手填标题".into(),
+                ..Default::default()
+            },
+        );
+        let existing = state
+            .with_library_mut(|connection, base_dir| db::upsert_asset(connection, base_dir, input))
+            .unwrap();
+
+        let official_path = fab::classify_category("environments/desert", "沙漠", "3d-model");
+        // The bulk importer writes this same official path through db::upsert_asset.
+        let mut bulk_input = single_fab_input();
+        bulk_input.source_url =
+            "https://www.fab.com/listings/11111111-1111-1111-1111-111111111111".into();
+        bulk_input.fab_listing_id = Some("11111111-1111-1111-1111-111111111111".into());
+        bulk_input.auto_category_path = official_path.clone();
+        let bulk_saved = state
+            .with_library_mut(|connection, base_dir| {
+                db::upsert_asset(connection, base_dir, bulk_input)
+            })
+            .unwrap();
+
+        let mut reread: AssetInput =
+            serde_json::from_value(serde_json::to_value(&existing).unwrap()).unwrap();
+        reread.auto_category_path = official_path;
+        let ordinary_edit = save_single_asset(&state, reread.clone(), &library_id)
+            .await
+            .unwrap();
+        assert_eq!(ordinary_edit.category_id, None);
+        assert_eq!(
+            state.translation_service.usage().unwrap().deepseek_tokens,
+            0
+        );
+        let saved = save_single_asset_with_options(&state, reread, &library_id, true, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(saved.category_id, bulk_saved.category_id);
+        assert_eq!(saved.card.category_name.as_deref(), Some("沙漠"));
+        assert_eq!(saved.localizations["zh-CN"].name, "手填标题");
+        assert_eq!(saved.localizations["zh-CN"].description, "安静庭院");
+        let reloaded = state
+            .with_library(|connection, _| db::get_asset(connection, &saved.card.id, false, "zh-CN"))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&reloaded.localizations).unwrap(),
+            serde_json::to_value(&saved.localizations).unwrap()
+        );
+
+        let manual = state
+            .with_library(|connection, _| {
+                db::upsert_category(connection, None, "用户分类".into(), None, false)
+            })
+            .unwrap();
+        let mut hand_chosen: AssetInput =
+            serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+        hand_chosen.category_id = Some(manual.clone());
+        hand_chosen.auto_category_path = fab::classify_category("new-unknown-kind", "", "");
+        let saved =
+            save_single_asset_with_options(&state, hand_chosen, &library_id, true, Some(true))
+                .await
+                .unwrap();
+        assert_eq!(saved.category_id, Some(manual));
+        assert!(!state
+            .with_library(|connection, _| db::auto_category_path_exists(
+                connection,
+                &["其他".into(), "待整理".into()]
+            ))
+            .unwrap());
     }
 
     #[tokio::test]

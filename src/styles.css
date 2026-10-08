@@ -244,6 +244,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .epic-fab-body p.form-warning { color:var(--accent); }
 .epic-fab-body p.form-error { color:var(--danger); overflow-wrap:anywhere; }
 .detail-actions>.epic-detail-action { flex:1 1 100%; justify-content:center; }
+.single-import-result, .translation-pending-status { padding:16px; border:1px solid var(--accent); border-radius:10px; background:var(--panel); overflow-wrap:anywhere; }
+.single-import-result { flex-shrink:0; }
+.single-import-result p, .translation-pending-status p { margin:8px 0; line-height:1.6; }
+.result-pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; flex-wrap:wrap; }
+.result-pagination button { padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
 .editor-modal, .import-modal, .quick-modal, .settings-modal { width: min(920px, 96vw); max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-light); border-radius: 12px; background: #11161d; box-shadow: 0 28px 90px rgba(0,0,0,.62); }
 .import-modal { width: min(860px, 96vw); }
 .quick-modal { width: min(610px, 94vw); }.settings-modal { width: min(780px, 95vw); }

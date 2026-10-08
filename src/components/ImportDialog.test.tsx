@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
@@ -7,11 +7,12 @@ import { ImportDialog } from "./ImportDialog";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock("../lib/api", () => ({ api: {
-  inspectImport: vi.fn(), commitImport: vi.fn(), getTranslationSettings: vi.fn(), batchTranslateMissingAssets: vi.fn(),
+  inspectImport: vi.fn(), commitImport: vi.fn(), getTranslationSettings: vi.fn(), batchTranslateMissingAssets: vi.fn(), setFabAutoTranslate: vi.fn(),
 } }));
 
 describe("ImportDialog", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(open).mockResolvedValue("C:\\Fab.xlsx");
     vi.mocked(api.getTranslationSettings).mockResolvedValue({ provider: "baidu", configured: false, fabAutoTranslate: true, contentLanguage: "zh-CN" });
@@ -37,11 +38,15 @@ describe("ImportDialog", () => {
     expect(window.confirm).toHaveBeenCalled();
   });
 
-  it("requests bilingual completion by default even when the single-Fab setting is off", async () => {
+  it("shares the persisted single-Fab preference and enables translation only after saving the toggle", async () => {
     vi.mocked(api.getTranslationSettings).mockResolvedValue({ provider: "baidu", configured: true, fabAutoTranslate: false, contentLanguage: "zh-CN" });
     render(<ImportDialog onClose={vi.fn()} onImported={vi.fn()} notify={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "选择文件" }));
-    expect(await screen.findByRole("checkbox", { name: "自动补齐中英双语" })).toBeChecked();
+    const toggle = await screen.findByRole("checkbox", { name: "自动补齐中英双语" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(api.setFabAutoTranslate).toHaveBeenCalledWith(true);
     fireEvent.click(await screen.findByRole("button", { name: "导入 1 条" }));
     await waitFor(() => expect(api.commitImport).toHaveBeenCalledWith("C:\\Fab.xlsx", { fab_url: "fab_url" }, true));
   });
@@ -64,5 +69,25 @@ describe("ImportDialog", () => {
     fireEvent.click(await screen.findByRole("button", { name: "重试待补译 1 条" }));
     await waitFor(() => expect(api.batchTranslateMissingAssets).toHaveBeenCalledWith(["asset-1"]));
     expect(await screen.findByText(/待补译 0/)).toBeInTheDocument();
+  });
+
+  it("freezes the file and mapping during a library-bound import and exposes rows beyond 500", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof api.commitImport>>) => void;
+    vi.mocked(api.commitImport).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    render(<ImportDialog expectedLibraryId="library-1" onClose={vi.fn()} onImported={vi.fn()} notify={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "选择文件" }));
+    const importButton = await screen.findByRole("button", { name: "导入 1 条" });
+    await waitFor(() => expect(importButton).toBeEnabled());
+    fireEvent.click(importButton);
+    await waitFor(() => expect(api.commitImport).toHaveBeenCalledWith("C:\\Fab.xlsx", { fab_url: "fab_url" }, true, "library-1"));
+    expect(screen.getByRole("button", { name: "更换文件" })).toBeDisabled();
+    expect(screen.getByLabelText(/Fab URL/)).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "更换文件" }));
+    expect(open).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ imported: 601, failed: 0, skipped: 0, rows: Array.from({ length: 601 }, (_, index) => ({ row: index + 2, name: `Asset-${index + 1}`, status: "imported", actualCategoryPath: "环境 / 沙漠", messages: [] })) }));
+    for (let i = 0; i < 6; i++) fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(screen.getByText("Asset-601")).toBeInTheDocument();
+    expect(screen.getByText("环境 / 沙漠")).toBeInTheDocument();
+    expect(screen.getByText("第 7 / 7 页 · 共 601 条")).toBeInTheDocument();
   });
 });

@@ -29,12 +29,25 @@ describe("Epic Fab assisted project flow", () => {
     expect(ueVersionRelation("5.5.1", "5.5.2")).toBe("same");
     expect(ueVersionRelation("5.5", "custom-engine-id")).toBe("unknown");
   });
+  it("locates directly without a project or version and resets the launcher only on explicit recovery", async () => {
+    render(<EpicFabDialog mode="quick" assetId="asset-1" title="沙漠环境" onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "定位 Fab 商品" })).toBeEnabled());
+    expect(api.getFabUeOptions).not.toHaveBeenCalled();
+    expect(api.listUeProjectTargets).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "定位 Fab 商品" }));
+    await waitFor(() => expect(api.openFabInEpic).toHaveBeenCalledWith("asset-1", "library-1", false));
+    await waitFor(() => expect(screen.getByRole("button", { name: "定位无响应？恢复定位" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "定位无响应？恢复定位" }));
+    await waitFor(() => expect(api.openFabInEpic).toHaveBeenLastCalledWith("asset-1", "library-1", true));
+    expect(api.openFabInEpic).toHaveBeenCalledTimes(2);
+    expect(api.inspectUeProject).not.toHaveBeenCalled();
+  });
   it("loads official versions, rechecks the project, and opens only the backend's stored listing", async () => {
     show();
     await waitFor(() => expect(screen.getByLabelText("Fab 官方支持版本")).toHaveValue("5.5"));
     expect(api.getFabUeOptions).toHaveBeenCalledWith("asset-1", "library-1");
     fireEvent.click(screen.getByRole("button", { name: "定位 Fab 商品" }));
-    await waitFor(() => expect(api.openFabInEpic).toHaveBeenCalledWith("asset-1", "library-1"));
+    await waitFor(() => expect(api.openFabInEpic).toHaveBeenCalledWith("asset-1", "library-1", false));
     expect(api.inspectUeProject).toHaveBeenCalledWith(project.path, "library-1");
     expect(screen.getByText(/尚未下载或安装/)).toBeInTheDocument();
     expect(screen.queryByText(/已打开 Epic/)).not.toBeInTheDocument();
@@ -137,9 +150,9 @@ describe("Epic Fab assisted project flow", () => {
     show(); await waitFor(() => expect(screen.getByRole("button", { name: "定位 Fab 商品" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "定位 Fab 商品" }));
     await waitFor(() => expect(api.openFabInEpic).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("button", { name: "正在切换 Epic 页面并定位…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在定位…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "重试定位" })).toBeDisabled();
-    expect(screen.getByText(/正在切换 Epic 页面，请等待定位请求完成/)).toHaveAttribute("role", "status");
+    expect(screen.getByText(/正在发送商品定位请求/)).toHaveAttribute("role", "status");
     fireEvent.click(screen.getByRole("button", { name: "重试定位" }));
     expect(api.openFabInEpic).toHaveBeenCalledTimes(1);
     await act(async () => finish({ listingId: options.listingId, url: options.epicUrl, requested: true, message: "已发送请求，尚未确认商品已加载。" }));

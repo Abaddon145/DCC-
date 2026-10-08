@@ -21,6 +21,13 @@ const asset: AssetDetail = {
 const handlers = { onClose: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn(), onFavorite: vi.fn(), onOpen: vi.fn(), onSourceOpen: vi.fn(), onCopy: vi.fn(), onCheckLink: vi.fn(), checkingLink: false };
 
 describe("DetailPanel bilingual content", () => {
+  it("reports a missing Chinese description even when the Chinese title exists and retries that asset", () => {
+    const onTranslate = vi.fn();
+    render(<DetailPanel asset={{ ...asset, localizations: { ...asset.localizations, "zh-CN": { ...asset.localizations["zh-CN"]!, description: "" } } }} contentLanguage="zh-CN" loading={false} {...handlers} onTranslate={onTranslate} />);
+    expect(screen.getByText(/中文描述/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "补齐缺失双语" }));
+    expect(onTranslate).toHaveBeenCalledWith("1");
+  });
   it("offers Epic for Fab assets without requiring a local file and keeps detail open on modal Escape", () => {
     const onClose = vi.fn();
     render(<DetailPanel asset={{ ...asset, fabListingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", sourceUrl: "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a" }} contentLanguage="zh-CN" loading={false} {...handlers} onClose={onClose}/>);

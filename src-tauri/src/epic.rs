@@ -114,11 +114,14 @@ fn epic_listing_url(listing_id: Uuid) -> String {
 
 fn request_epic_navigation(
     listing_id: Uuid,
+    recover: bool,
     mut dispatch: impl FnMut(&str) -> Result<(), String>,
     handoff: impl FnOnce() -> Result<(), String>,
 ) -> Result<String, String> {
-    dispatch("com.epicgames.launcher://ue/library")?;
-    handoff()?;
+    if recover {
+        dispatch("com.epicgames.launcher://ue/library")?;
+        handoff()?;
+    }
     let url = epic_listing_url(listing_id);
     dispatch(&url)?;
     Ok(url)
@@ -396,6 +399,7 @@ pub async fn open_fab_in_epic(
     app: AppHandle,
     asset_id: String,
     expected_library_id: String,
+    recover: Option<bool>,
 ) -> Result<EpicOpenResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _navigation = EPIC_NAVIGATION
@@ -408,6 +412,7 @@ pub async fn open_fab_in_epic(
         check_epic_protocol()?;
         let url = request_epic_navigation(
             listing_id,
+            recover.unwrap_or(false),
             |url| in_library(&state, &expected_library_id, |connection, _| {
                 if registered_listing(connection, &asset_id)? != listing_id {
                     return Err("素材的 Fab 来源已改变，请重新打开 Epic 添加入口".into());
@@ -426,7 +431,11 @@ pub async fn open_fab_in_epic(
             listing_id: listing_id.to_string(),
             url,
             requested: true,
-            message: "已通过 UE 库重新交接并发出 Fab 商品定位请求，尚未确认商品页面是否加载。请核对商品后点击“添加到工程”并选择版本和目标工程；尚未发起下载或安装。Epic 启动或加载较慢时，可在就绪后重试定位，无需关闭 Epic。".into(),
+            message: if recover.unwrap_or(false) {
+                "已执行恢复定位并重新发送商品请求。请在 Epic 核对商品名称；尚未下载或安装。"
+            } else {
+                "已向 Epic 直接发送商品定位请求。请核对商品名称，再在 Epic 选择工程和版本；若仍停在原页面，可手动恢复定位。"
+            }.into(),
         })
     })
     .await
@@ -446,6 +455,7 @@ mod tests {
         for listing in [first, second, second] {
             let url = request_epic_navigation(
                 listing,
+                true,
                 |url| {
                     trace.borrow_mut().push(url.to_string());
                     Ok(())
@@ -477,6 +487,7 @@ mod tests {
         let trace = std::cell::RefCell::new(Vec::new());
         let error = request_epic_navigation(
             listing,
+            true,
             |url| {
                 trace.borrow_mut().push(url.to_string());
                 Ok(())
@@ -505,6 +516,7 @@ mod tests {
         trace.borrow_mut().clear();
         let error = request_epic_navigation(
             listing,
+            true,
             |url| {
                 registered_listing(&connection, "asset")?;
                 trace.borrow_mut().push(url.to_string());
@@ -524,6 +536,7 @@ mod tests {
         let handoff_called = std::cell::Cell::new(false);
         assert!(request_epic_navigation(
             listing,
+            true,
             |_| Err("Epic 协议调用失败".into()),
             || {
                 handoff_called.set(true);
@@ -532,6 +545,26 @@ mod tests {
         )
         .is_err());
         assert!(!handoff_called.get());
+    }
+
+    #[test]
+    fn normal_epic_navigation_never_resets_the_launcher_or_waits_between_products() {
+        let mut urls = Vec::new();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        for id in [a, b, b] {
+            request_epic_navigation(
+                id,
+                false,
+                |url| {
+                    urls.push(url.to_string());
+                    Ok(())
+                },
+                || panic!("normal navigation must not hand off through the library"),
+            )
+            .unwrap();
+        }
+        assert_eq!(urls, [a, b, b].map(epic_listing_url));
     }
 
     #[test]

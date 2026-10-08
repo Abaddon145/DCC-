@@ -12,6 +12,7 @@ export function TaskCenter({notify}:{notify:(message:string,error?:boolean)=>voi
   const [warning,setWarning]=useState<string|null>(null);const [pending,setPending]=useState<string|null>(null);const refreshLock=useRef(false);const mutationLock=useRef(false);
   const [resultPage,setResultPage]=useState(0);const [inspected,setInspected]=useState<LibraryTask|null>(null);
   const [tasks,setTasks]=useState<LibraryTask[]>([]);const [open,setOpen]=useState(false);const [selected,setSelected]=useState<string|null>(null);
+  useEffect(() => { const show = () => setOpen(true); window.addEventListener("open-task-center", show); return () => window.removeEventListener("open-task-center", show); }, []);
   const refresh=useCallback(async()=>{if(refreshLock.current||Date.now()<retryAfter.current)return;refreshLock.current=true;try{setTasks(await api.listLibraryTasks());if(api.getTaskWarning)setWarning(await api.getTaskWarning());setReadFailed(false)}catch(error){retryAfter.current=Date.now()+30000;setReadFailed(true);notify(`读取任务失败：${String(error)}`,true)}finally{refreshLock.current=false}},[notify]);
   useEffect(()=>{
     let active=true;const disposes:Array<()=>void>=[];

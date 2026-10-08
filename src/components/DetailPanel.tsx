@@ -8,8 +8,11 @@ import { MediaPreview } from "./MediaPreview";
 import { LibraryMediaPreview, MediaViewer, type PreviewItem } from "./MediaViewer";
 import { useImageCompare } from "./ImageCompare";
 import { EpicFabDialog } from "./EpicFabDialog";
+import { missingTranslationFields } from "../lib/bilingual";
 
 interface Props {
+  onTranslate?: (id: string) => void;
+  translating?: boolean;
   onAi?: (id: string) => void;
   asset: AssetDetail | null;
   contentLanguage: ContentLanguage;
@@ -29,11 +32,11 @@ interface Props {
   onCollectMedia?: (assetId: string) => void;
 }
 
-export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
+export function DetailPanel({ onTranslate, translating = false, onAi, asset, contentLanguage, loading, onClose, onEdit, onDelete, onFavorite, onOpen, onSourceOpen, onOpenExternal = () => undefined, onCopy, onCheckLink, checkingLink, onAddReference, onAddProject, onCollectMedia }: Props) {
   const compare=useImageCompare();
   const [selectedPreview, setSelectedPreview] = useState(0);
   const [lightbox, setLightbox] = useState(false);
-  const [epicOpen, setEpicOpen] = useState(false);
+  const [epicOpen, setEpicOpen] = useState<"quick" | "project" | null>(null);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
   const [referenceMenu, setReferenceMenu] = useState<{ left: number; top: number } | null>(null);
   const referenceButton = useRef<HTMLButtonElement>(null);
@@ -44,7 +47,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
     const cover = previews.findIndex(item => item.type === "image" ? item.image.isCover : item.type === "media" ? item.media.isCover : false);
     setSelectedPreview(cover >= 0 ? cover : 0);
     setLightbox(false);
-    setEpicOpen(false);
+    setEpicOpen(null);
     setReferenceMenu(null);
     setDetailLanguage(contentLanguage);
   }, [asset?.id]);
@@ -59,6 +62,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
   const shownDescription = preferred?.description.trim() || alternate?.description || "";
   const shownTags = preferred?.tags.length ? preferred.tags : alternate?.tags || [];
   const shownLicense = preferred?.license.trim() || alternate?.license || "";
+  const pendingFields = asset ? missingTranslationFields(asset.localizations) : [];
   return <aside className="detail-panel">
     {loading || !asset ? <div className="detail-loading">正在加载详情…</div> : <>
       <div className="detail-hero">
@@ -67,6 +71,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
       </div>
       {previews.length > 1 && <div className="thumb-strip">{previews.map((item, index) => <button key={item.type === "image" ? item.image.id : `${item.type}-${item.media.id}`} className={index === selectedPreview ? "active" : ""} onClick={() => setSelectedPreview(index)}>{item.type === "image" ? <ImagePreview imageId={item.image.id} alt={item.image.originalName} className="detail-thumb" /> : item.type === "library" ? <LibraryMediaPreview media={item.media} className="detail-thumb" /> : <MediaPreview media={item.media} className="detail-thumb" />}</button>)}</div>}
       <div className="detail-content">
+        {!!pendingFields.length && <section className="translation-pending-status"><strong>双语待补齐</strong><p>{pendingFields.join("、")}待补译；缺失内容暂用另一语言显示。</p>{onTranslate && <button className="secondary-button" disabled={translating} onClick={() => onTranslate(asset.id)}>{translating ? "正在补译…" : "补齐缺失双语"}</button>}</section>}
         <div className="detail-language-row"><div className="language-tabs compact"><button className={detailLanguage === "zh-CN" ? "active" : ""} onClick={() => setDetailLanguage("zh-CN")}>中文</button><button className={detailLanguage === "en" ? "active" : ""} onClick={() => setDetailLanguage("en")}>English</button></div>{!preferred?.name.trim() && <span>{detailLanguage === "zh-CN" ? "暂无中文，当前显示英文" : "No English version · 当前显示中文"}</span>}</div>
         <div className="detail-title-row"><div><span className="eyebrow">{asset.categoryName || "未分类"}</span><h2>{shownName}</h2></div><button className={`icon-button ${asset.favorite ? "favorite-active" : ""}`} onClick={onFavorite}><Heart size={19} fill={asset.favorite ? "currentColor" : "none"} /></button></div>
         {shownDescription && <p className="description"><LinkifiedText text={shownDescription} onOpen={onOpenExternal} /></p>}
@@ -82,7 +87,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         {asset.sourceUrl && <button className="source-link" onClick={onSourceOpen}>查看素材来源 <ExternalLink size={13} /></button>}
       </div>
       <div className="detail-actions">
-        {(asset.fabListingId || /^https?:\/\/(?:www\.)?fab\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?listings\/[0-9a-f-]{36}(?:[/?#]|$)/i.test(asset.sourceUrl)) && <button className="secondary-button epic-detail-action" onClick={() => setEpicOpen(true)}><ExternalLink size={17}/>通过 Epic 添加到 UE 工程</button>}
+        {(asset.fabListingId || /^https?:\/\/(?:www\.)?fab\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?listings\/[0-9a-f-]{36}(?:[/?#]|$)/i.test(asset.sourceUrl)) && <><button className="secondary-button epic-detail-action" onClick={() => setEpicOpen("quick")}><ExternalLink size={17}/>快速定位 Fab 商品</button><button className="secondary-button epic-detail-action" onClick={() => setEpicOpen("project")}><ExternalLink size={17}/>通过 Epic 添加到 UE 工程</button></>}
         {compare&&currentPreview?.type==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"asset",id:currentPreview.image.id,title:currentPreview.image.originalName})}>加入 A/B 对比</button>}
         {compare&&currentPreview?.type==="library"&&currentPreview.media.kind==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"media",id:currentPreview.media.primaryFileId,title:currentPreview.media.name})}>加入 A/B 对比</button>}
         <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
@@ -95,7 +100,7 @@ export function DetailPanel({ onAi, asset, contentLanguage, loading, onClose, on
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>
       </div>
       {lightbox && <MediaViewer items={previews} initialIndex={selectedPreview} title={shownName} onClose={() => setLightbox(false)} />}
-      {epicOpen && createPortal(<EpicFabDialog assetId={asset.id} title={shownName} productName={asset.localizations.en?.name.trim() || shownName} onClose={() => setEpicOpen(false)}/>, document.body)}
+      {epicOpen && createPortal(<EpicFabDialog mode={epicOpen} assetId={asset.id} title={shownName} productName={asset.localizations.en?.name.trim() || shownName} onClose={() => setEpicOpen(null)}/>, document.body)}
       {referenceMenu && onAddReference && createPortal(<><button className="popover-dismiss-layer" aria-label="关闭菜单" onClick={() => setReferenceMenu(null)} /><div className="reference-portal-menu" style={referenceMenu}>{currentPreview?.type === "image" && <button onClick={() => { onAddReference([currentPreview.image.id]); setReferenceMenu(null); }}>加入当前图片</button>}<button onClick={() => { onAddReference(asset.images.map(image => image.id)); setReferenceMenu(null); }}>加入全部预览图</button></div></>, document.body)}
     </>}
   </aside>;
