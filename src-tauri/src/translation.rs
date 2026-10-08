@@ -453,6 +453,10 @@ fn push_plain_line(line: &str, parts: &mut Vec<TranslationPart>, sources: &mut V
     if line.is_empty() {
         return;
     }
+    if !line.chars().any(char::is_alphabetic) {
+        parts.push(TranslationPart::Literal(line.into()));
+        return;
+    }
     let Some(content_start) = line.find(|value: char| !value.is_whitespace()) else {
         parts.push(TranslationPart::Literal(line.into()));
         return;
@@ -496,22 +500,6 @@ fn isolated_translation_parts(
     Ok((parts, sources))
 }
 
-fn normalized_provider_items(items: Vec<String>, expected: usize) -> Vec<String> {
-    if items.len() == expected {
-        return items;
-    }
-    let expanded = items
-        .iter()
-        .flat_map(|item| item.split('\n'))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if expanded.len() == expected {
-        expanded
-    } else {
-        items
-    }
-}
-
 async fn translate_isolated_sources(
     client: &Client,
     session: &crate::translation_service::TranslationSession<'_>,
@@ -539,26 +527,17 @@ async fn translate_isolated_sources(
         initial_batches.push(current);
     }
 
-    let mut pending = initial_batches;
     let mut translated = vec![None; sources.len()];
-    while let Some(mut batch) = pending.pop() {
+    for batch in initial_batches {
         let query = batch
             .iter()
             .map(|index| sources[*index].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let values =
-            normalized_provider_items(session.items(client, &query, from, to).await?, batch.len());
-        if values.len() == batch.len() {
-            for (index, value) in batch.into_iter().zip(values) {
-                translated[index] = Some(value);
-            }
-        } else if batch.len() > 1 {
-            let right = batch.split_off(batch.len() / 2);
-            pending.push(right);
-            pending.push(batch);
-        } else {
-            translated[batch[0]] = Some(values.join("\n"));
+        // The shared session validates, repairs and caches fragment boundaries.
+        let values = session.items(client, &query, from, to).await?;
+        for (index, value) in batch.into_iter().zip(values) {
+            translated[index] = Some(value);
         }
     }
 
@@ -984,11 +963,19 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_provider_items_that_return_multiple_lines_as_one_item() {
-        assert_eq!(
-            normalized_provider_items(vec!["第一段\n第二段".into()], 2),
-            vec!["第一段", "第二段"]
+    fn punctuation_between_protected_terms_is_kept_locally() {
+        let terms = vec![
+            term("Nanite", "Nanite", "preserve", "builtin"),
+            term("Lumen", "Lumen", "preserve", "builtin"),
+        ];
+        let source = "Nanite / Lumen: UE 5.5 (2026)\n- 100% ✅";
+        let (masked, tokens, _) = protect_text(source, &terms, "description");
+        let (parts, sources) = isolated_translation_parts(&masked, &tokens).unwrap();
+        assert!(
+            sources.is_empty(),
+            "do not ask the provider to translate punctuation"
         );
+        assert_eq!(assemble_isolated_translation(&parts, &[]), source);
     }
 
     #[test]

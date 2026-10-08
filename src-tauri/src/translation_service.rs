@@ -15,6 +15,7 @@ const DEEPSEEK_URL: &str = "https://api.deepseek.com/chat/completions";
 pub(crate) const MODEL: &str = "deepseek-flash";
 const PROMPT_VERSION: &str = "dcc-translation-v1";
 const MAX_OUTPUT: u64 = 4096;
+const MAX_RESPONSE_SPLITS: usize = 4;
 
 #[derive(Debug)]
 pub(crate) struct CreativeReply {
@@ -100,6 +101,7 @@ enum FailureKind {
     Rate,
     Temporary,
     Invalid,
+    Output,
     Budget,
 }
 #[derive(Clone, Debug)]
@@ -562,6 +564,75 @@ impl<'a> TranslationSession<'a> {
             }
         }
     }
+    async fn request_items(
+        &self,
+        client: &Client,
+        provider: &str,
+        query: &str,
+        from: &str,
+        to: &str,
+        month: &str,
+    ) -> Result<Vec<String>, Failure> {
+        let reserved = if provider == "deepseek" {
+            deepseek_body(query, from, to).to_string().len() as u64 + 512 + MAX_OUTPUT
+        } else {
+            query.chars().count() as u64
+        };
+        let limit = if provider == "deepseek" {
+            self.policy.deepseek_monthly_limit
+        } else {
+            0
+        };
+        for attempt in 0..2 {
+            self.service.reserve(provider, reserved, limit, month)?;
+            match self.service.send(client, provider, query, from, to).await {
+                Ok(reply) => {
+                    self.service
+                        .settle(provider, reserved, reply.used, month)
+                        .map_err(|message| Failure::new(FailureKind::Invalid, message))?;
+                    let expected = query.split('\n').count();
+                    let translated = if reply.values.len() == expected {
+                        reply.values
+                    } else {
+                        reply
+                            .values
+                            .into_iter()
+                            .flat_map(|v| v.split('\n').map(str::to_string).collect::<Vec<_>>())
+                            .collect()
+                    };
+                    if translated.len() != expected
+                        || translated.iter().any(|v| v.trim().is_empty())
+                    {
+                        return Err(Failure::new(
+                            FailureKind::Output,
+                            "译文数量不匹配或包含空译文，未保存缓存",
+                        ));
+                    }
+                    return Ok(translated);
+                }
+                Err(error) => {
+                    if let Some(used) = error.used {
+                        self.service
+                            .settle(provider, reserved, used, month)
+                            .map_err(|message| Failure::new(FailureKind::Invalid, message))?;
+                    } else {
+                        self.note(
+                            "部分请求未返回用量，已保留保守预留值，可在用量说明中查看".into(),
+                        );
+                    }
+                    if attempt == 0
+                        && provider == "deepseek"
+                        && matches!(error.kind, FailureKind::Rate | FailureKind::Temporary)
+                    {
+                        tokio::time::sleep(Duration::from_millis(750)).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("both attempts return or retry")
+    }
     pub async fn items(
         &self,
         client: &Client,
@@ -572,7 +643,7 @@ impl<'a> TranslationSession<'a> {
         let sources: Vec<&str> = text.split('\n').collect();
         let mut errors = Vec::new();
         let month = month();
-        for provider in &self.policy.provider_order {
+        'providers: for provider in &self.policy.provider_order {
             if !self.service.configured(provider) {
                 continue;
             }
@@ -622,102 +693,79 @@ impl<'a> TranslationSession<'a> {
                     }
                     continue;
                 }
-                let query = pending.join("\n");
-                let body = deepseek_body(&query, from, to);
-                let reserved = if provider == "deepseek" {
-                    body.to_string().len() as u64 + 512 + MAX_OUTPUT
-                } else {
-                    query.chars().count() as u64
-                };
-                let limit = if provider == "deepseek" {
-                    self.policy.deepseek_monthly_limit
-                } else {
-                    0
-                };
-                let mut result = None;
-                for attempt in 0..2 {
-                    self.service
-                        .reserve(provider, reserved, limit, &month)
-                        .map_err(|e| e.message)?;
-                    match self.service.send(client, provider, &query, from, to).await {
-                        Ok(reply) => {
-                            self.service
-                                .settle(provider, reserved, reply.used, &month)?;
-                            result = Some(Ok(reply.values));
-                            break;
+                let mut batches = vec![pending];
+                let mut splits = 0;
+                while let Some(mut batch) = batches.pop() {
+                    match self
+                        .request_items(client, provider, &batch.join("\n"), from, to, &month)
+                        .await
+                    {
+                        Ok(translated) => {
+                            for (source, value) in batch.into_iter().zip(translated) {
+                                if self.policy.cache_enabled {
+                                    self.service.save_cached(
+                                        &cache_key(provider, from, to, source),
+                                        &value,
+                                    )?;
+                                }
+                                values.insert(source.into(), value);
+                            }
+                        }
+                        Err(error)
+                            if error.kind == FailureKind::Output
+                                && batch.len() > 1
+                                && splits < MAX_RESPONSE_SPLITS =>
+                        {
+                            // Never guess how a malformed array maps back to fields.
+                            // Retry smaller inputs, bounded by this cap and the shared budget.
+                            splits += 1;
+                            let right = batch.split_off(batch.len() / 2);
+                            batches.push(right);
+                            batches.push(batch);
+                            self.note(
+                                "翻译返回的分段不完整，已缩小分段自动补译；修复有次数和额度上限"
+                                    .into(),
+                            );
                         }
                         Err(error) => {
-                            if let Some(used) = error.used {
-                                self.service.settle(provider, reserved, used, &month)?;
-                            } else {
-                                self.note(
-                                    "部分请求未返回用量，已保留保守预留值，可在用量说明中查看"
-                                        .into(),
-                                );
-                            }
-                            if attempt == 0
-                                && provider == "deepseek"
-                                && matches!(error.kind, FailureKind::Rate | FailureKind::Temporary)
-                            {
-                                tokio::time::sleep(Duration::from_millis(750)).await;
-                                continue;
-                            }
-                            result = Some(Err(error));
-                            break;
-                        }
-                    }
-                }
-                match result.ok_or("翻译服务未返回结果")? {
-                    Ok(translated) => {
-                        let translated = if translated.len() == pending.len() {
-                            translated
-                        } else {
-                            translated
-                                .into_iter()
-                                .flat_map(|v| v.split('\n').map(str::to_string).collect::<Vec<_>>())
-                                .collect()
-                        };
-                        if translated.len() != pending.len()
-                            || translated.iter().any(|v| v.trim().is_empty())
-                        {
-                            return Err("译文数量不匹配或包含空译文，未保存缓存，请重试".into());
-                        }
-                        for (source, value) in pending.into_iter().zip(translated) {
-                            if self.policy.cache_enabled {
+                            if error.kind != FailureKind::Output {
+                                let seconds = if error.kind == FailureKind::Quota {
+                                    1800
+                                } else {
+                                    60
+                                };
                                 self.service
-                                    .save_cached(&cache_key(provider, from, to, source), &value)?;
+                                    .blocked
+                                    .lock()
+                                    .map_err(|_| "翻译服务锁已损坏")?
+                                    .insert(
+                                        provider.clone(),
+                                        Blocked {
+                                            until: Instant::now() + Duration::from_secs(seconds),
+                                            error: error.clone(),
+                                        },
+                                    );
                             }
-                            values.insert(source.into(), value);
+                            if matches!(
+                                error.kind,
+                                FailureKind::Auth | FailureKind::Invalid | FailureKind::Budget
+                            ) {
+                                return Err(error.message);
+                            }
+                            let message = if error.kind == FailureKind::Output
+                                && batch.len() > 1
+                                && splits == MAX_RESPONSE_SPLITS
+                            {
+                                format!("{}；已达到本次自动分段修复上限，请手动重试", error.message)
+                            } else {
+                                error.message
+                            };
+                            errors.push(message);
+                            if !self.policy.auto_fallback {
+                                break 'providers;
+                            }
+                            continue 'providers;
                         }
-                    }
-                    Err(error) => {
-                        let seconds = if error.kind == FailureKind::Quota {
-                            1800
-                        } else {
-                            60
-                        };
-                        self.service
-                            .blocked
-                            .lock()
-                            .map_err(|_| "翻译服务锁已损坏")?
-                            .insert(
-                                provider.clone(),
-                                Blocked {
-                                    until: Instant::now() + Duration::from_secs(seconds),
-                                    error: error.clone(),
-                                },
-                            );
-                        if matches!(
-                            error.kind,
-                            FailureKind::Auth | FailureKind::Invalid | FailureKind::Budget
-                        ) {
-                            return Err(error.message);
-                        }
-                        errors.push(error.message);
-                        if !self.policy.auto_fallback {
-                            break;
-                        }
-                        continue;
                     }
                 }
             }
@@ -740,7 +788,7 @@ impl<'a> TranslationSession<'a> {
         Err(if errors.is_empty() {
             "尚未配置可用在线翻译服务，请在设置中配置 DeepSeek 或百度".into()
         } else {
-            format!("在线翻译已暂停：{}；其余字段保留待补译", errors.join("；"))
+            format!("在线翻译未完成：{}；缺失字段保留待补译", errors.join("；"))
         })
     }
 }
@@ -791,16 +839,20 @@ fn parse_deepseek(value: &serde_json::Value, expected: usize) -> Result<Reply, F
         .pointer("/usage/total_tokens")
         .and_then(|v| v.as_u64());
     let fail = |message: &str| Failure {
-        kind: FailureKind::Invalid,
+        kind: FailureKind::Output,
         message: message.into(),
         used,
     };
-    if value
+    let finish_reason = value
         .pointer("/choices/0/finish_reason")
-        .and_then(|v| v.as_str())
-        != Some("stop")
-    {
-        return Err(fail("DeepSeek 译文未完整生成，未应用或缓存"));
+        .and_then(|v| v.as_str());
+    if finish_reason != Some("stop") {
+        let mut error = fail("DeepSeek 译文未完整生成，未应用或缓存");
+        if finish_reason != Some("length") {
+            // Do not work around filtering or an unknown stop reason by splitting it.
+            error.kind = FailureKind::Invalid;
+        }
+        return Err(error);
     }
     let content = value
         .pointer("/choices/0/message/content")
@@ -817,13 +869,24 @@ fn parse_deepseek(value: &serde_json::Value, expected: usize) -> Result<Reply, F
         .map(|v| v.as_str().map(str::to_string))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| fail("DeepSeek 译文类型无效"))?;
-    if values.len() != expected || values.iter().any(|v| v.trim().is_empty()) {
-        return Err(fail("DeepSeek 译文数量不匹配或为空，未应用或缓存"));
+    if values.len() != expected {
+        return Err(fail(&format!(
+            "DeepSeek 译文数量不匹配（应返回 {expected} 段，实际 {} 段），未应用或缓存",
+            values.len()
+        )));
     }
-    Ok(Reply {
-        values,
-        used: used.ok_or_else(|| fail("DeepSeek 未返回 Token 用量，已保留保守预留值"))?,
-    })
+    if let Some(index) = values.iter().position(|v| v.trim().is_empty()) {
+        return Err(fail(&format!(
+            "DeepSeek 第 {} 段译文为空，未应用或缓存",
+            index + 1
+        )));
+    }
+    let used = used.ok_or_else(|| Failure {
+        kind: FailureKind::Invalid,
+        message: "DeepSeek 未返回 Token 用量，已保留保守预留值".into(),
+        used: None,
+    })?;
+    Ok(Reply { values, used })
 }
 async fn request_deepseek(
     client: &Client,
@@ -862,7 +925,7 @@ async fn request_deepseek(
         .json::<serde_json::Value>()
         .await
         .map_err(|_| Failure {
-            kind: FailureKind::Invalid,
+            kind: FailureKind::Output,
             message: "DeepSeek 响应格式无效".into(),
             used: None,
         })?;
@@ -891,6 +954,215 @@ mod tests {
             deepseek_body("hello", "en", "zh")["thinking"]["type"],
             "disabled"
         );
+    }
+    #[test]
+    fn malformed_deepseek_batch_recovers_without_poisoning_other_fields() {
+        for fault in ["merged", "empty", "truncated", "json"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut service = TranslationService::open(&temp.path().join("cache.sqlite")).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let called = calls.clone();
+            service.mock = Some(Box::new(move |provider, text| {
+                assert_eq!(provider, "deepseek");
+                called.fetch_add(1, Ordering::SeqCst);
+                let translated = match text {
+                    "Bridge environment" => "桥梁环境",
+                    "Nature details" => "自然细节",
+                    "Outdoor" => "户外",
+                    _ => "桥梁环境与自然细节",
+                };
+                let expected = text.split('\n').count();
+                let mut reply = serde_json::json!({"usage":{"total_tokens":11},"choices":[{
+                    "finish_reason":"stop","message":{"content":
+                        serde_json::json!({"translations":[translated]}).to_string()}
+                }]});
+                if expected > 1 {
+                    match fault {
+                        "empty" => {
+                            reply["choices"][0]["message"]["content"] =
+                                serde_json::json!({"translations":["", "自然细节"]})
+                                    .to_string()
+                                    .into()
+                        }
+                        "truncated" => reply["choices"][0]["finish_reason"] = "length".into(),
+                        "json" => {
+                            reply["choices"][0]["message"]["content"] = "{\"translations\":[".into()
+                        }
+                        _ => {}
+                    }
+                }
+                parse_deepseek(&reply, expected)
+            }));
+            let session = TranslationSession::new(&service, Default::default());
+            tauri::async_runtime::block_on(async {
+                for _ in 0..2 {
+                    assert_eq!(
+                        session
+                            .items(
+                                &Client::new(),
+                                "Bridge environment\nNature details",
+                                "en",
+                                "zh"
+                            )
+                            .await
+                            .unwrap(),
+                        ["桥梁环境", "自然细节"]
+                    );
+                }
+                assert_eq!(
+                    session
+                        .items(&Client::new(), "Outdoor", "en", "zh")
+                        .await
+                        .unwrap(),
+                    ["户外"]
+                );
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert_eq!(service.usage().unwrap().deepseek_tokens, 44);
+            assert_eq!(service.usage().unwrap().cache_entries, 3);
+            drop(session);
+            let mut state = crate::state::test_state(&temp.path().join("library"));
+            state.translation_service = service;
+            let preview = tauri::async_runtime::block_on(translation::translate(
+            &state,
+            serde_json::from_value(serde_json::json!({
+                "sourceLanguage":"en","targetLanguage":"zh-CN","fields":{
+                    "name":"Bridge environment", "description":"Bridge environment\nNature details",
+                    "tags":["Outdoor", "Nature details"], "license":""
+                }
+            })).unwrap(),
+            &[],
+        )).unwrap();
+            assert!(
+                preview.failed_fields.is_empty(),
+                "{fault}: {:?}",
+                preview.warnings
+            );
+            assert_eq!(preview.fields.description, "桥梁环境\n自然细节");
+            assert_eq!(preview.fields.tags, ["户外", "自然细节"]);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                4,
+                "cached fields must not request again"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_response_repair_is_bounded_and_does_not_block_the_next_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TranslationService::open(&temp.path().join("cache.sqlite")).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        service.mock = Some(Box::new(move |provider, text| {
+            assert_eq!(provider, "deepseek");
+            called.fetch_add(1, Ordering::SeqCst);
+            parse_deepseek(
+                &serde_json::json!({"usage":{"total_tokens":7},"choices":[{
+                    "finish_reason":"stop","message":{"content":
+                        serde_json::json!({"translations": if text == "Outdoor" { vec!["户外"] } else { vec![""] }}).to_string()}
+                }]}),
+                text.split('\n').count(),
+            )
+        }));
+        let session = TranslationSession::new(
+            &service,
+            TranslationPreferences {
+                auto_fallback: false,
+                ..Default::default()
+            },
+        );
+        let source = (0..64)
+            .map(|i| format!("fragment {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error =
+            tauri::async_runtime::block_on(session.items(&Client::new(), &source, "en", "zh"))
+                .unwrap_err();
+        assert!(error.contains("译文数量不匹配"));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_RESPONSE_SPLITS + 1);
+        assert_eq!(service.usage().unwrap().cache_entries, 0);
+        assert_eq!(
+            tauri::async_runtime::block_on(session.items(&Client::new(), "Outdoor", "en", "zh"))
+                .unwrap(),
+            ["户外"]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_RESPONSE_SPLITS + 2);
+        assert_eq!(
+            service.usage().unwrap().deepseek_tokens,
+            (MAX_RESPONSE_SPLITS as u64 + 2) * 7
+        );
+    }
+
+    #[test]
+    fn response_repair_stops_at_the_shared_budget_without_using_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TranslationService::open(&temp.path().join("cache.sqlite")).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        service.mock = Some(Box::new(move |provider, _| {
+            assert_eq!(provider, "deepseek");
+            assert_eq!(
+                called.fetch_add(1, Ordering::SeqCst),
+                0,
+                "budget must stop repair and fallback"
+            );
+            Err(Failure {
+                kind: FailureKind::Output,
+                message: "分段不完整".into(),
+                used: Some(6000),
+            })
+        }));
+        let session = TranslationSession::new(
+            &service,
+            TranslationPreferences {
+                deepseek_monthly_limit: 6000,
+                ..Default::default()
+            },
+        );
+        assert!(tauri::async_runtime::block_on(session.items(
+            &Client::new(),
+            "one\ntwo",
+            "en",
+            "zh"
+        ))
+        .unwrap_err()
+        .contains("本机月度上限"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.usage().unwrap().deepseek_tokens, 6000);
+        assert_eq!(service.usage().unwrap().cache_entries, 0);
+    }
+
+    #[test]
+    fn combined_baidu_items_and_output_fallback_preserve_fragment_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TranslationService::open(&temp.path().join("cache.sqlite")).unwrap();
+        service.mock = Some(Box::new(|provider, text| {
+            if provider == "deepseek" {
+                Err(Failure {
+                    kind: FailureKind::Output,
+                    message: "空译文".into(),
+                    used: Some(10),
+                })
+            } else {
+                Ok(Reply {
+                    values: vec![text
+                        .split('\n')
+                        .map(|v| format!("译{v}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")],
+                    used: 10,
+                })
+            }
+        }));
+        let session = TranslationSession::new(&service, Default::default());
+        assert_eq!(
+            tauri::async_runtime::block_on(session.items(&Client::new(), "one\ntwo", "en", "zh"))
+                .unwrap(),
+            ["译one", "译two"]
+        );
+        assert!(session.notes().iter().any(|note| note.contains("百度翻译")));
+        assert_eq!(service.usage().unwrap().cache_entries, 2);
     }
     #[test]
     fn budget_reservation_is_persistent_and_month_scoped() {
