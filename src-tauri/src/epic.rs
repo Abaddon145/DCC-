@@ -112,6 +112,47 @@ fn epic_listing_url(listing_id: Uuid) -> String {
     format!("com.epicgames.launcher://fab/plugins/egl/listings/{listing_id}")
 }
 
+fn launcher_running_from_tasklist(output: &str) -> bool {
+    output
+        .to_ascii_lowercase()
+        .contains("epicgameslauncher.exe")
+}
+
+#[cfg(windows)]
+fn is_launcher_running() -> Result<bool, String> {
+    use std::os::windows::process::CommandExt;
+    let output = std::process::Command::new("tasklist.exe")
+        .args([
+            "/FI",
+            "IMAGENAME eq EpicGamesLauncher.exe",
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|error| format!("无法检查 Epic Launcher 运行状态：{error}"))?;
+    if !output.status.success() {
+        return Err("Epic Launcher 运行状态检查失败".into());
+    }
+    Ok(launcher_running_from_tasklist(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn request_epic_navigation_when_running(
+    listing_id: Uuid,
+    recover: bool,
+    running: Result<bool, String>,
+    dispatch: impl FnMut(&str) -> Result<(), String>,
+    handoff: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    if matches!(running, Ok(false)) {
+        return Err("Epic Games Launcher 未运行，请先启动 Epic 并登录后再定位商品".into());
+    }
+    request_epic_navigation(listing_id, recover, dispatch, handoff)
+}
+
 fn request_epic_navigation(
     listing_id: Uuid,
     recover: bool,
@@ -410,9 +451,14 @@ pub async fn open_fab_in_epic(
             registered_listing(connection, &asset_id)
         })?;
         check_epic_protocol()?;
-        let url = request_epic_navigation(
+        #[cfg(windows)]
+        let running = is_launcher_running();
+        #[cfg(not(windows))]
+        let running = Ok(true); // The protocol check rejects unsupported platforms first.
+        let url = request_epic_navigation_when_running(
             listing_id,
             recover.unwrap_or(false),
+            running,
             |url| in_library(&state, &expected_library_id, |connection, _| {
                 if registered_listing(connection, &asset_id)? != listing_id {
                     return Err("素材的 Fab 来源已改变，请重新打开 Epic 添加入口".into());
@@ -445,6 +491,90 @@ pub async fn open_fab_in_epic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_csv_matches_target() {
+        assert!(launcher_running_from_tasklist(
+            "\"EpicGamesLauncher.exe\",\"1456\",\"Console\",\"1\",\"125,000 K\""
+        ));
+    }
+
+    #[test]
+    fn launcher_empty_output_is_not_running() {
+        assert!(!launcher_running_from_tasklist(""));
+    }
+
+    #[test]
+    fn launcher_localized_no_tasks_is_not_running() {
+        assert!(!launcher_running_from_tasklist(
+            "信息: 没有运行的任务匹配指定标准。"
+        ));
+    }
+
+    #[test]
+    fn launcher_process_name_is_case_insensitive() {
+        assert!(launcher_running_from_tasklist(
+            "\"EPICGAMESLAUNCHER.EXE\",\"123\""
+        ));
+    }
+
+    #[test]
+    fn launcher_web_helper_is_not_target() {
+        assert!(!launcher_running_from_tasklist(
+            "\"EpicWebHelper.exe\",\"123\""
+        ));
+    }
+
+    #[test]
+    fn launcher_not_running_prevents_both_routes() {
+        for recover in [false, true] {
+            let mut dispatched = Vec::new();
+            let error = request_epic_navigation_when_running(
+                Uuid::new_v4(),
+                recover,
+                Ok(false),
+                |url| {
+                    dispatched.push(url.to_string());
+                    Ok(())
+                },
+                || panic!("must not hand off when Epic is closed"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Epic Games Launcher 未运行，请先启动 Epic 并登录后再定位商品"
+            );
+            assert!(dispatched.is_empty());
+        }
+    }
+
+    #[test]
+    fn launcher_detection_failure_preserves_navigation() {
+        let listing_id = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        for recover in [false, true] {
+            let trace = std::cell::RefCell::new(Vec::new());
+            request_epic_navigation_when_running(
+                listing_id,
+                recover,
+                Err("tasklist blocked".into()),
+                |url| {
+                    trace.borrow_mut().push(url.to_string());
+                    Ok(())
+                },
+                || {
+                    trace.borrow_mut().push("handoff".into());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let expected = if recover {
+                vec!["com.epicgames.launcher://ue/library", "handoff", "com.epicgames.launcher://fab/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e"]
+            } else {
+                vec!["com.epicgames.launcher://fab/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e"]
+            };
+            assert_eq!(*trace.borrow(), expected);
+        }
+    }
 
     #[test]
     fn repeated_epic_requests_leave_fab_before_each_product_and_wait_for_handoff() {
