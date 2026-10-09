@@ -36,6 +36,7 @@ mod state;
 mod tasks;
 mod translation;
 mod translation_service;
+mod upgrade_backup;
 
 use commands::*;
 use state::AppState;
@@ -67,6 +68,7 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "open_external_url"
             | "set_knowledge_editing"
             | "finish_knowledge_close"
+            | "get_upgrade_backup_status"
     ) || (backup
         && command != "list_reference_boards"
         && (command.starts_with("get_")
@@ -228,6 +230,7 @@ pub fn run() {
                     "get_library_locations"
                         | "get_personalization_settings"
                         | "get_automatic_backup_policy"
+                        | "get_upgrade_backup_status"
                         | "get_interrupted_restore"
                         | "recover_interrupted_restore"
                         | "export_diagnostics"
@@ -336,6 +339,8 @@ pub fn run() {
                     reliability::delete_workflow_template,
                     automatic_backup::get_automatic_backup_policy,
                     automatic_backup::save_automatic_backup_policy,
+                    upgrade_backup::get_upgrade_backup_status,
+                    upgrade_backup::save_upgrade_backup_keep,
                     automatic_backup::get_automatic_backup_due,
                     automatic_backup::finish_automatic_backup,
                     tasks::get_task_warning,
@@ -519,6 +524,22 @@ mod tests {
         assert!(!maintenance_command_allowed("search_assets", false));
         assert!(maintenance_command_allowed("list_library_tasks", false));
         assert!(!maintenance_command_allowed("list_reference_boards", true));
+        assert!(maintenance_command_allowed(
+            "get_upgrade_backup_status",
+            false
+        ));
+        assert!(maintenance_command_allowed(
+            "get_upgrade_backup_status",
+            true
+        ));
+        assert!(!maintenance_command_allowed(
+            "save_upgrade_backup_keep",
+            false
+        ));
+        assert!(!maintenance_command_allowed(
+            "save_upgrade_backup_keep",
+            true
+        ));
     }
 
     #[test]

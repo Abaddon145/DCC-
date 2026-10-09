@@ -338,6 +338,14 @@ export interface FabMetadata {
   formatWarning?: string | null;
 }
 
+export interface UpgradeBackupStatus {
+  keep: number;
+  lastAttemptAt: string | null;
+  result: string | null;
+  message: string | null;
+  backupDirectory: string;
+}
+
 export interface FabDuplicateMatch {
   assetId: string;
   assetName: string;

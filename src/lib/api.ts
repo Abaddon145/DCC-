@@ -97,6 +97,8 @@ export const api = {
   exportBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"backup",request:{path}})),
   restoreBackup: (path: string) => withKnowledgeBarrier(() => runLibraryTask<void>({kind:"restore",request:{path}})),
   getLibraryLocations: () => invoke<LibraryLocationState>("get_library_locations"),
+  getUpgradeBackupStatus: (libraryId: string) => invoke<import("../types").UpgradeBackupStatus>("get_upgrade_backup_status", { libraryId }),
+  saveUpgradeBackupKeep: (libraryId: string, keep: number) => invoke<import("../types").UpgradeBackupStatus>("save_upgrade_backup_keep", { libraryId, keep }),
   changeLibrary: (request: StorageChangeRequest) => withKnowledgeBarrier(() => request.mode === "migrate" ? runLibraryTask<LibraryLocationState>({kind:"migration",request}) : invoke<LibraryLocationState>("change_library", { request })),
   forgetRecentLibrary: (path: string) => invoke<void>("forget_recent_library", { path }),
   readClipboard: () => invoke<string>("read_clipboard_text"),
