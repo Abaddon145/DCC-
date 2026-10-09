@@ -194,6 +194,98 @@ impl TranslationService {
             b.clear();
         }
     }
+    pub(crate) fn estimate_queries(
+        &self,
+        queries: &[crate::models::TranslationQuery],
+        policy: &TranslationPreferences,
+    ) -> Result<crate::models::TranslationCostEstimate, String> {
+        let usage = self.usage()?;
+        policy.validate()?;
+        let mut result = crate::models::TranslationCostEstimate {
+            month: usage.month,
+            month_used: usage.deepseek_tokens,
+            month_limit: policy.deepseek_monthly_limit,
+            ..Default::default()
+        };
+        let mut warm = std::collections::HashSet::new();
+        let configured = policy
+            .provider_order
+            .iter()
+            .filter(|p| self.configured(p))
+            .collect::<Vec<_>>();
+        for query in queries {
+            let sources = query.text.split('\n').collect::<Vec<_>>();
+            let mut available = false;
+            for &provider in &configured {
+                let mut pending = Vec::new();
+                let mut hits = 0;
+                for source in &sources {
+                    let key = cache_key(provider, &query.from, &query.to, source);
+                    if policy.cache_enabled && self.cached(&key)?.is_some() {
+                        hits += 1;
+                    } else if policy.cache_enabled && warm.contains(&key) {
+                        // A successful prior request can populate this fragment; disclosed below.
+                    } else if !pending.contains(source) {
+                        pending.push(*source);
+                    }
+                }
+                if !pending.is_empty() {
+                    let blocked = self
+                        .blocked
+                        .lock()
+                        .map_err(|_| "翻译服务锁已损坏")?
+                        .get(provider)
+                        .filter(|b| b.until > Instant::now())
+                        .map(|b| b.error.clone());
+                    if let Some(error) = blocked {
+                        result
+                            .warnings
+                            .push(format!("{provider} 当前暂停：{}", error.message));
+                        if !policy.auto_fallback
+                            || matches!(
+                                error.kind,
+                                FailureKind::Auth | FailureKind::Invalid | FailureKind::Budget
+                            )
+                        {
+                            return Err(error.message);
+                        }
+                        continue;
+                    }
+                    let text = pending.join("\n");
+                    result.online_requests += 1;
+                    result.characters += text.chars().count();
+                    if provider == "deepseek" {
+                        result.tokens_max = result.tokens_max.saturating_add(
+                            deepseek_body(&text, &query.from, &query.to)
+                                .to_string()
+                                .len() as u64
+                                + 512
+                                + MAX_OUTPUT,
+                        );
+                    } else {
+                        result.baidu_characters += text.chars().count();
+                    }
+                    if policy.cache_enabled {
+                        for source in pending {
+                            warm.insert(cache_key(provider, &query.from, &query.to, source));
+                        }
+                    }
+                }
+                result.cache_hits += hits;
+                available = true;
+                break;
+            }
+            if !available {
+                return Err("尚未配置可用在线翻译服务，无法预估；仍可仅保存原文".into());
+            }
+        }
+        result.would_exceed = result.tokens_max > 0
+            && result.month_used.saturating_add(result.tokens_max) > result.month_limit;
+        if result.online_requests > 0 {
+            result.warnings.push("区间为正常请求的保守预留，不是账单；重试、分段修复及备用服务可能追加用量。重复片段仅在前序请求成功且缓存启用时复用，跨批次暖缓存可能改变结果。".into());
+        }
+        Ok(result)
+    }
     pub fn usage(&self) -> Result<TranslationUsage, String> {
         let month = month();
         let db = self.db.lock().map_err(|_| "翻译缓存锁已损坏")?;
@@ -935,6 +1027,147 @@ async fn request_deepseek(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cost_query(text: &str) -> crate::models::TranslationQuery {
+        crate::models::TranslationQuery {
+            from: "en".into(),
+            to: "zh".into(),
+            text: text.into(),
+        }
+    }
+    #[test]
+    fn cost_all_cached_is_zero_and_usage_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), true);
+        let key = cache_key("deepseek", "en", "zh", "Quiet courtyard");
+        service.save_cached(&key, "安静庭院").unwrap();
+        let before = serde_json::to_value(service.usage().unwrap()).unwrap();
+        let result = service
+            .estimate_queries(&[cost_query("Quiet courtyard")], &Default::default())
+            .unwrap();
+        assert_eq!(result.tokens_max, 0);
+        assert_eq!(result.online_requests, 0);
+        assert_eq!(result.cache_hits, 1);
+        assert_eq!(
+            serde_json::to_value(service.usage().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(service.cached(&key).unwrap().as_deref(), Some("安静庭院"));
+    }
+    #[test]
+    fn cost_uses_request_reservation_and_rejects_over_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), true);
+        let result = service
+            .estimate_queries(
+                &[cost_query("one\ntwo")],
+                &TranslationPreferences {
+                    deepseek_monthly_limit: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.tokens_max,
+            deepseek_body("one\ntwo", "en", "zh").to_string().len() as u64 + 512 + MAX_OUTPUT
+        );
+        assert!(result.would_exceed);
+        assert_eq!(service.usage().unwrap().deepseek_tokens, 0);
+    }
+    #[test]
+    fn cost_unconfigured_and_disabled_make_no_online_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), false);
+        assert!(service
+            .estimate_queries(&[cost_query("one")], &Default::default())
+            .unwrap_err()
+            .contains("未配置"));
+        assert_eq!(
+            service
+                .estimate_queries(&[], &Default::default())
+                .unwrap()
+                .online_requests,
+            0
+        );
+        assert_eq!(service.usage().unwrap().deepseek_tokens, 0);
+    }
+    #[test]
+    fn cost_baidu_only_and_fully_cached_ignore_deepseek_existing_overage() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), true);
+        service
+            .reserve_for("deepseek", 999, 1000, &month(), true)
+            .unwrap();
+        let policy = TranslationPreferences {
+            deepseek_monthly_limit: 1,
+            provider_order: vec!["baidu".into(), "deepseek".into()],
+            ..Default::default()
+        };
+        let result = service
+            .estimate_queries(&[cost_query("one")], &policy)
+            .unwrap();
+        assert_eq!(result.tokens_max, 0);
+        assert!(!result.would_exceed);
+        assert_eq!(result.baidu_characters, 3);
+        assert_eq!(result.month_used, 999);
+        service
+            .save_cached(&cache_key("deepseek", "en", "zh", "one"), "一")
+            .unwrap();
+        let result = service
+            .estimate_queries(
+                &[cost_query("one")],
+                &TranslationPreferences {
+                    deepseek_monthly_limit: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!result.would_exceed);
+        assert_eq!(result.online_requests, 0);
+    }
+    #[test]
+    fn cost_cache_disabled_and_current_blocks_match_actual_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), true);
+        service
+            .save_cached(&cache_key("deepseek", "en", "zh", "one"), "一")
+            .unwrap();
+        let policy = TranslationPreferences {
+            cache_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            service
+                .estimate_queries(&[cost_query("one")], &policy)
+                .unwrap()
+                .online_requests,
+            1
+        );
+        service.blocked.lock().unwrap().insert(
+            "deepseek".into(),
+            Blocked {
+                until: Instant::now() + Duration::from_secs(60),
+                error: Failure::new(FailureKind::Auth, "凭据需修正"),
+            },
+        );
+        assert!(service
+            .estimate_queries(&[cost_query("one")], &policy)
+            .is_err());
+        service
+            .blocked
+            .lock()
+            .unwrap()
+            .get_mut("deepseek")
+            .unwrap()
+            .error
+            .kind = FailureKind::Quota;
+        let result = service
+            .estimate_queries(&[cost_query("one")], &policy)
+            .unwrap();
+        assert_eq!(result.baidu_characters, 3);
+        assert_eq!(result.tokens_max, 0);
+        assert!(!result.warnings.is_empty());
+    }
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,

@@ -9,7 +9,7 @@ export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
 export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection" | "selectAll" | "saveAsset" | "deleteSelected";
 export type ContentLanguage = "zh-CN" | "en";
-export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string }
+export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string; skipAutoTranslation?: boolean }
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
   | { kind: "ueAssets"; request: unknown }
@@ -394,6 +394,14 @@ export type TranslationProvider = "baidu" | "deepseek";
 export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
 export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
 export interface TranslationEstimate { characters: number; estimatedTokens: number }
+export interface FormTranslationCostInput { localizations: Record<string, LocalizedAssetText>; id?: string; sourceUrl: string; completeBilingual: boolean; autoTranslate?: boolean }
+export interface TranslationCostRequest { ids?: string[]; form?: FormTranslationCostInput }
+export interface TranslationCostRow { assetId: string | null; name: string; pendingFields: string[]; status: "ready" | "skipped" | "disabled"; reason: string }
+export interface TranslationCostEstimate {
+  pendingFieldCount: number; characters: number; cacheHits: number; tokensMin: number; tokensMax: number;
+  month: string; monthUsed: number; monthLimit: number; wouldExceed: boolean; onlineRequests: number;
+  baiduCharacters: number; rows: TranslationCostRow[]; warnings: string[];
+}
 export interface TranslationSettings { provider: TranslationProvider; configured: boolean; baiduConfigured?: boolean; deepseekConfigured?: boolean; preferences?: TranslationPreferences; usage?: TranslationUsage; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }
 export type TranslationTermMode = "translate" | "preserve";

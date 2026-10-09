@@ -119,6 +119,7 @@ export const api = {
   saveTranslationPreferences: (preferences: import("../types").TranslationPreferences) => invoke<void>("save_translation_preferences", { preferences }),
   clearTranslationCache: () => invoke<void>("clear_translation_cache"),
   estimateMissingTranslations: (ids: string[]) => invoke<import("../types").TranslationEstimate>("estimate_missing_translations", { ids }),
+  estimateTranslationCost: (request: import("../types").TranslationCostRequest, expectedLibraryId: string) => invoke<import("../types").TranslationCostEstimate>("estimate_translation_cost", { request, expectedLibraryId }),
   estimateTranslation: (request: TranslationRequest) => invoke<import("../types").TranslationEstimate>("estimate_translation", { request }),
   saveTranslationCredentials: (appId: string, secretKey: string) => invoke<void>("save_translation_credentials", { appId, secretKey }),
   deleteTranslationCredentials: () => invoke<void>("delete_translation_credentials"),

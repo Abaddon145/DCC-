@@ -423,6 +423,7 @@ pub fn run() {
                     save_translation_preferences,
                     clear_translation_cache,
                     estimate_translation,
+                    estimate_translation_cost,
                     estimate_missing_translations,
                     save_translation_credentials,
                     delete_translation_credentials,
