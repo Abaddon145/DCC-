@@ -811,6 +811,7 @@ pub async fn upsert_asset(
     expected_library_id: String,
     complete_bilingual: Option<bool>,
     auto_translate: Option<bool>,
+    format_warning: Option<String>,
 ) -> Result<AssetDetail, String> {
     save_single_asset_with_options(
         &state,
@@ -818,8 +819,23 @@ pub async fn upsert_asset(
         &expected_library_id,
         complete_bilingual.unwrap_or(false),
         auto_translate,
+        format_warning,
     )
     .await
+}
+
+fn append_fab_read_warnings(messages: &mut Vec<String>, metadata: &FabMetadata) -> bool {
+    let before = messages.len();
+    messages.extend(
+        [
+            metadata.image_warning.as_ref(),
+            metadata.format_warning.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .cloned(),
+    );
+    messages.len() > before
 }
 
 #[cfg(test)]
@@ -828,7 +844,7 @@ pub(crate) async fn save_single_asset(
     input: AssetInput,
     expected_library_id: &str,
 ) -> Result<AssetDetail, String> {
-    save_single_asset_with_options(state, input, expected_library_id, false, None).await
+    save_single_asset_with_options(state, input, expected_library_id, false, None, None).await
 }
 
 async fn save_single_asset_with_options(
@@ -837,6 +853,7 @@ async fn save_single_asset_with_options(
     expected_library_id: &str,
     complete_bilingual: bool,
     auto_translate: Option<bool>,
+    format_warning: Option<String>,
 ) -> Result<AssetDetail, String> {
     let library_id = expected_library_id.to_string();
     if state.active_library_id()? != library_id {
@@ -848,6 +865,15 @@ async fn save_single_asset_with_options(
         .ok()
         .map(|id| id.to_string());
     let is_fab_source = source_listing_id.is_some();
+    if let Some(warning) = format_warning.filter(|_| is_fab_source) {
+        if !warning.starts_with("该商品还包含非 UE 格式，已忽略：")
+            || warning.chars().count() > 1024
+            || warning.chars().any(char::is_control)
+        {
+            return Err("Fab 格式提示无效，请重新读取商品".into());
+        }
+        warnings.push(warning);
+    }
     let complete_bilingual = is_new || (complete_bilingual && is_fab_source);
     if let (Some(source_id), Some(supplied_id)) = (&source_listing_id, &input.fab_listing_id) {
         if uuid::Uuid::parse_str(supplied_id)
@@ -895,6 +921,7 @@ async fn save_single_asset_with_options(
     if is_new && input.fab_listing_id.is_none() && is_fab_source {
         match fab::fetch_metadata(&input.source_url).await {
             Ok(metadata) => {
+                append_fab_read_warnings(&mut warnings, &metadata);
                 let additions = bilingual::fab_localizations(LocalizedAssetText {
                     name: metadata.name,
                     description: metadata.description,
@@ -927,9 +954,6 @@ async fn save_single_asset_with_options(
                             sort_order: (first_image + index) as i64,
                         },
                     ));
-                if let Some(warning) = metadata.image_warning {
-                    warnings.push(warning);
-                }
             }
             Err(error) => warnings.push(format!("Fab 自动读取未完成，已保留原文：{error}")),
         }
@@ -1421,6 +1445,7 @@ pub async fn import_assets(
                 Some(Ok(asset)) => {
                     report.imported += 1;
                     let mut has_warnings = !messages.is_empty();
+                    has_warnings |= append_fab_read_warnings(&mut messages, &metadata);
                     if suggested_category == "其他 / 待整理" {
                         has_warnings = true;
                         messages.push(if category_existed {
@@ -1434,10 +1459,6 @@ pub async fn import_assets(
                         } else {
                             format!("新建分类并自动归类：{suggested_category}")
                         });
-                    }
-                    if let Some(warning) = metadata.image_warning {
-                        has_warnings = true;
-                        messages.push(warning);
                     }
                     report.rows.push(ImportRowResult {
                         row: row.row,
@@ -2637,9 +2658,10 @@ mod tests {
             state.translation_service.usage().unwrap().deepseek_tokens,
             0
         );
-        let saved = save_single_asset_with_options(&state, reread, &library_id, true, Some(true))
-            .await
-            .unwrap();
+        let saved =
+            save_single_asset_with_options(&state, reread, &library_id, true, Some(true), None)
+                .await
+                .unwrap();
         assert_eq!(saved.category_id, bulk_saved.category_id);
         assert_eq!(saved.card.category_name.as_deref(), Some("沙漠"));
         assert_eq!(saved.localizations["zh-CN"].name, "手填标题");
@@ -2661,10 +2683,16 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
         hand_chosen.category_id = Some(manual.clone());
         hand_chosen.auto_category_path = fab::classify_category("new-unknown-kind", "", "");
-        let saved =
-            save_single_asset_with_options(&state, hand_chosen, &library_id, true, Some(true))
-                .await
-                .unwrap();
+        let saved = save_single_asset_with_options(
+            &state,
+            hand_chosen,
+            &library_id,
+            true,
+            Some(true),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(saved.category_id, Some(manual));
         assert!(!state
             .with_library(|connection, _| db::auto_category_path_exists(
@@ -2672,6 +2700,100 @@ mod tests {
                 &["其他".into(), "待整理".into()]
             ))
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn single_save_retains_fab_format_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(directory.path());
+        let warning = "该商品还包含非 UE 格式，已忽略：blender、fbx";
+        assert_eq!(
+            state
+                .with_library(|c, _| db::library_meta(c, "en"))
+                .unwrap()
+                .total_assets,
+            0
+        );
+        let saved = save_single_asset_with_options(
+            &state,
+            single_fab_input(),
+            &state.active_library_id().unwrap(),
+            true,
+            Some(false),
+            Some(warning.into()),
+        )
+        .await
+        .unwrap();
+        assert!(saved
+            .single_import_warnings
+            .iter()
+            .any(|item| item == warning));
+        let history = state
+            .tasks
+            .list(&state.active_library_id().unwrap())
+            .unwrap();
+        let result = state.tasks.get(&history[0].id).unwrap().result.unwrap();
+        assert!(result["rows"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == warning));
+        assert!(
+            state
+                .with_library(|c, _| db::get_asset(c, &saved.card.id, false, "en"))
+                .unwrap()
+                .single_import_warnings
+                .is_empty(),
+            "warning must not become persistent asset data"
+        );
+    }
+
+    #[test]
+    fn bulk_format_warning_enters_row_messages() {
+        let metadata = FabMetadata {
+            image_warning: Some("1 张图片读取失败".into()),
+            format_warning: Some("该商品还包含非 UE 格式，已忽略：blender".into()),
+            ..Default::default()
+        };
+        let mut messages = vec!["自动归类：环境".into()];
+        assert!(append_fab_read_warnings(&mut messages, &metadata));
+        assert_eq!(
+            messages,
+            vec![
+                "自动归类：环境",
+                "1 张图片读取失败",
+                "该商品还包含非 UE 格式，已忽略：blender"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn single_save_rejects_untrusted_fab_warning_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(directory.path());
+        for warning in [
+            "任意伪造文字".to_string(),
+            format!("该商品还包含非 UE 格式，已忽略：{}", "x".repeat(1024)),
+            "该商品还包含非 UE 格式，已忽略：fbx\n伪造日志".into(),
+        ] {
+            assert!(save_single_asset_with_options(
+                &state,
+                single_fab_input(),
+                &state.active_library_id().unwrap(),
+                true,
+                Some(false),
+                Some(warning)
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(
+            state
+                .with_library(|c, _| db::library_meta(c, "en"))
+                .unwrap()
+                .total_assets,
+            0
+        );
     }
 
     #[tokio::test]

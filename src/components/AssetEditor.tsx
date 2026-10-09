@@ -48,6 +48,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const gate = useRequestGate();
   const policy = useFabTranslationSettings();
   const [fabRead, setFabRead] = useState(false);
+  const [fabFormatWarning, setFabFormatWarning] = useState<string | undefined>();
   const [saveResult, setSaveResult] = useState<AssetDetail | null>(null);
   const [saveError, setSaveError] = useState("");
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
@@ -196,10 +197,11 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
       if (!gate.isCurrent(ticket)) return;
       setForm(previous => applyFabMetadata(previous, metadata));
       setFabRead(true);
+      setFabFormatWarning(metadata.formatWarning || undefined);
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
       const categoryNote = metadata.suggestedCategoryPath.length ? ` 未手选分类时，保存将归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
-      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}` });
+      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${metadata.formatWarning ? ` ${metadata.formatWarning}` : ""}` });
     } catch (error) {
       if (gate.isCurrent(ticket)) setFabStatus({ kind: "error", message: String(error) });
     } finally { if (gate.isCurrent(ticket)) { fetchingFabRef.current = false; setFetchingFab(false); } }
@@ -227,7 +229,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         ...next,
         images: next.images.map(({ previewDataUrl: _previewDataUrl, remoteUrl: _remoteUrl, ...image }) => image)
       };
-      const saved=await onSave(payload, { completeBilingual: fabRead, autoTranslate });
+      const saved=await onSave(payload, { completeBilingual: fabRead, autoTranslate, ...(fabFormatWarning ? { formatWarning: fabFormatWarning } : {}) });
       if (!gate.isCurrent(ticket)) return;
       if (saved) { setSaveResult(saved); setForm(toInput(saved, contentLanguage)); setEditLanguage(contentLanguage); }
       if (saved && pendingMediaPaths.length) {
@@ -284,7 +286,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label><span>格式</span><input value={form.formats.join("; ")} onChange={e => update("formats", splitValues(e.target.value))} placeholder="uasset; FBX" /></label>
         <label><span>素材大小</span><input value={sizeText} onChange={e => setSizeText(e.target.value)} placeholder="例如 2.4 GB" />{errors.sizeBytes && <small className="field-error">{errors.sizeBytes}</small>}</label>
         <label><span>{editLanguage === "zh-CN" ? "中文许可" : "English license"}</span><input value={localized.license} onChange={e => updateLocalized("license", e.target.value)} placeholder="个人/商用、CC0…" /></label>
-        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setFabRead(false); setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
+        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setFabRead(false); setFabFormatWarning(undefined); setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>百度网盘</h3><button type="button" className="secondary-button" onClick={parseClipboard}><ClipboardPaste size={15} />从剪贴板解析</button></div><div className="form-grid">
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>

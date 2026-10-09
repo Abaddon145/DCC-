@@ -21,7 +21,11 @@ pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     let mut metadata = metadata_from_listing(&listing, &canonical_url)?;
 
     if let Some(asset_formats) = listing.get("assetFormats").and_then(Value::as_array) {
-        for asset_format in asset_formats.iter().take(12) {
+        for asset_format in asset_formats
+            .iter()
+            .take(12)
+            .filter(|item| is_unreal_format(item))
+        {
             let Some(code) = asset_format
                 .pointer("/assetFormatType/code")
                 .and_then(Value::as_str)
@@ -234,8 +238,18 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
 
     let mut dcc_tools = Vec::new();
     let mut formats = Vec::new();
+    let mut ignored_formats = Vec::new();
     if let Some(items) = value.get("assetFormats").and_then(Value::as_array) {
         for item in items {
+            if !is_unreal_format(item) {
+                let code = string_at(item, "/assetFormatType/code");
+                ignored_formats.push(if code.is_empty() {
+                    "未标识".into()
+                } else {
+                    code
+                });
+                continue;
+            }
             if let Some(format_type) = item.get("assetFormatType") {
                 push_string(format_type.get("name"), &mut dcc_tools);
                 if let Some(extensions) = format_type.get("extensions").and_then(Value::as_array) {
@@ -264,7 +278,19 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
         license: license_name(value),
         preview_images: Vec::new(),
         image_warning: None,
+        format_warning: (!ignored_formats.is_empty()).then(|| {
+            format!(
+                "该商品还包含非 UE 格式，已忽略：{}",
+                unique(ignored_formats).join("、")
+            )
+        }),
     })
+}
+
+fn is_unreal_format(item: &Value) -> bool {
+    item.pointer("/assetFormatType/code")
+        .and_then(Value::as_str)
+        == Some("unreal-engine")
 }
 
 pub fn classify_category(
@@ -644,6 +670,47 @@ mod tests {
             "https://example.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a"
         )
         .is_err());
+    }
+
+    #[test]
+    fn fab_mixed_formats_only_adopts_unreal_information() {
+        let listing = serde_json::json!({
+            "title": "Mixed pack", "assetFormats": [
+                {"assetFormatType": {"code": "blender", "name": "Blender", "extensions": ["blend"]}},
+                {"assetFormatType": {"code": "unreal-engine", "name": "Unreal Engine", "extensions": ["uasset", "uproject"]}},
+                {"assetFormatType": {"code": "fbx", "name": "FBX", "extensions": ["fbx"]}}
+            ]
+        });
+        let metadata = metadata_from_listing(
+            &listing,
+            "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a",
+        )
+        .unwrap();
+        assert_eq!(metadata.dcc_tools, vec!["Unreal Engine"]);
+        assert_eq!(metadata.formats, vec!["uasset", "uproject"]);
+        assert!(metadata.versions.is_empty()); // Versions come only from the UE detail endpoint.
+    }
+
+    #[test]
+    fn fab_format_warning_is_unique_and_absent_for_pure_ue() {
+        let url = "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+        let listing = serde_json::json!({"title": "Mixed", "assetFormats": [
+            {"assetFormatType": {"code": "unreal-engine"}},
+            {"assetFormatType": {"code": "blender"}},
+            {"assetFormatType": {"code": "BLENDER"}},
+            {"assetFormatType": {"code": "fbx"}}
+        ]});
+        let metadata = serde_json::to_value(metadata_from_listing(&listing, url).unwrap()).unwrap();
+        assert_eq!(
+            metadata["formatWarning"],
+            "该商品还包含非 UE 格式，已忽略：blender、fbx"
+        );
+        let pure = serde_json::json!({"title": "UE", "assetFormats": [{"assetFormatType": {"code": "unreal-engine"}}]});
+        assert!(
+            serde_json::to_value(metadata_from_listing(&pure, url).unwrap()).unwrap()
+                ["formatWarning"]
+                .is_null()
+        );
     }
 
     #[test]

@@ -611,6 +611,7 @@ pub struct FabMetadata {
     pub license: String,
     pub preview_images: Vec<FabPreviewImage>,
     pub image_warning: Option<String>,
+    pub format_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

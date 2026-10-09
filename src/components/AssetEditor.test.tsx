@@ -88,7 +88,7 @@ describe("AssetEditor online translation", () => {
   it("clears previous Fab identity and suggested category when the source is manually changed", async () => {
     vi.mocked(api.checkFabUrl).mockResolvedValue(null);
     const source = "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a";
-    vi.mocked(api.fetchFabMetadata).mockResolvedValue({ canonicalUrl: source, listingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", categoryPath: "environments/courtyard", listingType: "3d-model", suggestedCategoryPath: ["环境", "庭院"], name: "Quiet courtyard", description: "", author: "", category: "", tags: [], dccTools: [], versions: [], formats: [], license: "", previewImages: [], imageWarning: null });
+    vi.mocked(api.fetchFabMetadata).mockResolvedValue({ canonicalUrl: source, listingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", categoryPath: "environments/courtyard", listingType: "3d-model", suggestedCategoryPath: ["环境", "庭院"], name: "Quiet courtyard", description: "", author: "", category: "", tags: [], dccTools: [], versions: [], formats: [], license: "", previewImages: [], imageWarning: null, formatWarning: "该商品还包含非 UE 格式，已忽略：fbx" });
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<AssetEditor asset={null} categories={[]} contentLanguage="en" onClose={vi.fn()} onSave={onSave} />);
     fireEvent.change(screen.getByPlaceholderText("https://www.fab.com/listings/…"), { target: { value: source } });
@@ -135,5 +135,30 @@ describe("AssetEditor online translation", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue("未保存草稿")).toBeInTheDocument();
     confirmation.mockRestore();
+  });
+
+  it.each(["successful read", "failed reread", "unapplied read URL"])("keeps the applied format notice after %s and passes it with save, not asset data", async mode => {
+    const warning = "该商品还包含非 UE 格式，已忽略：blender、fbx";
+    const source = "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+    vi.mocked(api.checkFabUrl).mockResolvedValue(null);
+    vi.mocked(api.fetchFabMetadata).mockResolvedValue({ canonicalUrl: source, listingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a", categoryPath: "environments", listingType: "3d-model", suggestedCategoryPath: ["环境"], name: "UE pack", description: "", author: "", category: "", tags: [], dccTools: ["Unreal Engine"], versions: [], formats: ["uasset"], license: "", previewImages: [], imageWarning: null, formatWarning: warning });
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<AssetEditor asset={null} categories={[]} contentLanguage="en" onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.change(screen.getByPlaceholderText("https://www.fab.com/listings/…"), { target: { value: source } });
+    fireEvent.click(screen.getByRole("button", { name: "读取并填充" }));
+    expect(await screen.findByText(new RegExp(warning))).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    if (mode === "failed reread") {
+      vi.mocked(api.fetchFabMetadata).mockRejectedValueOnce(new Error("商品读取失败"));
+      await waitFor(() => expect(screen.getByRole("button", { name: "读取并填充" })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: "读取并填充" }));
+      expect(await screen.findByText(/商品读取失败/)).toBeInTheDocument();
+    } else if (mode === "unapplied read URL") {
+      fireEvent.change(screen.getByPlaceholderText("https://www.fab.com/listings/…"), { target: { value: "https://www.fab.com/listings/95ff3c25-59f9-441d-aa43-93c3abd63680" } });
+    }
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存素材" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "保存素材" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.not.objectContaining({ formatWarning: expect.anything() }), expect.objectContaining({ formatWarning: warning })));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ sourceUrl: source, fabListingId: "06003f78-9a59-4fb8-abbc-14dc276f0b4a" }), expect.anything());
   });
 });

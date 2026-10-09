@@ -9,7 +9,7 @@ export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
 export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection" | "selectAll" | "saveAsset" | "deleteSelected";
 export type ContentLanguage = "zh-CN" | "en";
-export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean }
+export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string }
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
   | { kind: "ueAssets"; request: unknown }
@@ -335,6 +335,7 @@ export interface FabMetadata {
   license: string;
   previewImages: FabPreviewImage[];
   imageWarning: string | null;
+  formatWarning?: string | null;
 }
 
 export interface FabDuplicateMatch {
