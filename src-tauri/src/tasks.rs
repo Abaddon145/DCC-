@@ -18,6 +18,7 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    Download(crate::downloader::models::DownloadRequest),
     AssetMediaImport {
         #[serde(rename = "assetId")]
         asset_id: String,
@@ -57,6 +58,7 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::Download(_) => "下载",
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
             Self::MediaImport(_) => "媒体导入",
@@ -79,6 +81,7 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::Download(request) => crate::downloader::domain::validate_request(request),
             Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             Self::AssetMediaImport { paths, .. } if paths.len() > 100 => {
                 Err("单次预览附件导入最多 100 项".into())
@@ -110,6 +113,8 @@ pub struct LibraryTask {
     pub payload: TaskRequest,
     #[serde(default)]
     pub stop_requested: bool,
+    #[serde(default)]
+    pub pause_requested: bool,
 }
 fn active(status: &str) -> bool {
     matches!(status, "queued" | "running")
@@ -125,6 +130,117 @@ pub struct TaskRegistry {
     store: Mutex<TaskStore>,
 }
 impl TaskRegistry {
+    fn claim_with_limit(&self, limit: usize) -> Option<LibraryTask> {
+        let mut store = self.store.lock().ok()?;
+        let Some(index) = store.entries.iter().position(|t| t.status == "queued") else {
+            store.dispatching = store.entries.iter().any(|t| t.status == "running");
+            return None;
+        };
+        let running = store
+            .entries
+            .iter()
+            .filter(|t| t.status == "running")
+            .collect::<Vec<_>>();
+        if !running.is_empty()
+            && (!matches!(store.entries[index].payload, TaskRequest::Download(_))
+                || running
+                    .iter()
+                    .any(|t| !matches!(t.payload, TaskRequest::Download(_)))
+                || running.len() >= limit.clamp(1, 4))
+        {
+            return None;
+        }
+        let task = &mut store.entries[index];
+        task.status = "running".into();
+        task.phase = "开始处理".into();
+        let task = task.clone();
+        if self.persist(&store).is_err() {
+            for (position, task) in store
+                .entries
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, t)| active(&t.status))
+            {
+                // Workers already executing remain visible until they finish stopping.
+                if position == index || task.status == "queued" {
+                    task.status = "interrupted".into();
+                }
+                task.stop_requested = true;
+            }
+            store.persistence_warning = Some("无法保存任务开始状态，未执行任务".into());
+            store.dispatching = store.entries.iter().any(|t| t.status == "running");
+            return None;
+        }
+        Some(task)
+    }
+    pub fn pause_download(&self, id: &str) -> Result<(), String> {
+        let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        let task = store
+            .entries
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or("任务不存在")?;
+        if !matches!(task.payload, TaskRequest::Download(_)) {
+            return Err("只有下载任务可以暂停".into());
+        }
+        match task.status.as_str() {
+            "queued" => {
+                task.status = "paused".into();
+                task.phase = "paused".into();
+            }
+            "running" => {
+                task.pause_requested = true;
+                task.stop_requested = true;
+                task.phase = "正在暂停并保留断点".into();
+            }
+            _ => return Err("任务当前不能暂停".into()),
+        }
+        self.persist(&store)
+    }
+    pub fn resume_download(&self, id: &str) -> Result<bool, String> {
+        let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if store.persistence_warning.is_some() {
+            return Err("任务记录无法保存，请先检查磁盘".into());
+        }
+        if store
+            .entries
+            .iter()
+            .any(|t| active(&t.status) && !t.cancellable)
+        {
+            return Err("素材库正在维护，请等待完成".into());
+        }
+        let task = store
+            .entries
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or("任务不存在")?;
+        if !matches!(task.payload, TaskRequest::Download(_))
+            || !matches!(
+                task.status.as_str(),
+                "paused" | "failed" | "interrupted" | "stopped"
+            )
+        {
+            return Err("此下载任务不能恢复".into());
+        }
+        task.payload.validate()?;
+        let previous = task.clone();
+        task.status = "queued".into();
+        task.phase = "等待恢复".into();
+        task.stop_requested = false;
+        task.pause_requested = false;
+        task.message.clear();
+        task.updated_at = Utc::now().to_rfc3339();
+        if let Err(error) = self.persist(&store) {
+            if let Some(task) = store.entries.iter_mut().find(|t| t.id == id) {
+                *task = previous;
+            }
+            store.persistence_warning = Some("无法保存恢复状态，下载未恢复；请检查磁盘".into());
+            return Err(error);
+        }
+        let launch = !store.dispatching;
+        store.dispatching = true;
+        Ok(launch)
+    }
     pub fn load(path: PathBuf) -> Self {
         let (mut entries, warning): (Vec<LibraryTask>, Option<String>) = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -148,6 +264,7 @@ impl TaskRegistry {
                 task.status = "interrupted".into();
                 task.message = "上次运行中断，请检查结果后手动继续".into();
                 task.stop_requested = false;
+                task.pause_requested = false;
             }
         }
         Self {
@@ -284,6 +401,7 @@ impl TaskRegistry {
                 result: None,
                 payload: task.payload.clone(),
                 stop_requested: task.stop_requested,
+                pause_requested: task.pause_requested,
             })
             .collect())
     }
@@ -341,6 +459,7 @@ impl TaskRegistry {
             },
             result: Some(serde_json::to_value(report).map_err(|e| e.to_string())?),
             stop_requested: false,
+            pause_requested: false,
         };
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
         if let Some(warning) = &store.persistence_warning {
@@ -376,6 +495,7 @@ impl TaskRegistry {
             result: None,
             payload,
             stop_requested: false,
+            pause_requested: false,
         };
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
@@ -410,24 +530,9 @@ impl TaskRegistry {
         store.dispatching = true;
         Ok((task, launch))
     }
+    #[cfg(test)]
     fn claim(&self) -> Option<LibraryTask> {
-        let mut store = self.store.lock().ok()?;
-        let Some(task) = store.entries.iter_mut().find(|t| t.status == "queued") else {
-            store.dispatching = false;
-            return None;
-        };
-        task.status = "running".into();
-        task.phase = "开始处理".into();
-        let task = task.clone();
-        if self.persist(&store).is_err() {
-            for task in store.entries.iter_mut().filter(|t| active(&t.status)) {
-                task.status = "interrupted".into();
-            }
-            store.persistence_warning = Some("无法保存任务开始状态，未执行任务".into());
-            store.dispatching = false;
-            return None;
-        }
-        Some(task)
+        self.claim_with_limit(1)
     }
     pub fn update(
         &self,
@@ -498,14 +603,23 @@ impl TaskRegistry {
             .find(|t| t.id == id)
             .ok_or("任务不存在")?;
         if task.status == "queued" {
-            task.status = "stopped".into();
+            task.status = if matches!(task.payload, TaskRequest::Download(_)) {
+                "cancelled"
+            } else {
+                "stopped"
+            }
+            .into();
             task.message = "尚未开始，已停止".into();
         } else if task.status == "running" {
             if !task.cancellable {
                 return Err("此任务处于数据维护阶段，请等待安全完成".into());
             }
             task.stop_requested = true;
+            task.pause_requested = false;
             task.phase = "正在安全停止，当前步骤完成后生效".into();
+        } else if task.status == "paused" && matches!(task.payload, TaskRequest::Download(_)) {
+            task.status = "cancelled".into();
+            task.pause_requested = false;
         }
         self.persist(&store)
     }
@@ -515,7 +629,15 @@ impl TaskRegistry {
             if let Some(task) = store.entries.iter_mut().find(|t| t.id == id) {
                 task.updated_at = Utc::now().to_rfc3339();
                 task.status = if task.stop_requested {
-                    "stopped"
+                    if matches!(task.payload, TaskRequest::Download(_)) {
+                        if task.pause_requested {
+                            "paused"
+                        } else {
+                            "cancelled"
+                        }
+                    } else {
+                        "stopped"
+                    }
                 } else if result.is_ok() {
                     "completed"
                 } else {
@@ -530,6 +652,82 @@ impl TaskRegistry {
             }
             self.persist_checked(&mut store);
         }
+    }
+}
+
+#[cfg(test)]
+mod download_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn download_journal_failure_keeps_running_worker_visible_and_resume_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (first, _) = registry.submit("lib".into(), request()).unwrap();
+        let (second, _) = registry.submit("lib".into(), request()).unwrap();
+        registry.claim_with_limit(2).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(registry.claim_with_limit(2).is_none());
+        assert_eq!(registry.get(&first.id).unwrap().status, "running");
+        assert!(registry.busy());
+        assert!(registry.should_stop(&first.id));
+        assert_eq!(registry.get(&second.id).unwrap().status, "interrupted");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (task, _) = registry.submit("lib".into(), request()).unwrap();
+        registry.pause_download(&task.id).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(registry.resume_download(&task.id).is_err());
+        assert_eq!(registry.get(&task.id).unwrap().status, "paused");
+    }
+    fn request() -> TaskRequest {
+        TaskRequest::Download(crate::downloader::models::DownloadRequest {
+            url: "https://example.com/video".into(),
+            format: "best".into(),
+            quality: "best".into(),
+            audio_only: false,
+            subtitles: false,
+            output_mode: "library".into(),
+        })
+    }
+    #[test]
+    fn download_pause_resume_and_cancel_preserve_task_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (task, _) = registry.submit("lib".into(), request()).unwrap();
+        registry.pause_download(&task.id).unwrap();
+        assert_eq!(registry.get(&task.id).unwrap().status, "paused");
+        registry.resume_download(&task.id).unwrap();
+        assert_eq!(registry.claim_with_limit(2).unwrap().id, task.id);
+        registry.pause_download(&task.id).unwrap();
+        assert!(registry.should_stop(&task.id));
+        registry.finish(&task.id, Err("已暂停".into()));
+        assert_eq!(registry.get(&task.id).unwrap().status, "paused");
+        registry.resume_download(&task.id).unwrap();
+        registry.claim_with_limit(2).unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(&task.id, Err("已取消".into()));
+        assert_eq!(registry.get(&task.id).unwrap().status, "cancelled");
+        assert!(registry.resume_download(&task.id).is_err());
+    }
+    #[test]
+    fn download_concurrency_does_not_parallelize_other_library_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        for _ in 0..3 {
+            registry.submit("lib".into(), request()).unwrap();
+        }
+        let first = registry.claim_with_limit(2).unwrap();
+        let second = registry.claim_with_limit(2).unwrap();
+        assert_ne!(first.id, second.id);
+        assert!(registry.claim_with_limit(2).is_none());
+        registry.finish(&first.id, Ok(serde_json::json!({})));
+        assert!(registry.claim_with_limit(2).is_some());
+        registry.submit("lib".into(), TaskRequest::Links).unwrap();
+        assert!(registry.claim_with_limit(4).is_none());
     }
 }
 
@@ -658,10 +856,43 @@ pub fn finish_model_thumbnail_task(
 pub fn cancel_library_task(state: tauri::State<AppState>, id: String) -> Result<(), String> {
     let task = state.tasks.get(&id)?;
     state.tasks.cancel(&id)?;
+    if matches!(task.payload, TaskRequest::Download(_))
+        && task.library_id == state.active_library_id()?
+    {
+        state
+            .with_library(|db, _| crate::downloader::service::record(db, &state.tasks.get(&id)?))?;
+    }
     if matches!(task.payload, TaskRequest::Links) {
         state.cancel_link_check()?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn pause_download_task(state: tauri::State<AppState>, id: String) -> Result<(), String> {
+    if state.tasks.get(&id)?.library_id != state.active_library_id()? {
+        return Err("下载任务属于其他素材库".into());
+    }
+    state.tasks.pause_download(&id)?;
+    state.with_library(|db, _| crate::downloader::service::record(db, &state.tasks.get(&id)?))
+}
+#[tauri::command]
+pub fn resume_download_task(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<LibraryTask, String> {
+    if state.tasks.get(&id)?.library_id != state.active_library_id()? {
+        return Err("下载任务属于其他素材库".into());
+    }
+    let launch = state.tasks.resume_download(&id)?;
+    let recorded =
+        state.with_library(|db, _| crate::downloader::service::record(db, &state.tasks.get(&id)?));
+    if launch {
+        tauri::async_runtime::spawn(dispatch(app));
+    }
+    recorded?;
+    state.tasks.get(&id)
 }
 #[tauri::command]
 pub fn start_library_task(
@@ -693,9 +924,11 @@ pub fn start_library_task_for_library(
             .tasks
             .submit(active.marker.library_id.clone(), payload)
     })?;
+    let recorded = state.with_library(|db, _| crate::downloader::service::record(db, &task));
     if launch {
         tauri::async_runtime::spawn(dispatch(app));
     }
+    recorded?;
     Ok(task)
 }
 #[tauri::command]
@@ -713,6 +946,17 @@ pub fn retry_library_task(
     }
     if active(&previous.status) {
         return Err("任务仍在执行".into());
+    }
+    if matches!(previous.payload, TaskRequest::Download(_))
+        && previous.status != "completed"
+        && previous.status != "cancelled"
+    {
+        if state.tasks.resume_download(&id)? {
+            tauri::async_runtime::spawn(dispatch(app));
+        }
+        state
+            .with_library(|db, _| crate::downloader::service::record(db, &state.tasks.get(&id)?))?;
+        return state.tasks.get(&id);
     }
     if matches!(previous.payload, TaskRequest::AssetMediaImport { .. }) {
         return Err(
@@ -739,15 +983,32 @@ pub fn retry_library_task(
 }
 async fn dispatch(app: AppHandle) {
     loop {
-        let Some(task) = app.state::<AppState>().tasks.claim() else {
-            break;
+        let limit = app
+            .state::<AppState>()
+            .download_settings()
+            .map(|s| s.concurrency)
+            .unwrap_or(1);
+        let Some(task) = app.state::<AppState>().tasks.claim_with_limit(limit) else {
+            if !app.state::<AppState>().tasks.busy() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
         };
         let _ = app.emit("library-task-updated", &task);
-        let result = execute(app.clone(), task.clone()).await;
-        app.state::<AppState>().tasks.finish(&task.id, result);
-        if let Ok(updated) = app.state::<AppState>().tasks.get(&task.id) {
-            let _ = app.emit("library-task-updated", updated);
-        }
+        let worker = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = execute(worker.clone(), task.clone()).await;
+            worker.state::<AppState>().tasks.finish(&task.id, result);
+            if let Ok(updated) = worker.state::<AppState>().tasks.get(&task.id) {
+                if matches!(updated.payload, TaskRequest::Download(_)) {
+                    let _ = worker
+                        .state::<AppState>()
+                        .with_library(|db, _| crate::downloader::service::record(db, &updated));
+                }
+                let _ = worker.emit("library-task-updated", updated);
+            }
+        });
     }
 }
 
@@ -756,12 +1017,14 @@ pub async fn await_task_result(app: &AppHandle, id: &str) -> Result<Value, Strin
         let task = app.state::<AppState>().tasks.get(id)?;
         match task.status.as_str() {
             "completed" => return task.result.ok_or("任务缺少结果".into()),
-            "failed" | "stopped" | "interrupted" => return Err(task.message),
+            "failed" | "stopped" | "interrupted" | "paused" | "cancelled" => {
+                return Err(task.message)
+            }
             _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }
     }
 }
-fn open_media_worker_connection(path: &Path) -> Result<rusqlite::Connection, String> {
+pub(crate) fn open_media_worker_connection(path: &Path) -> Result<rusqlite::Connection, String> {
     let connection = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON;")
@@ -779,6 +1042,11 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::Download(request) => tauri::async_runtime::spawn_blocking(move || {
+            crate::downloader::service::execute(&app, &task, request)
+        })
+        .await
+        .map_err(|_| "下载任务异常结束")?,
         TaskRequest::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
         TaskRequest::BrowserCapture { id } => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();

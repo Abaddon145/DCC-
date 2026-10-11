@@ -6,6 +6,7 @@ mod bilingual;
 mod browser_capture;
 mod commands;
 mod db;
+mod downloader;
 mod epic;
 mod fab;
 mod file_digest;
@@ -18,6 +19,7 @@ mod knowledge_commands;
 mod knowledge_files;
 mod link_checker;
 mod media;
+mod media_engine;
 mod media_library;
 mod model_access;
 mod models;
@@ -31,6 +33,7 @@ mod organization;
 mod projects;
 mod reference_boards;
 mod reliability;
+mod runtime;
 mod search_syntax;
 mod state;
 mod tasks;
@@ -162,6 +165,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
+            if let Err(error) = downloader::auth::clean_stale() {
+                eprintln!("下载Cookie临时文件清理失败：{error}");
+            }
             if let Err(error) = browser_capture::refresh_registered_host() {
                 eprintln!("浏览器连接需要重新设置：{error}");
             }
@@ -255,6 +261,18 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    downloader::service::resolve_download,
+                    downloader::service::get_download_tools,
+                    downloader::service::get_download_thumbnail,
+                    downloader::service::get_download_settings,
+                    downloader::service::save_download_settings,
+                    downloader::service::get_download_cookie_status,
+                    downloader::service::import_download_cookies,
+                    downloader::service::delete_download_cookies,
+                    downloader::service::list_download_tasks,
+                    downloader::service::open_download_output,
+                    tasks::pause_download_task,
+                    tasks::resume_download_task,
                     epic::get_fab_ue_options,
                     epic::list_ue_project_targets,
                     epic::inspect_ue_project,

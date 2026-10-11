@@ -12,7 +12,7 @@ async function runLibraryTask<T>(payload: LibraryTaskRequest, expectedLibraryId?
     const task=await invoke<LibraryTask>("get_library_task",{id:created.id});
     if(task.status==="completed")return task.result as T;
     if(task.status==="failed")throw new Error(task.message||"任务失败，请查看任务中心");
-    if(task.status==="stopped"||task.status==="interrupted")throw new Error("任务已停止，已完成结果保留；请在任务中心检查并手动继续");
+    if(["stopped","interrupted","paused","cancelled"].includes(task.status))throw new Error("任务已停止或暂停，已完成结果保留；请在任务中心检查并手动继续");
     await new Promise(resolve=>window.setTimeout(resolve,500));
   }
 }
@@ -22,6 +22,19 @@ export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localho
 export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
+  startLibraryTask: (payload:LibraryTaskRequest,expectedLibraryId?:string) => invoke<LibraryTask>("start_library_task",{payload,expectedLibraryId}),
+  resolveDownload: (url:string) => invoke<import("../types").DownloadInfo>("resolve_download",{url}),
+  getDownloadTools: () => invoke<import("../types").DownloadTool[]>("get_download_tools"),
+  getDownloadThumbnail: (url:string) => invoke<string>("get_download_thumbnail",{url}),
+  getDownloadSettings: () => invoke<import("../types").DownloadSettings>("get_download_settings"),
+  saveDownloadSettings: (settings:import("../types").DownloadSettings) => invoke<void>("save_download_settings",{settings}),
+  getDownloadCookieStatus: () => invoke<boolean>("get_download_cookie_status"),
+  importDownloadCookies: (path:string) => invoke<void>("import_download_cookies",{path}),
+  deleteDownloadCookies: () => invoke<void>("delete_download_cookies"),
+  listDownloadTasks: () => invoke<LibraryTask[]>("list_download_tasks"),
+  pauseDownloadTask: (id:string) => invoke<void>("pause_download_task",{id}),
+  resumeDownloadTask: (id:string) => invoke<LibraryTask>("resume_download_task",{id}),
+  openDownloadOutput: (id:string) => invoke<void>("open_download_output",{id}),
   getFabUeOptions: (assetId: string, expectedLibraryId: string) => invoke<FabUeOptions>("get_fab_ue_options", { assetId, expectedLibraryId }),
   listUeProjectTargets: (expectedLibraryId: string) => invoke<UeProjectTarget[]>("list_ue_project_targets", { expectedLibraryId }),
   inspectUeProject: (path: string, expectedLibraryId: string) => invoke<UeProjectTarget>("inspect_ue_project", { path, expectedLibraryId }),

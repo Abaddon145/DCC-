@@ -43,6 +43,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::knowledge::migrate(&connection)?;
     crate::browser_capture::migrate(&connection)?;
     crate::reliability::migrate_workflows(&connection)?;
+    crate::downloader::service::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -3312,7 +3313,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "19");
+        assert_eq!(version, "20");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

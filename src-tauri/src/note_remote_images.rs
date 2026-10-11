@@ -123,7 +123,7 @@ fn write_image(bytes: &[u8], directory: &Path) -> Result<PathBuf, String> {
     std::fs::write(&path, bytes).map_err(|_| "无法暂存下载图片")?;
     Ok(path)
 }
-async fn fetch(raw: &str, directory: &Path) -> Result<PathBuf, String> {
+pub(crate) async fn fetch(raw: &str, directory: &Path) -> Result<PathBuf, String> {
     let mut url = validate_url(raw)?;
     for _ in 0..=3 {
         let host = url
