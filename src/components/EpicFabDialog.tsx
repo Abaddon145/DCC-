@@ -141,7 +141,7 @@ export function EpicFabDialog({ assetId, title, productName = title, mode = "pro
         {target && relation === "newer" && <p className="form-warning">素材版本高于工程版本，不能继续。请选择更早的官方版本或更高版本的工程。</p>}
         <p className="form-warning">工程路径和所选版本不会自动传给 Epic。请在 Epic 中再次选择目标工程与版本；插件或完整工程可能显示“安装插件”或“创建工程”。</p>
         </>}
-        <p>直接定位当前商品。若 Epic 没有切换，可点击“恢复定位”；恢复时会经过 UE 库。请在 Epic 商品页核对名称，再选择工程与版本。</p>
+        <p>优先直接定位当前商品；检测到 Epic 拒绝导航时自动恢复一次，恢复时会经过 UE 库。若仍未切换，可手动恢复定位。请核对商品名称，再选择工程与版本。</p>
         {mode === "quick" && busy === "loading" && <p role="status">正在连接素材库…</p>}
         {busy === "opening" && <p role="status"><RefreshCw size={14} className="spinning"/>{recovering ? "正在恢复定位，请等待 Epic 切换页面…" : "正在发送商品定位请求…"}</p>}
         <div className="epic-fallback-actions">

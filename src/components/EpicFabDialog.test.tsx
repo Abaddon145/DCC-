@@ -29,7 +29,7 @@ describe("Epic Fab assisted project flow", () => {
     expect(ueVersionRelation("5.5.1", "5.5.2")).toBe("same");
     expect(ueVersionRelation("5.5", "custom-engine-id")).toBe("unknown");
   });
-  it("locates directly without a project or version and resets the launcher only on explicit recovery", async () => {
+  it("requests direct navigation without a project or version and keeps manual recovery available", async () => {
     render(<EpicFabDialog mode="quick" assetId="asset-1" title="沙漠环境" onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("button", { name: "定位 Fab 商品" })).toBeEnabled());
     expect(api.getFabUeOptions).not.toHaveBeenCalled();

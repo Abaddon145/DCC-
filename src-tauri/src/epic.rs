@@ -1,13 +1,69 @@
 use crate::{fab, state::AppState};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
-use std::{collections::HashSet, fs::File, io::Read, path::Path};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 const MAX_PROJECT_BYTES: u64 = 1024 * 1024;
 const LIBRARY_CHANGED: &str = "素材库已切换，请重新打开素材的 Epic 添加入口";
 static EPIC_NAVIGATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const EPIC_ROUTE_REJECTED: &str = "Epic 本次商品导航被拒绝";
+
+// Only inspect router lines appended after dispatch; never persist or expose Launcher logs.
+fn epic_route_rejected(log: &str, listing_id: Uuid) -> bool {
+    let target = format!("/plugins/egl/listings/{listing_id}'");
+    let mut matching = false;
+    let mut stopped = false;
+    for line in log.lines().filter(|line| line.contains("[MainRouter]")) {
+        if line.contains("GoToUrl('") {
+            matching = line.contains(&target);
+            stopped = false;
+        } else if matching && line.contains("Navigation Stopped. Already at location.") {
+            stopped = true;
+        } else if matching && stopped && line.contains("Navigation Canceled.") {
+            return true;
+        }
+    }
+    false
+}
+
+fn epic_log_cursor(path: &Path) -> Option<File> {
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::End(0)).ok()?;
+    Some(file)
+}
+
+fn wait_for_epic_rejection(file: Option<File>, listing_id: Uuid) -> bool {
+    let Some(mut file) = file else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    // ponytail: bounded best-effort observation, not a documented Epic readiness API.
+    // Missing/rotated/delayed logs leave manual recovery available; no unconditional page reset.
+    for _ in 0..15 {
+        if (&mut file)
+            .take(65536_u64.saturating_sub(bytes.len() as u64))
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return false;
+        }
+        if epic_route_rejected(&String::from_utf8_lossy(&bytes), listing_id) {
+            return true;
+        }
+        if bytes.len() >= 65536 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -145,7 +201,7 @@ fn request_epic_navigation_when_running(
     recover: bool,
     running: Result<bool, String>,
     dispatch: impl FnMut(&str) -> Result<(), String>,
-    handoff: impl FnOnce() -> Result<(), String>,
+    handoff: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     if matches!(running, Ok(false)) {
         return Err("Epic Games Launcher 未运行，请先启动 Epic 并登录后再定位商品".into());
@@ -157,14 +213,30 @@ fn request_epic_navigation(
     listing_id: Uuid,
     recover: bool,
     mut dispatch: impl FnMut(&str) -> Result<(), String>,
-    handoff: impl FnOnce() -> Result<(), String>,
+    mut handoff: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     if recover {
         dispatch("com.epicgames.launcher://ue/library")?;
         handoff()?;
     }
     let url = epic_listing_url(listing_id);
-    dispatch(&url)?;
+    match dispatch(&url) {
+        Err(error) if !recover && error == EPIC_ROUTE_REJECTED => {
+            dispatch("com.epicgames.launcher://ue/library")?;
+            handoff()?;
+            dispatch(&url).map_err(|error| {
+                if error == EPIC_ROUTE_REJECTED {
+                    "Epic 恢复后仍拒绝定位，请在 Epic 搜索商品或打开 Fab 官方页面".into()
+                } else {
+                    error
+                }
+            })?;
+        }
+        Err(error) if error == EPIC_ROUTE_REJECTED => {
+            return Err("Epic 恢复后仍拒绝定位，请在 Epic 搜索商品或打开 Fab 官方页面".into())
+        }
+        result => result?,
+    }
     Ok(url)
 }
 
@@ -455,16 +527,30 @@ pub async fn open_fab_in_epic(
         let running = is_launcher_running();
         #[cfg(not(windows))]
         let running = Ok(true); // The protocol check rejects unsupported platforms first.
+        let recovered = std::cell::Cell::new(false);
         let url = request_epic_navigation_when_running(
             listing_id,
             recover.unwrap_or(false),
             running,
-            |url| in_library(&state, &expected_library_id, |connection, _| {
+            |url| {
+                let product = url == epic_listing_url(listing_id);
+                let log = if product {
+                    std::env::var_os("LOCALAPPDATA").and_then(|root| epic_log_cursor(
+                        &std::path::PathBuf::from(root).join("EpicGamesLauncher/Saved/Logs/EpicGamesLauncher.log")
+                    ))
+                } else { None };
+                in_library(&state, &expected_library_id, |connection, _| {
                 if registered_listing(connection, &asset_id)? != listing_id {
                     return Err("素材的 Fab 来源已改变，请重新打开 Epic 添加入口".into());
                 }
                 open::that(url).map_err(|error| format!("无法打开 Epic 商品入口：{error}"))
-            }),
+                })?;
+                if !product { recovered.set(true); }
+                if product && wait_for_epic_rejection(log, listing_id) {
+                    return Err(EPIC_ROUTE_REJECTED.into());
+                }
+                Ok(())
+            },
             || {
                 // ponytail: two-second handoff verified in this warm Launcher session;
                 // no documented ready callback exists. Slow startup still needs manual retry.
@@ -477,8 +563,8 @@ pub async fn open_fab_in_epic(
             listing_id: listing_id.to_string(),
             url,
             requested: true,
-            message: if recover.unwrap_or(false) {
-                "已执行恢复定位并重新发送商品请求。请在 Epic 核对商品名称；尚未下载或安装。"
+            message: if recovered.get() {
+                "已执行一次恢复定位并重新发送商品请求。请在 Epic 核对商品名称；尚未下载或安装。"
             } else {
                 "已向 Epic 直接发送商品定位请求。请核对商品名称，再在 Epic 选择工程和版本；若仍停在原页面，可手动恢复定位。"
             }.into(),
@@ -491,6 +577,99 @@ pub async fn open_fab_in_epic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_cursor_ignores_old_rejections_and_reads_only_new_bytes() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("launcher.log");
+        let id = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        let rejected = "[MainRouter] GoToUrl('/fab/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e')\n[MainRouter] Navigation Stopped. Already at location.\n[MainRouter] Navigation Canceled.\n";
+        std::fs::write(&path, rejected).unwrap();
+        let mut cursor = epic_log_cursor(&path).unwrap();
+        let mut fresh = String::new();
+        cursor.read_to_string(&mut fresh).unwrap();
+        assert!(fresh.is_empty());
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writer.write_all(rejected.as_bytes()).unwrap();
+        assert!(wait_for_epic_rejection(Some(cursor), id));
+        assert!(!wait_for_epic_rejection(None, id));
+    }
+
+    #[test]
+    fn router_rejection_must_follow_this_product_request_not_an_unrelated_route() {
+        let id = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        let request = "[MainRouter] GoToUrl('https://www.fab.com/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e')\n";
+        let rejected = "[MainRouter] Navigation Stopped. Already at location.\n[MainRouter] Navigation Canceled.\n";
+        assert!(epic_route_rejected(&format!("{request}{rejected}"), id));
+        assert!(!epic_route_rejected(rejected, id));
+        assert!(!epic_route_rejected(&format!("{rejected}{request}"), id));
+        assert!(!epic_route_rejected(
+            &format!("{request}[MainRouter] GoToUrl('/ue/library')\n{rejected}"),
+            id
+        ));
+        assert!(!epic_route_rejected(
+            &format!("{request}{rejected}"),
+            Uuid::new_v4()
+        ));
+        assert!(!epic_route_rejected(
+            &format!("{request}[MainRouter] Navigation Canceled.\n"),
+            id
+        ));
+    }
+
+    #[test]
+    fn rejected_direct_navigation_recovers_once_without_restarting_epic() {
+        let trace = std::cell::RefCell::new(Vec::new());
+        let attempts = std::cell::Cell::new(0);
+        let id = Uuid::parse_str("778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e").unwrap();
+        let result = request_epic_navigation(
+            id,
+            false,
+            |url| {
+                trace.borrow_mut().push(url.to_string());
+                if url.contains("/listings/") {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 1 {
+                        return Err("Epic 本次商品导航被拒绝".into());
+                    }
+                }
+                Ok(())
+            },
+            || {
+                trace.borrow_mut().push("handoff".into());
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(*trace.borrow(), [
+            "com.epicgames.launcher://fab/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e",
+            "com.epicgames.launcher://ue/library", "handoff",
+            "com.epicgames.launcher://fab/plugins/egl/listings/778cd12e-d8bf-49aa-8ac8-e66d2f41ad6e",
+        ]);
+    }
+
+    #[test]
+    fn recovery_rejection_is_not_retried_forever_or_reported_as_success() {
+        let attempts = std::cell::Cell::new(0);
+        let result = request_epic_navigation(
+            Uuid::new_v4(),
+            false,
+            |url| {
+                if url.contains("/listings/") {
+                    attempts.set(attempts.get() + 1);
+                    return Err("Epic 本次商品导航被拒绝".into());
+                }
+                Ok(())
+            },
+            || Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 2);
+    }
 
     #[test]
     fn launcher_csv_matches_target() {
