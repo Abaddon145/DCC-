@@ -1,6 +1,9 @@
 import {invoke} from "@tauri-apps/api/core";
-import type {AssetGraph,AssetRelation,RelationInput,AnalysisMode,AnalysisInputPreview,AssetAnalysis} from "./types";
+import type {AssetGraph,AssetRelation,RelationInput,AnalysisMode,AnalysisInputPreview,AssetAnalysis,PromptInput,PromptAsset} from "./types";
 export const intelligenceApi = {
+  upsertPrompt:(expectedLibraryId:string,input:PromptInput)=>invoke<PromptAsset>("upsert_prompt_asset",{expectedLibraryId,input}),
+  getPrompt:(expectedLibraryId:string,assetId:string)=>invoke<PromptAsset>("get_prompt_asset",{expectedLibraryId,assetId}),
+  trashTextAssets:(expectedLibraryId:string,assetIds:string[])=>invoke<import("../../types").DeleteResult>("trash_text_assets",{expectedLibraryId,assetIds}),
   prepareAnalysis:(expectedLibraryId:string,assetId:string,mode:AnalysisMode)=>invoke<AnalysisInputPreview>("prepare_asset_analysis",{expectedLibraryId,assetId,mode}),
   getAnalysis:(expectedLibraryId:string,assetId:string,analysisId?:string)=>invoke<AssetAnalysis|null>("get_asset_analysis",{expectedLibraryId,assetId,analysisId:analysisId||null}),
   applyAnalysisTags:(expectedLibraryId:string,assetId:string,analysisId:string,locale:string,selected:string[])=>invoke<void>("apply_asset_analysis_tags",{expectedLibraryId,assetId,analysisId,locale,selected}),

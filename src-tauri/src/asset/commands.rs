@@ -10,6 +10,37 @@ fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or("素材库已切换，未读取或修改旧库".into())
 }
 #[tauri::command]
+pub fn upsert_prompt_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::PromptInput,
+) -> Result<super::intelligence_models::PromptAsset, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::prompt::upsert(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn get_prompt_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+) -> Result<super::intelligence_models::PromptAsset, String> {
+    uuid(&asset_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::prompt::get(db, &asset_id)
+    }))
+}
+#[tauri::command]
+pub fn trash_text_assets(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_ids: Vec<String>,
+) -> Result<crate::models::DeleteResult, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::entities::trash(db, &asset_ids)
+    }))
+}
+#[tauri::command]
 pub async fn prepare_asset_analysis(
     app: tauri::AppHandle,
     expected_library_id: String,

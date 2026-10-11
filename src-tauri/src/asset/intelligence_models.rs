@@ -108,3 +108,25 @@ pub struct AssetAnalysis {
     pub created_at: String,
     pub actual_tokens: Option<u64>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptInput {
+    pub asset_id: Option<String>,
+    pub expected_revision: Option<i64>,
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub model: String,
+    pub parameters: serde_json::Value,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptAsset {
+    pub asset: super::models::Asset,
+    pub content: String,
+    pub model: String,
+    pub parameters: serde_json::Value,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}

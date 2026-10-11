@@ -45,7 +45,6 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::reliability::migrate_workflows(&connection)?;
     crate::downloader::service::migrate(&connection)?;
     crate::asset::migrate(&connection)?;
-    crate::asset::intelligence_migration::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -2064,6 +2063,7 @@ pub fn restore_trash_batch(
         .map_err(|e| e.to_string())?;
     transaction.execute("UPDATE media_folders SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction.execute("UPDATE media_entries SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
+    transaction.execute("UPDATE asset_entities SET deleted_at=NULL,delete_batch_id=NULL,revision=revision+1 WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction
         .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
         .map_err(|e| e.to_string())?;
@@ -2120,6 +2120,12 @@ pub fn purge_trash_batch(
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
     let deleting_cores = crate::asset::repository::prepare_trash_purge(&transaction, batch_id)?;
+    transaction
+        .execute(
+            "DELETE FROM asset_entities WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
     for id in deleting_cores {
         transaction
             .execute("DELETE FROM asset_versions WHERE asset_id=?1", [id])
@@ -2167,7 +2173,7 @@ pub fn purge_trash_batch(
         return Err("回收站记录不存在".into());
     }
     transaction.execute("DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM asset_tags at WHERE at.tag_id=tags.id)", []).map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM asset_entity_tags et WHERE et.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
@@ -2400,7 +2406,7 @@ pub fn batch_update_assets(
             [],
         )
         .map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM asset_entity_tags et WHERE et.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(BatchUpdateReport {
         requested: ids.len(),

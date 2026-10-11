@@ -28,3 +28,27 @@ CREATE TABLE IF NOT EXISTS asset_embeddings (
  dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 4096), updated_at TEXT NOT NULL,
  PRIMARY KEY(asset_id,model)
 );
+CREATE TABLE IF NOT EXISTS asset_entities (
+ id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('prompt','shot')),
+ name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200), description TEXT NOT NULL DEFAULT '',
+ revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),
+ deleted_at TEXT, delete_batch_id TEXT REFERENCES deletion_batches(id) ON DELETE SET NULL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_asset_entities_deleted ON asset_entities(deleted_at,updated_at);
+CREATE TABLE IF NOT EXISTS prompts (
+ asset_id TEXT PRIMARY KEY REFERENCES asset_core(id) ON DELETE CASCADE,
+ content TEXT NOT NULL, model TEXT NOT NULL,
+ parameters TEXT NOT NULL CHECK(json_valid(parameters) AND json_type(parameters)='object'),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS asset_entity_tags (
+ entity_id TEXT NOT NULL REFERENCES asset_entities(id) ON DELETE CASCADE,
+ tag_id TEXT NOT NULL REFERENCES localized_tags(id) ON DELETE CASCADE, PRIMARY KEY(entity_id,tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_entity_tags_tag ON asset_entity_tags(tag_id,entity_id);
+CREATE TABLE IF NOT EXISTS asset_entity_projects (
+ entity_id TEXT NOT NULL REFERENCES asset_entities(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, PRIMARY KEY(entity_id,project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_entity_projects_project ON asset_entity_projects(project_id,entity_id);

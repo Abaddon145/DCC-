@@ -886,3 +886,209 @@ fn search_treats_quotes_wildcards_and_empty_query_literally() {
         2
     );
 }
+fn prompt_input() -> super::intelligence_models::PromptInput {
+    serde_json::from_value(serde_json::json!({"assetId":null,"expectedRevision":null,"name":"雨夜城市 Prompt","description":"创作说明","content":"cinematic city","model":"记录模型","parameters":{"seed":42}})).unwrap()
+}
+#[test]
+fn prompt_crud_requires_json_object_and_revision() {
+    let (_dir, mut db) = fixture();
+    let mut input = prompt_input();
+    let saved = super::prompt::upsert(&mut db, &input).unwrap();
+    assert_eq!(saved.asset.asset_type, "prompt");
+    assert_eq!(saved.revision, 1);
+    input.asset_id = Some(saved.asset.id.clone());
+    input.expected_revision = Some(saved.revision);
+    input.content = "new content".into();
+    let updated = super::prompt::upsert(&mut db, &input).unwrap();
+    assert_eq!(updated.revision, 2);
+    assert_eq!(
+        super::prompt::get(&db, &saved.asset.id).unwrap().content,
+        "new content"
+    );
+    assert!(super::prompt::upsert(&mut db, &input).is_err());
+    input.expected_revision = Some(2);
+    input.parameters = serde_json::json!([]);
+    assert!(super::prompt::upsert(&mut db, &input).is_err());
+    input.parameters = serde_json::json!({});
+    input.content = "字".repeat(100001);
+    assert!(super::prompt::upsert(&mut db, &input).is_err());
+    assert_eq!(
+        super::prompt::get(&db, &saved.asset.id).unwrap().content,
+        "new content"
+    );
+}
+#[test]
+fn prompt_trash_restore_purge_keeps_external_assets_and_shared_tags() {
+    let (dir, mut db) = fixture();
+    let other = asset(&db, "保留的普通素材");
+    let p = super::prompt::upsert(&mut db, &prompt_input()).unwrap();
+    super::service::set_tags(&mut db, &p.asset.id, "zh-CN", &["文本专属".into()]).unwrap();
+    relation(&db, &p.asset.id, &other, "generated_from");
+    let batch = super::entities::trash(&mut db, &[p.asset.id.clone()]).unwrap();
+    assert!(
+        repository::read_asset(&db, &p.asset.id, "zh-CN")
+            .unwrap()
+            .deleted
+    );
+    crate::db::restore_trash_batch(&mut db, &batch.batch_id).unwrap();
+    assert_eq!(
+        super::prompt::get(&db, &p.asset.id).unwrap().asset.tags,
+        vec!["文本专属"]
+    );
+    let origin = repository::origin(&db, &other).unwrap();
+    let b = crate::db::delete_library_items(
+        &mut db,
+        crate::models::DeleteRequest {
+            asset_ids: vec![origin.id],
+            category_id: None,
+        },
+    )
+    .unwrap();
+    crate::db::purge_trash_batch(&mut db, dir.path(), &b.batch_id).unwrap();
+    assert_eq!(
+        super::prompt::get(&db, &p.asset.id).unwrap().asset.tags,
+        vec!["文本专属"]
+    );
+    let keeper = asset(&db, "另一素材");
+    relation(&db, &p.asset.id, &keeper, "related_to");
+    let batch = super::entities::trash(&mut db, &[p.asset.id.clone()]).unwrap();
+    crate::db::purge_trash_batch(&mut db, dir.path(), &batch.batch_id).unwrap();
+    assert!(super::prompt::get(&db, &p.asset.id).is_err());
+    assert!(repository::origin(&db, &keeper).is_ok());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_relations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+fn downgrade_registry_to_v21(db: &Connection) {
+    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER asset_core_version_cleanup; CREATE TABLE registry_v21(id TEXT PRIMARY KEY,legacy_asset_id TEXT UNIQUE REFERENCES assets(id) ON DELETE CASCADE,media_entry_id TEXT UNIQUE REFERENCES media_entries(id) ON DELETE CASCADE,created_at TEXT NOT NULL,CHECK((legacy_asset_id IS NULL)<>(media_entry_id IS NULL))); INSERT INTO registry_v21(id,legacy_asset_id,media_entry_id,created_at) SELECT id,legacy_asset_id,media_entry_id,created_at FROM asset_core; DROP TABLE asset_core; ALTER TABLE registry_v21 RENAME TO asset_core;").unwrap();
+    db.execute_batch(include_str!("schema.sql")).unwrap();
+    db.execute_batch(
+        "PRAGMA foreign_keys=ON; UPDATE schema_meta SET value='21' WHERE key='schema_version';",
+    )
+    .unwrap();
+}
+#[test]
+fn migration_preserves_v21_identity_files_versions_and_triggers() {
+    let (dir, db) = fixture();
+    let owner = asset(&db, "旧资产");
+    let origin = repository::origin(&db, &owner).unwrap();
+    let image = uuid::Uuid::new_v4().to_string();
+    db.execute("INSERT INTO images(id,asset_id,original_name,original_rel_path,thumbnail_rel_path,is_cover,sort_order,created_at) VALUES(?1,?2,'原图.png','images/original.png','images/thumb.png',1,0,'old')",params![image,origin.id]).unwrap();
+    repository::register_files(&db, &owner).unwrap();
+    let file: String = db
+        .query_row(
+            "SELECT id FROM asset_files WHERE asset_id=?1 AND role='original'",
+            [&owner],
+            |r| r.get(0),
+        )
+        .unwrap();
+    std::fs::create_dir_all(dir.path().join("images")).unwrap();
+    std::fs::write(dir.path().join("images/original.png"), b"original").unwrap();
+    super::service::create_version(
+        &db,
+        dir.path(),
+        &super::models::CoreVersionInput {
+            asset_id: owner.clone(),
+            file_id: file.clone(),
+            version: "v001".into(),
+            note: "old".into(),
+        },
+    )
+    .unwrap();
+    downgrade_registry_to_v21(&db);
+    super::intelligence_migration::migrate(&db).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM pragma_table_info('asset_core') WHERE name='entity_id'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(repository::origin(&db, &owner).unwrap().id, origin.id);
+    assert_eq!(
+        db.query_row(
+            "SELECT file_id FROM asset_versions WHERE asset_id=?1",
+            [&owner],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        file
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT original_rel_path FROM images WHERE id=?1",
+            [&image],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "images/original.png"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+    db.execute("DELETE FROM assets WHERE id=?1", [origin.id])
+        .unwrap();
+    assert!(repository::origin(&db, &owner).is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_versions", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    crate::db::open_database(&dir.path().join("library.db")).unwrap();
+}
+#[test]
+fn migration_failure_rolls_back_and_restores_foreign_keys() {
+    let (_dir, db) = fixture();
+    let owner = asset(&db, "保留");
+    downgrade_registry_to_v21(&db);
+    db.execute_batch("PRAGMA foreign_keys=OFF; INSERT INTO asset_sources(id,asset_id,source_type,url,author,created_at) VALUES('orphan','missing','web','https://example.com','','old'); PRAGMA foreign_keys=ON;").unwrap();
+    assert!(super::intelligence_migration::migrate(&db).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM asset_core WHERE id=?1",
+            [&owner],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM pragma_table_info('asset_core') WHERE name='entity_id'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+#[test]
+fn migration_is_idempotent_on_restored_v22_backup() {
+    let (_dir, mut db) = fixture();
+    let p = super::prompt::upsert(&mut db, &prompt_input()).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
+    assert_eq!(super::prompt::get(&db, &p.asset.id).unwrap().revision, 1);
+    assert_eq!(
+        db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}

@@ -11,3 +11,5 @@ export type AnalysisMode="text"|"visual";
 export interface AnalysisRequest {assetId:string;previewId:string;force:boolean}
 export interface AnalysisInputPreview {id:string;assetId:string;model:string;mode:AnalysisMode;summary:string;fingerprint:string;images:{dataUrl:string;timestamp:number|null;label:string}[];estimatedTokens:number;warnings:string[];cachedAnalysisId:string|null}
 export interface AssetAnalysis {id:string;assetId:string;description:string;keywords:string[];scene:string;style:string;camera:string;lighting:string;mood:string;model:string;mode:AnalysisMode;inputFingerprint:string;formatVersion:number;createdAt:string;actualTokens:number|null}
+export interface PromptInput {assetId:string|null;expectedRevision:number|null;name:string;description:string;content:string;model:string;parameters:Record<string,unknown>}
+export interface PromptAsset {asset:Asset;content:string;model:string;parameters:Record<string,unknown>;revision:number;createdAt:string;updatedAt:string}
