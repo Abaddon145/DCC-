@@ -39,7 +39,7 @@ export interface DownloadSettings {directory:string;concurrency:number;proxy:str
 export interface DownloadFormat {id:string;extension:string;width?:number|null;height?:number|null;fps?:number|null;videoCodec?:string|null;audioCodec?:string|null;size?:number|null;audioBitrate?:number|null;sampleRate?:number|null}
 export interface DownloadInfo {url:string;title:string;thumbnail:string|null;duration:number|null;author:string;platform:string;formats:DownloadFormat[];subtitleLanguages:string[];entries:{url:string;title:string;duration:number|null}[]}
 export interface DownloadTool {name:string;path:string|null;version:string|null;ready:boolean;message:string}
-export interface DownloadResult {progress?:{downloaded:number;total:number|null;speed:number|null;eta:number|null;percent:number|null};rows?:{entryId:string;name:string;status:string}[];outputPath?:string}
+  export interface DownloadResult {progress?:{downloaded:number;total:number|null;speed:number|null;eta:number|null;percent:number|null};rows?:{entryId:string;assetId?:string;name:string;status:string}[];outputPath?:string}
 
 export interface LocalizedAssetText { name: string; description: string; tags: string[]; license: string }
 

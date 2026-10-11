@@ -79,8 +79,38 @@ fn import_downloaded(
     crate::media_library::reindex(&tx, id)?;
     tx.commit().map_err(|e| e.to_string())?;
     retain_subtitles(db, base, file, id, stop)?;
+    if stop() {
+        return Err("核心资产登记已停止，已入库文件保留，可继续任务".into());
+    }
+    // The managed media already owns the bytes; core registration is references only.
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let asset_id = crate::asset::repository::register_origin(
+        &tx,
+        &crate::asset::models::CoreOrigin {
+            kind: "media".into(),
+            id: id.clone(),
+        },
+    )?;
+    crate::asset::repository::register_files(&tx, &asset_id)?;
+    let file_id:String=tx.query_row("SELECT f.id FROM asset_files f JOIN media_entries m ON m.primary_file_id=f.source_id WHERE f.asset_id=?1 AND f.source_kind='mediaFile' AND f.role='original'",[&asset_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    crate::asset::metadata::save(
+        &tx,
+        &file_id,
+        &crate::asset::models::AssetMetadataValues {
+            width: if audio { None } else { media_info.width },
+            height: if audio { None } else { media_info.height },
+            duration: media_info.duration,
+            codec: Some(media_info.codec.clone()),
+            fps: if audio { None } else { media_info.fps },
+        },
+    )
+    .map_err(|e| format!("核心资产登记失败：{e}；已托管文件和下载原件保留，可重试"))?;
+    if stop() {
+        return Err("核心资产登记已停止，文件保留".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(
-        serde_json::json!({"entryId":id,"name":info.title,"status":row.status,"mediaInfo":media_info}),
+        serde_json::json!({"entryId":id,"assetId":asset_id,"name":info.title,"status":row.status,"mediaInfo":media_info}),
     )
 }
 fn retain_subtitles(
@@ -770,6 +800,25 @@ mod tests {
             let detail =
                 crate::media_library::get(&db, result["entryId"].as_str().unwrap()).unwrap();
             assert!(detail.entry.thumbnail_file_id.is_some());
+            let core = crate::asset::repository::get(
+                &db,
+                base,
+                result["assetId"]
+                    .as_str()
+                    .expect("download returns core identity"),
+                "zh-CN",
+            )
+            .unwrap();
+            assert_eq!(core.asset.origin.id, detail.entry.id);
+            assert_eq!(core.metadata.len(), 1);
+            assert_eq!(core.metadata[0].width, if audio { None } else { Some(64) });
+            assert_eq!(
+                core.metadata[0].codec.as_deref(),
+                result["mediaInfo"]["codec"].as_str()
+            );
+            if !audio {
+                assert!(core.metadata[0].fps.unwrap() > 0.0);
+            }
             assert_eq!(
                 result["mediaInfo"]["width"].as_u64(),
                 if audio { None } else { Some(64) }
@@ -831,6 +880,14 @@ mod tests {
         )
         .unwrap();
         let id = row["entryId"].as_str().unwrap();
+        let asset_id = row["assetId"].as_str().expect("stable core id");
+        let core = crate::asset::repository::get(&db, base, asset_id, "zh-CN").unwrap();
+        assert_eq!(
+            core.files.iter().filter(|f| f.role == "original").count(),
+            1
+        );
+        assert_eq!(core.metadata[0].codec.as_deref(), Some("pcm_s16le"));
+        assert_eq!(core.sources[0].url, info.url);
         let detail = crate::media_library::get(&db, id).unwrap();
         assert_eq!(detail.entry.source_url, info.url);
         assert!(detail.entry.thumbnail_file_id.is_some());
@@ -894,7 +951,9 @@ mod tests {
             })
         });
         for worker in workers {
-            assert_eq!(worker.join().unwrap()["entryId"], id);
+            let result = worker.join().unwrap();
+            assert_eq!(result["entryId"], id);
+            assert_eq!(result["assetId"], asset_id);
         }
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM media_entries", [], |r| r
@@ -963,6 +1022,126 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
         assert!(db.execute("INSERT INTO media_sources(id,media_id,platform,url,title,author,download_task_id,created_at) VALUES('a','missing','','','','','none','now')",[]).is_err());
+    }
+
+    #[test]
+    fn core_registration_failure_keeps_managed_download_and_retry_reuses_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+        let resource = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let file = base.join("sound.wav");
+        let tool = crate::runtime::tools::require(Some(&resource), "ffmpeg").unwrap();
+        let args = [
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=480:duration=0.2",
+            "-c:a",
+            "pcm_s16le",
+        ]
+        .map(str::to_string)
+        .into_iter()
+        .chain(Some(file.to_string_lossy().into()))
+        .collect::<Vec<_>>();
+        crate::runtime::process::capture(
+            &tool,
+            &args,
+            std::time::Duration::from_secs(10),
+            &|| false,
+            &mut |_| {},
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("sound.zh.vtt"),
+            "WEBVTT\n\n00:00.000 --> 00:00.200\n声音",
+        )
+        .unwrap();
+        let info = parser::info(
+            "https://youtube.com/watch?v=owned",
+            &serde_json::json!({"title":"声音","uploader":"作者"}),
+        )
+        .unwrap();
+        db.execute("INSERT INTO download_tasks(id,task_id,url,status,created_at) VALUES('task','task',?1,'processing','now')",[&info.url]).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_core_metadata BEFORE INSERT ON asset_metadata BEGIN SELECT RAISE(ABORT,'injected postflight failure'); END;").unwrap();
+        assert!(import_downloaded(
+            &mut db,
+            base,
+            Some(&resource),
+            &file,
+            &info,
+            "task",
+            true,
+            &|| false
+        )
+        .is_err());
+        let entry_id: String = db
+            .query_row("SELECT id FROM media_entries", [], |r| r.get(0))
+            .unwrap();
+        let files_before: Vec<(String, String)> = db
+            .prepare("SELECT id,rel_path FROM media_files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(files_before
+            .iter()
+            .all(|(_, path)| base.join(path).is_file()));
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        db.execute_batch("DROP TRIGGER reject_core_metadata;")
+            .unwrap();
+        let row = import_downloaded(
+            &mut db,
+            base,
+            Some(&resource),
+            &file,
+            &info,
+            "task",
+            true,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(row["entryId"], entry_id);
+        let files_after: Vec<(String, String)> = db
+            .prepare("SELECT id,rel_path FROM media_files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(files_before, files_after);
+        let detail =
+            crate::asset::repository::get(&db, base, row["assetId"].as_str().unwrap(), "zh-CN")
+                .unwrap();
+        assert_eq!(detail.metadata.len(), 1);
+        assert!(detail.files.iter().any(|f| f.role == "dependency"));
+        assert_eq!(detail.sources.len(), 1);
+        assert_eq!(detail.sources[0].source_type, "youtube");
+        assert!(import_downloaded(
+            &mut db,
+            base,
+            Some(&resource),
+            &file,
+            &info,
+            "task",
+            true,
+            &|| true
+        )
+        .is_err());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
     #[test]
     fn download_paths_and_duplicate_outputs_do_not_overwrite() {
