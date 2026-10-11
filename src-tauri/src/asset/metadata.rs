@@ -110,7 +110,7 @@ pub fn process_asset(
     Ok(serde_json::json!({"assetId":asset_id,"rows":rows,"cancelled":stop()}))
 }
 
-fn file_kind(db: &Connection, source: &SourceFileRef) -> Result<String, String> {
+pub(crate) fn file_kind(db: &Connection, source: &SourceFileRef) -> Result<String, String> {
     let sql=match source.kind.as_str(){
         "image"=>"SELECT 'image' FROM images f JOIN assets a ON a.id=f.asset_id WHERE f.id=?1 AND a.deleted_at IS NULL",
         "assetMedia"=>"SELECT f.kind FROM asset_media f JOIN assets a ON a.id=f.asset_id WHERE f.id=?1 AND a.deleted_at IS NULL",

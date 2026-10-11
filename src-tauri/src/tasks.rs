@@ -1150,11 +1150,11 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         }
         TaskRequest::AssetScan { root } => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();
-            let base = state.with_active_mut(|active| {
+            let (base, db_path) = state.with_active_mut(|active| {
                 if active.marker.library_id != task.library_id {
                     return Err("扫描所属素材库已切换".into());
                 }
-                Ok(active.base_dir.clone())
+                Ok((active.base_dir.clone(), active.db_path.clone()))
             })?;
             let manifest = crate::asset::scanner::manifest_path(&base, &task.id)?;
             let last = std::cell::Cell::new(std::time::Instant::now());
@@ -1177,6 +1177,10 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                 },
                 &|| state.tasks.should_stop(&task.id),
             )?;
+            let db = open_media_worker_connection(&db_path)?;
+            let summary = crate::asset::service::annotate_scan(&db, &manifest, summary, &|| {
+                state.tasks.should_stop(&task.id)
+            })?;
             let value = serde_json::to_value(summary).map_err(|e| e.to_string())?;
             state.tasks.update(
                 &task.id,

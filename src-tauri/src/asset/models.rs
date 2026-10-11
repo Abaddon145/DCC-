@@ -28,6 +28,9 @@ pub struct AssetFile {
     pub hash: String,
     pub created_at: String,
     pub available: bool,
+    pub preview: Option<SourceFileRef>,
+    pub media_entry_id: Option<String>,
+    pub logical_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +99,33 @@ pub struct AssetLink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreVersionInput {
+    pub asset_id: String,
+    pub file_id: String,
+    pub version: String,
+    #[serde(default)]
+    pub note: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreSourceInput {
+    pub asset_id: String,
+    pub source_type: String,
+    pub url: String,
+    #[serde(default)]
+    pub author: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreTag {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreAssetDetail {
     pub asset: Asset,
@@ -107,6 +137,7 @@ pub struct CoreAssetDetail {
     pub knowledge_links: Vec<AssetLink>,
     pub related_assets: Vec<AssetLink>,
     pub processing_history: Vec<serde_json::Value>,
+    pub tag_details: Vec<CoreTag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1102,3 +1102,189 @@ fn shared_tag_merge_and_rename_preserve_media_relationships_and_indexes() {
         1
     );
 }
+
+#[test]
+fn versions_attach_only_active_originals_and_deletion_preserves_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let m = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let a = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let rel = "media-library/image/旧图/原图.png";
+    std::fs::create_dir_all(dir.path().join("media-library/image/旧图")).unwrap();
+    std::fs::write(dir.path().join(rel), b"original").unwrap();
+    let detail = repository::get(&db, dir.path(), &m, "zh-CN").unwrap();
+    let f = &detail.files[0];
+    let mut input = CoreVersionInput {
+        asset_id: a.clone(),
+        file_id: f.id.clone(),
+        version: "v001".into(),
+        note: "".into(),
+    };
+    assert!(super::service::create_version(&db, dir.path(), &input).is_err());
+    let attached = super::service::attach_file(&db, dir.path(), &a, &f.source_ref).unwrap();
+    assert_eq!(
+        super::service::attach_file(&db, dir.path(), &a, &f.source_ref)
+            .unwrap()
+            .id,
+        attached.id
+    );
+    input.file_id = attached.id.clone();
+    for label in ["v001", "v002", "Final"] {
+        input.version = label.into();
+        super::service::create_version(&db, dir.path(), &input).unwrap();
+    }
+    assert!(super::service::create_version(&db, dir.path(), &input).is_err());
+    let version = repository::get(&db, dir.path(), &a, "zh-CN")
+        .unwrap()
+        .versions[0]
+        .id
+        .clone();
+    super::service::delete_version(&db, &version).unwrap();
+    assert!(dir.path().join(rel).is_file());
+    let mut invalid = f.source_ref.clone();
+    invalid.role = "thumbnail".into();
+    assert!(super::service::attach_file(&db, dir.path(), &a, &invalid).is_err());
+    db.execute("UPDATE media_entries SET deleted_at='now'", [])
+        .unwrap();
+    assert!(super::service::attach_file(&db, dir.path(), &a, &f.source_ref).is_err());
+    std::fs::remove_file(dir.path().join(rel)).unwrap();
+    input.version = "v003".into();
+    assert!(super::service::create_version(&db, dir.path(), &input).is_err());
+}
+
+#[test]
+fn sources_aggregate_old_values_validate_urls_and_preserve_old_edits() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    db.execute(
+        "UPDATE assets SET source_url='https://www.fab.com/listings/owned',author='Artist'",
+        [],
+    )
+    .unwrap();
+    let a = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let detail = repository::get(&db, std::path::Path::new("."), &a, "zh-CN").unwrap();
+    assert_eq!(detail.sources.len(), 1);
+    assert!(!detail.sources[0].editable);
+    let mut input = CoreSourceInput {
+        asset_id: a.clone(),
+        source_type: "web".into(),
+        url: "https://example.com/reference".into(),
+        author: "创作者".into(),
+    };
+    let source = super::service::add_source(&db, &input).unwrap();
+    assert_eq!(
+        source.id,
+        super::service::add_source(&db, &input).unwrap().id
+    );
+    for url in [
+        "javascript:alert(1)",
+        "file:///C:/secret",
+        "https://name:password@example.com/",
+    ] {
+        input.url = url.into();
+        assert!(super::service::add_source(&db, &input).is_err());
+    }
+    assert!(super::service::remove_source(&db, &a, &detail.sources[0].id).is_err());
+    super::service::remove_source(&db, &a, &source.id).unwrap();
+    assert_eq!(
+        repository::get(&db, std::path::Path::new("."), &a, "zh-CN")
+            .unwrap()
+            .sources
+            .len(),
+        1
+    );
+    assert_eq!(detail.knowledge_links.len(), 1);
+}
+
+#[test]
+fn source_search_uses_the_same_host_rules_and_download_sources_as_details() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    crate::downloader::service::migrate(&db).unwrap();
+    db.execute(
+        "UPDATE assets SET source_url='https://evil.example/fab.com/fake'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE media_entries SET source_url='https://www.fab.com/listings/item'",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO download_tasks(id,task_id,url,status,created_at) VALUES('download','task','https://youtube.com/watch?v=one','completed','now')",[]).unwrap();
+    db.execute("INSERT INTO media_sources(id,media_id,platform,url,title,author,download_task_id,created_at) VALUES('source',?1,'youtube','https://YouTube.com:443/watch?v=one','视频','作者','download','now')",[OLD_ID]).unwrap();
+    let search = |source: &str| {
+        repository::search(
+            &db,
+            &CoreSearchRequest {
+                query: String::new(),
+                asset_type: None,
+                source: Some(source.into()),
+                locale: "zh-CN".into(),
+                offset: 0,
+                limit: 80,
+            },
+        )
+        .unwrap()
+    };
+    let fab = search("fab");
+    assert_eq!(fab.total, 1);
+    assert_eq!(fab.items[0].origin.kind, "media");
+    assert_eq!(search("youtube").total, 1);
+    assert_eq!(search("web").total, 1);
+    assert_eq!(search("local").total, 0);
+}
+
+#[test]
+fn scan_summary_counts_existing_library_and_trash_duplicates_before_confirmation() {
+    let source = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let path = source.path().join("已有.png");
+    std::fs::write(&path, b"same-content").unwrap();
+    std::fs::write(source.path().join("新.png"), b"different").unwrap();
+    let hash = crate::file_digest::digest_file(&path).unwrap().1;
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    db.execute("UPDATE media_files SET checksum=?1", [hash])
+        .unwrap();
+    let manifest =
+        super::scanner::manifest_path(library.path(), &uuid::Uuid::new_v4().to_string()).unwrap();
+    for deleted in [false, true] {
+        db.execute(
+            "UPDATE media_entries SET deleted_at=?1",
+            [if deleted { Some("now") } else { None }],
+        )
+        .unwrap();
+        let summary =
+            super::scanner::scan(source.path(), library.path(), &manifest, &|_| {}, &|| false)
+                .unwrap();
+        let summary = super::service::annotate_scan(&db, &manifest, summary, &|| false).unwrap();
+        assert_eq!((summary.importable, summary.duplicate), (1, 1));
+        let page = super::scanner::read_page(&manifest, 0, 100).unwrap();
+        let existing = page.items.iter().find(|r| r.status == "duplicate").unwrap();
+        assert!(existing.duplicate_asset_id.is_some());
+        assert_eq!(existing.message.contains("回收站"), deleted);
+    }
+}

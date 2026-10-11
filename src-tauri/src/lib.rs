@@ -262,6 +262,17 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    asset::commands::search_core_assets,
+                    asset::commands::get_core_asset,
+                    asset::commands::get_asset_scan_page,
+                    asset::commands::set_core_asset_tags,
+                    asset::commands::set_core_tag_color,
+                    asset::commands::link_core_asset_project,
+                    asset::commands::attach_core_asset_file,
+                    asset::commands::create_core_asset_version,
+                    asset::commands::delete_core_asset_version,
+                    asset::commands::add_core_asset_source,
+                    asset::commands::remove_core_asset_source,
                     downloader::service::resolve_download,
                     downloader::service::get_download_tools,
                     downloader::service::get_download_thumbnail,

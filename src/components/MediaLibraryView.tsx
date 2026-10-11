@@ -32,8 +32,8 @@ const FOLDER_DRAG="application/x-stack-media-folder";
 type PointerDrag = {kind:"entries";ids:string[];label:string}|{kind:"folder";id:string;label:string};
 type PointerDrop = {id:string|null;zone:"before"|"inside"|"after"};
 
-interface MediaLibraryViewProps { onAi?: (ids:string[])=>void; kind:MediaKind; onNotify:(message:string,error?:boolean)=>void; paneWidth:number; paneCollapsed:boolean; onPaneWidthChange:(width:number)=>void; onPaneCollapsedChange:(collapsed:boolean)=>void; shortcuts?:Record<string,string> }
-export function MediaLibraryView({onAi,kind,onNotify,paneWidth,paneCollapsed,onPaneWidthChange,onPaneCollapsedChange,shortcuts={}}:MediaLibraryViewProps){
+interface MediaLibraryViewProps { initialEntryId?:string|null;onInitialEntryOpened?:()=>void;onAi?: (ids:string[])=>void; kind:MediaKind; onNotify:(message:string,error?:boolean)=>void; paneWidth:number; paneCollapsed:boolean; onPaneWidthChange:(width:number)=>void; onPaneCollapsedChange:(collapsed:boolean)=>void; shortcuts?:Record<string,string> }
+export function MediaLibraryView({initialEntryId,onInitialEntryOpened,onAi,kind,onNotify,paneWidth,paneCollapsed,onPaneWidthChange,onPaneCollapsedChange,shortcuts={}}:MediaLibraryViewProps){
   const compare=useImageCompare();
   const [context,setContext,contextLoaded]=useWorkspaceState(kind,{request:initial(kind),view:"grid" as "grid"|"list",scroll:0});
   const request=context.request;
@@ -130,6 +130,7 @@ export function MediaLibraryView({onAi,kind,onNotify,paneWidth,paneCollapsed,onP
   useEffect(()=>{const handler=(event:KeyboardEvent)=>{if((event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")||document.querySelector(".modal-backdrop,.lightbox,.command-backdrop"))return;if(shortcutMatches(event,shortcuts.toggleSelection||"Ctrl+M")){event.preventDefault();setSelectionMode(value=>!value);setSelected(new Set())}else if(selectionMode&&shortcutMatches(event,shortcuts.selectAll||"Ctrl+A")){event.preventDefault();void selectAll()}else if(selectionMode&&shortcutMatches(event,shortcuts.deleteSelected||"Delete")){event.preventDefault();void deleteSelected()}};window.addEventListener("keydown",handler);return()=>window.removeEventListener("keydown",handler)},[shortcuts,selectionMode,selected,request,kind]);
   const closeDetail=useCallback(()=>{detailGate.invalidate();setDetail(null);window.requestAnimationFrame(()=>detailReturnFocus.current?.focus())},[detailGate]);
   const openDetail=async(id:string,trigger?:HTMLElement)=>{const version=detailGate.begin();if(trigger)detailReturnFocus.current=trigger;try{const value=await api.getMediaEntry(id);if(detailGate.isCurrent(version))setDetail(value)}catch(error){if(detailGate.isCurrent(version))onNotify(String(error),true)}};
+  useEffect(()=>{if(!initialEntryId)return;let active=true;const version=detailGate.begin();void api.getMediaEntry(initialEntryId).then(value=>{if(active&&detailGate.isCurrent(version)&&value.kind===kind)setDetail(value);}).catch(error=>{if(active)onNotify(String(error),true);}).finally(()=>{if(active)onInitialEntryOpened?.();});return()=>{active=false;};},[initialEntryId,kind,detailGate]);
   const openCardMenu=(item:MediaEntry,x:number,y:number)=>{const ids=selected.has(item.id)?[...selected]:[item.id];const one=ids.length===1;setContextMenu({x,y,title:one?item.name:`${ids.length} 个已选媒体`,items:[
     ...(one&&item.kind==="image"&&compare?[{label:"加入图片 A/B 对比",run:()=>compare.add({kind:"media",id:item.primaryFileId,title:item.name})}]:[]),
     ...(one&&item.kind==="model"?[{label:"在资源管理器中显示",run:()=>void api.openModelLocation(item.id).catch(error=>onNotify(String(error),true))},{label:"导出模型包",run:()=>void exportModel(item.id,onNotify).catch(error=>onNotify(String(error),true))}]:[]),

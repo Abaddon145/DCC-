@@ -2,6 +2,202 @@ use super::{models::*, repository, scanner};
 use rusqlite::{Connection, OptionalExtension};
 use std::{collections::HashSet, path::Path};
 
+pub fn annotate_scan(
+    db: &Connection,
+    manifest: &Path,
+    mut summary: ScanSummary,
+    stop: &dyn Fn() -> bool,
+) -> Result<ScanSummary, String> {
+    use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+    let parent = manifest.parent().ok_or("扫描清单目录无效")?;
+    let stage = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(stage.as_file());
+    let mut header = String::new();
+    Read::by_ref(&mut BufReader::new(
+        std::fs::File::open(manifest).map_err(|e| e.to_string())?,
+    ))
+    .take(128 * 1024 + 1)
+    .read_line(&mut header)
+    .map_err(|e| e.to_string())?;
+    if header.len() > 128 * 1024 {
+        return Err("扫描清单头超出大小限制".into());
+    }
+    writer
+        .write_all(header.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut counts = ScanSummary {
+        cancelled: summary.cancelled,
+        ..Default::default()
+    };
+    // ponytail: one streaming manifest pass, indexed checksum lookups; batch queries only if measured scan latency warrants them.
+    let result = scanner::visit_manifest(manifest, &mut |_, mut row| {
+        if stop() {
+            return Err("扫描核对已停止".into());
+        }
+        mark_scan_duplicate(db, &mut row)?;
+        match row.status.as_str() {
+            "ready" => counts.importable += 1,
+            "duplicate" => counts.duplicate += 1,
+            "unsupported" => counts.unsupported += 1,
+            _ => counts.failed += 1,
+        }
+        counts.total += 1;
+        serde_json::to_writer(&mut writer, &row).map_err(|e| e.to_string())?;
+        writeln!(writer).map_err(|e| e.to_string())
+    });
+    if stop() {
+        summary.cancelled = true;
+        return Ok(summary);
+    }
+    result?;
+    writer.flush().map_err(|e| e.to_string())?;
+    drop(writer);
+    stage.as_file().sync_all().map_err(|e| e.to_string())?;
+    stage.persist(manifest).map_err(|e| e.to_string())?;
+    Ok(counts)
+}
+
+pub fn mark_scan_duplicate(db: &Connection, row: &mut ScanRow) -> Result<(), String> {
+    if row.hash.is_empty() || !matches!(row.status.as_str(), "ready" | "duplicate") {
+        return Ok(());
+    }
+    let duplicate:Option<(String,bool)>=db.query_row("SELECT c.id,e.deleted_at IS NOT NULL FROM media_files f JOIN media_entries e ON e.primary_file_id=f.id JOIN asset_core c ON c.media_entry_id=e.id WHERE f.checksum=?1",[&row.hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    if let Some((id, deleted)) = duplicate {
+        row.status = "duplicate".into();
+        row.duplicate_asset_id = Some(id);
+        row.message = if deleted {
+            "相同文件已在回收站，请先恢复"
+        } else {
+            "当前库已有相同文件，可打开或建立项目引用"
+        }
+        .into();
+    }
+    Ok(())
+}
+
+pub fn create_version(
+    db: &Connection,
+    base: &Path,
+    input: &CoreVersionInput,
+) -> Result<AssetVersion, String> {
+    active_origin(db, &input.asset_id)?;
+    let label = input.version.trim();
+    if label.is_empty() || label.chars().count() > 80 || input.note.chars().count() > 10_000 {
+        return Err("版本标签须为 1–80 字符，说明最多 10000 字符".into());
+    }
+    let file = repository::get(db, base, &input.asset_id, "zh-CN")?
+        .files
+        .into_iter()
+        .find(|f| f.id == input.file_id && f.role == "original")
+        .ok_or("请先附加属于当前资产的托管原件")?;
+    super::metadata::file_kind(db, &file.source_ref)?;
+    repository::file_path(db, base, &file.source_ref)?;
+    let version = AssetVersion {
+        id: uuid::Uuid::new_v4().to_string(),
+        asset_id: input.asset_id.clone(),
+        file_id: input.file_id.clone(),
+        version: label.into(),
+        note: input.note.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    db.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,note,created_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![version.id,version.asset_id,version.file_id,version.version,version.note,version.created_at]).map_err(|e|format!("版本保存失败（标签可能已存在）：{e}"))?;
+    Ok(version)
+}
+pub fn delete_version(db: &Connection, id: &str) -> Result<(), String> {
+    let core: String = db
+        .query_row(
+            "SELECT asset_id FROM asset_versions WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("版本不存在或不属于当前素材库")?;
+    active_origin(db, &core)?;
+    db.execute("DELETE FROM asset_versions WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+pub fn attach_file(
+    db: &Connection,
+    base: &Path,
+    core_id: &str,
+    source: &SourceFileRef,
+) -> Result<AssetFile, String> {
+    active_origin(db, core_id)?;
+    if source.role != "original" {
+        return Err("版本只能附加原件".into());
+    }
+    super::metadata::file_kind(db, source)?;
+    repository::file_path(db, base, source)?;
+    let (name,ext,size,hash):(String,String,i64,String)=db.query_row("SELECT filename,extension,size,hash FROM asset_files WHERE source_kind=?1 AND source_id=?2 AND role='original' LIMIT 1",rusqlite::params![source.kind,source.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or("文件未登记在当前素材库")?;
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("INSERT OR IGNORE INTO asset_files(id,asset_id,source_kind,source_id,role,filename,extension,size,hash,created_at) VALUES(?1,?2,?3,?4,'original',?5,?6,?7,?8,?9)",rusqlite::params![uuid::Uuid::new_v4().to_string(),core_id,source.kind,source.id,name,ext,size,hash,chrono::Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT OR IGNORE INTO asset_metadata(file_id,width,height,duration,codec,fps,updated_at) SELECT f.id,m.width,m.height,m.duration,m.codec,m.fps,m.updated_at FROM asset_files f JOIN asset_files original ON original.source_kind=f.source_kind AND original.source_id=f.source_id AND original.role=f.role JOIN asset_metadata m ON m.file_id=original.id WHERE f.asset_id=?1 AND f.source_kind=?2 AND f.source_id=?3 AND f.role='original'",rusqlite::params![core_id,source.kind,source.id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    repository::get(db, base, core_id, "zh-CN")?
+        .files
+        .into_iter()
+        .find(|f| f.source_ref == *source)
+        .ok_or("文件附加失败".into())
+}
+pub fn add_source(db: &Connection, input: &CoreSourceInput) -> Result<AssetSource, String> {
+    let origin = active_origin(db, &input.asset_id)?;
+    if !matches!(
+        input.source_type.as_str(),
+        "local" | "fab" | "youtube" | "pinterest" | "web" | "other"
+    ) || input.author.chars().count() > 300
+        || input.url.len() > 8192
+    {
+        return Err("来源类型、作者或链接长度无效".into());
+    }
+    let raw = input.url.trim();
+    let url = if input.source_type == "local" && raw.is_empty() {
+        String::new()
+    } else {
+        let url = url::Url::parse(raw).map_err(|_| "来源链接无效")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err("仅允许不包含用户名密码的 HTTP(S) 来源".into());
+        }
+        url.to_string()
+    };
+    let sources = repository::sources(db, &input.asset_id, &origin)?;
+    if let Some(old) = sources.into_iter().find(|s| {
+        s.source_type == input.source_type && s.url == url && s.author == input.author.trim()
+    }) {
+        return Ok(old);
+    }
+    let result = AssetSource {
+        id: uuid::Uuid::new_v4().to_string(),
+        asset_id: input.asset_id.clone(),
+        source_type: input.source_type.clone(),
+        url,
+        author: input.author.trim().into(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        editable: true,
+    };
+    db.execute("INSERT INTO asset_sources(id,asset_id,source_type,url,author,created_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![result.id,result.asset_id,result.source_type,result.url,result.author,result.created_at]).map_err(|e|e.to_string())?;
+    Ok(result)
+}
+pub fn remove_source(db: &Connection, core_id: &str, id: &str) -> Result<(), String> {
+    active_origin(db, core_id)?;
+    if db
+        .execute(
+            "DELETE FROM asset_sources WHERE id=?1 AND asset_id=?2",
+            rusqlite::params![id, core_id],
+        )
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("此来源属于旧详情或其他资产，未删除".into());
+    }
+    Ok(())
+}
+
 pub fn active_origin(db: &Connection, core_id: &str) -> Result<CoreOrigin, String> {
     let origin = repository::origin(db, core_id)?;
     let table = if origin.kind == "legacy" {
