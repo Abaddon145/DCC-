@@ -32,6 +32,12 @@ pub enum TaskRequest {
         root: String,
     },
     AssetImport(crate::asset::models::CoreImportRequest),
+    AssetProcess {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        #[serde(default)]
+        force: bool,
+    },
     BrowserCapture {
         id: String,
     },
@@ -68,6 +74,7 @@ impl TaskRequest {
             Self::MediaImport(_) => "媒体导入",
             Self::AssetScan { .. } => "资产目录扫描",
             Self::AssetImport(_) => "资产批量导入",
+            Self::AssetProcess { .. } => "资产预览与元数据",
             Self::BrowserCapture { .. } => "浏览器采集",
             Self::ModelThumbnail { .. } => "模型缩略图",
             Self::UeAssets(_) => "UE 原生资产（只读历史）",
@@ -89,6 +96,9 @@ impl TaskRequest {
         match self {
             Self::Download(request) => crate::downloader::domain::validate_request(request),
             Self::AssetImport(request) => crate::asset::service::validate_import(request),
+            Self::AssetProcess { asset_id, .. } => Uuid::parse_str(asset_id)
+                .map(|_| ())
+                .map_err(|_| "资产 ID 无效".into()),
             Self::AssetScan { root } if root.trim().is_empty() || root.len() > 32768 => {
                 Err("扫描目录无效".into())
             }
@@ -921,7 +931,9 @@ pub fn start_library_task_for_library(
 ) -> Result<LibraryTask, String> {
     if matches!(
         payload,
-        TaskRequest::AssetScan { .. } | TaskRequest::AssetImport(_)
+        TaskRequest::AssetScan { .. }
+            | TaskRequest::AssetImport(_)
+            | TaskRequest::AssetProcess { .. }
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -1094,6 +1106,48 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::AssetProcess { asset_id, force } => {
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<AppState>();
+                let (base, path) = state.with_active_mut(|active| {
+                    if active.marker.library_id != task.library_id {
+                        return Err("处理所属素材库已切换".into());
+                    }
+                    Ok((active.base_dir.clone(), active.db_path.clone()))
+                })?;
+                let db = open_media_worker_connection(&path)?;
+                let resource = app.path().resource_dir().ok();
+                state
+                    .tasks
+                    .update(&task.id, 0, 1, String::new(), "processing".into(), None);
+                let report = crate::asset::metadata::process_asset(
+                    &db,
+                    &base,
+                    resource.as_deref(),
+                    &asset_id,
+                    force,
+                    &|| state.tasks.should_stop(&task.id),
+                )?;
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    String::new(),
+                    "processing".into(),
+                    Some(report.clone()),
+                );
+                if report["rows"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["status"] == "error"))
+                {
+                    Err("部分文件处理失败，原件和已有预览保留，请查看逐文件报告".into())
+                } else {
+                    Ok(report)
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
         TaskRequest::AssetScan { root } => tauri::async_runtime::spawn_blocking(move || {
             let state = app.state::<AppState>();
             let base = state.with_active_mut(|active| {

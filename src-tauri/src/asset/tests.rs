@@ -678,3 +678,231 @@ fn cancelled_atomic_copy_leaves_no_output_and_never_overwrites_existing_file() {
     assert!(crate::media::copy_atomic(&source, &target).is_err());
     assert_eq!(std::fs::read(&target).unwrap(), b"existing");
 }
+
+#[test]
+fn image_metadata_and_thumbnail_are_managed_and_fail_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("source.png");
+    image::RgbaImage::from_pixel(8, 6, image::Rgba([4, 5, 6, 255]))
+        .save(&file)
+        .unwrap();
+    let data = super::metadata::analyze(&file, "image", None, &|| false).unwrap();
+    assert_eq!((data.width, data.height), (Some(8), Some(6)));
+    assert_eq!(data.duration, None);
+    let id = uuid::Uuid::new_v4().to_string();
+    let thumb =
+        crate::media_engine::thumbnail::generate(dir.path(), None, &id, &file, "image", &|| false)
+            .unwrap();
+    assert!(thumb
+        .relative_path
+        .starts_with(&format!(".dcc/cache/thumbnails/{id}/")));
+    assert!(dir.path().join(&thumb.relative_path).is_file());
+    assert!(crate::media_engine::thumbnail::generate(
+        dir.path(),
+        None,
+        "../bad",
+        &file,
+        "image",
+        &|| false
+    )
+    .is_err());
+    assert!(crate::media_engine::thumbnail::generate(
+        dir.path(),
+        None,
+        &id,
+        &file,
+        "image",
+        &|| true
+    )
+    .is_err());
+    let original = std::fs::read(&file).unwrap();
+    let invalid = dir.path().join("invalid.mp4");
+    std::fs::write(&invalid, b"broken").unwrap();
+    assert!(super::metadata::analyze(
+        &invalid,
+        "video",
+        Some(&dir.path().join("missing")),
+        &|| false
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), original);
+    assert!(dir.path().join(thumb.relative_path).is_file());
+}
+
+#[test]
+fn metadata_save_rejects_invalid_numbers_and_unknown_files() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let id: String = db
+        .query_row("SELECT id FROM asset_files LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let good = AssetMetadataValues {
+        width: Some(8),
+        height: Some(6),
+        duration: Some(12.5),
+        codec: Some("h264".into()),
+        fps: Some(30000.0 / 1001.0),
+    };
+    super::metadata::save(&db, &id, &good).unwrap();
+    for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+        let mut bad = good.clone();
+        bad.duration = Some(invalid);
+        assert!(super::metadata::save(&db, &id, &bad).is_err());
+        bad = good.clone();
+        bad.fps = Some(invalid);
+        assert!(super::metadata::save(&db, &id, &bad).is_err());
+    }
+    assert_eq!(
+        db.query_row("SELECT duration FROM asset_metadata", [], |r| r
+            .get::<_, f64>(0))
+            .unwrap(),
+        12.5
+    );
+    assert!(super::metadata::save(&db, "missing", &good).is_err());
+}
+
+#[test]
+fn processing_reuses_old_thumbnail_and_replaces_only_committed_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    let source = dir.path().join("fixture.png");
+    image::RgbaImage::new(12, 9).save(&source).unwrap();
+    let imported = crate::media_library::import(
+        &mut db,
+        dir.path(),
+        None,
+        crate::models::MediaImportRequest {
+            kind: crate::models::MediaKind::Image,
+            paths: vec![source.to_string_lossy().into_owned()],
+            folder_id: None,
+            tags: vec![],
+            favorite: false,
+        },
+    )
+    .unwrap();
+    let entry = imported.rows[0].entry_id.as_ref().unwrap();
+    let core = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: entry.clone(),
+        },
+    )
+    .unwrap();
+    let old: String = db
+        .query_row(
+            "SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+            [entry],
+            |r| r.get(0),
+        )
+        .unwrap();
+    super::metadata::process_asset(&db, dir.path(), None, &core, false, &|| false).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+            [entry],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        old
+    );
+    super::metadata::process_asset(&db, dir.path(), None, &core, true, &|| false).unwrap();
+    let cache: String = db
+        .query_row(
+            "SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+            [entry],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(cache.starts_with(".dcc/cache/thumbnails/"));
+    super::metadata::process_asset(&db, dir.path(), None, &core, true, &|| false).unwrap();
+    assert!(
+        !dir.path().join(&cache).exists(),
+        "superseded generated cache must not become orphaned"
+    );
+    let detail = repository::get(&db, dir.path(), &core, "zh-CN").unwrap();
+    let original = detail.files.iter().find(|f| f.role == "original").unwrap();
+    let original_path = repository::file_path(&db, dir.path(), &original.source_ref).unwrap();
+    std::fs::write(&original_path, b"broken").unwrap();
+    let report =
+        super::metadata::process_asset(&db, dir.path(), None, &core, true, &|| false).unwrap();
+    assert_eq!(report["rows"][0]["status"], "error");
+    assert!(dir
+        .path()
+        .join(
+            db.query_row(
+                "SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+                [entry],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()
+        )
+        .is_file());
+    assert!(original_path.is_file());
+}
+
+#[test]
+fn local_audio_video_metadata_and_short_clip_thumbnail_use_bundled_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let resource = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let ffmpeg = crate::runtime::tools::require(Some(&resource), "ffmpeg").unwrap();
+    for (kind, filename, input, seconds) in [
+        (
+            "audio",
+            "fixture.wav",
+            "sine=frequency=440:sample_rate=48000",
+            "12.5",
+        ),
+        (
+            "video",
+            "fixture.mp4",
+            "color=c=blue:s=64x48:r=30000/1001",
+            "0.2",
+        ),
+    ] {
+        let path = dir.path().join(filename);
+        let args = ["-y", "-f", "lavfi", "-i", input, "-t", seconds]
+            .map(str::to_string)
+            .into_iter()
+            .chain(Some(path.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>();
+        crate::runtime::process::capture(
+            &ffmpeg,
+            &args,
+            std::time::Duration::from_secs(30),
+            &|| false,
+            &mut |_| {},
+        )
+        .unwrap();
+        let data = super::metadata::analyze(&path, kind, Some(&resource), &|| false).unwrap();
+        if kind == "audio" {
+            assert_eq!(data.duration, Some(12.5));
+            assert_eq!((data.width, data.height, data.fps), (None, None, None));
+        } else {
+            assert_eq!((data.width, data.height), (Some(64), Some(48)));
+            assert!((data.fps.unwrap() - 30000.0 / 1001.0).abs() < 0.001);
+        }
+        let thumb = crate::media_engine::thumbnail::generate(
+            dir.path(),
+            Some(&resource),
+            &uuid::Uuid::new_v4().to_string(),
+            &path,
+            kind,
+            &|| false,
+        )
+        .unwrap();
+        assert!(dir.path().join(thumb.relative_path).is_file());
+        std::fs::write(&path, b"invalid media").unwrap();
+        assert!(super::metadata::analyze(&path, kind, Some(&resource), &|| false).is_err());
+    }
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    assert!(crate::media_engine::thumbnail::generate(
+        dir.path(),
+        None,
+        &uuid::Uuid::new_v4().to_string(),
+        outside.path(),
+        "image",
+        &|| false
+    )
+    .is_err());
+}

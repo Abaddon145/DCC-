@@ -311,13 +311,7 @@ pub(crate) fn process(
     fs::create_dir_all(thumbnail.parent().ok_or("缩略图目录无效")?)
         .map_err(|error| error.to_string())?;
     if kind == "video" {
-        let mut thumb = Command::new(ffmpeg);
-        thumb
-            .args(["-y", "-ss", "1", "-i"])
-            .arg(original)
-            .args(["-frames:v", "1", "-vf", "scale=640:-2"])
-            .arg(thumbnail);
-        run(&mut thumb)?;
+        generate_thumbnail(ffmpeg, "video", original, thumbnail, &process_stopped)?;
         if matches!(extension, "mov" | "mkv") {
             let mut transcode = Command::new(ffmpeg);
             transcode
@@ -349,18 +343,7 @@ pub(crate) fn process(
             "ready".into(),
         ))
     } else {
-        let mut waveform = Command::new(ffmpeg);
-        waveform
-            .args(["-y", "-i"])
-            .arg(original)
-            .args([
-                "-filter_complex",
-                "showwavespic=s=800x180:colors=#d99a42",
-                "-frames:v",
-                "1",
-            ])
-            .arg(thumbnail);
-        run(&mut waveform)?;
+        generate_thumbnail(ffmpeg, "audio", original, thumbnail, &process_stopped)?;
         if extension == "flac" {
             let mut transcode = Command::new(ffmpeg);
             transcode
@@ -381,6 +364,43 @@ pub(crate) fn process(
             "ready".into(),
         ))
     }
+}
+
+pub(crate) fn generate_thumbnail(
+    ffmpeg: &Path,
+    kind: &str,
+    original: &Path,
+    thumbnail: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let mut args = vec!["-y".into()];
+    if kind == "video" {
+        args.extend(["-ss".into(), "0".into()]);
+    }
+    args.extend(["-i".into(), original.to_string_lossy().into_owned()]);
+    match kind {
+        "video" => args.extend(["-frames:v", "1", "-vf", "scale=640:-2"].map(str::to_string)),
+        "audio" => args.extend(
+            [
+                "-filter_complex",
+                "showwavespic=s=800x180:colors=#d99a42",
+                "-frames:v",
+                "1",
+            ]
+            .map(str::to_string),
+        ),
+        _ => return Err("不支持的缩略图类型".into()),
+    }
+    args.push(thumbnail.to_string_lossy().into_owned());
+    crate::runtime::process::capture(
+        ffmpeg,
+        &args,
+        std::time::Duration::from_secs(120),
+        stop,
+        &mut |_| {},
+    )
+    .map(|_| ())
+    .map_err(|e| format!("生成缩略图失败：{e}"))
 }
 
 fn row_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetMedia> {

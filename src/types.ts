@@ -21,6 +21,7 @@ export type LibraryTaskRequest =
   | { kind: "mediaImport"; request: MediaImportRequest }
   | { kind: "assetScan"; request: { root: string } }
   | { kind: "assetImport"; request: CoreAssetImportRequest }
+  | { kind: "assetProcess"; request: { assetId: string; force?: boolean } }
   | { kind: "fabImport"; request: { path: string; mapping: ImportMapping; autoTranslate: boolean } }
   | { kind: "translation"; request: { ids: string[] } }
   | { kind: "links" }

@@ -40,6 +40,15 @@ pub struct AssetMetadata {
     pub codec: Option<String>,
     pub fps: Option<f64>,
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssetMetadataValues {
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+    pub duration: Option<f64>,
+    pub codec: Option<String>,
+    pub fps: Option<f64>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

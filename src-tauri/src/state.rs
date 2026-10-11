@@ -1104,6 +1104,10 @@ fn migrate_library(
             &active.base_dir.join("note-attachments"),
             &stage.join("note-attachments"),
         )?;
+        copy_tree_verified(
+            &active.base_dir.join(".dcc/cache/thumbnails"),
+            &stage.join(".dcc/cache/thumbnails"),
+        )?;
         fs::create_dir_all(stage.join("safety-backups")).map_err(|e| e.to_string())?;
         let marker = LibraryMarker {
             format_version: 1,

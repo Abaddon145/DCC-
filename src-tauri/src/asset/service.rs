@@ -85,6 +85,7 @@ fn import_one(
         base,
         size.saturating_mul(3).saturating_add(16 * 1024 * 1024),
     )?;
+    let analyzed = super::metadata::analyze(&source, kind, resources, stop)?;
     let media_kind = match kind {
         "image" => crate::models::MediaKind::Image,
         "video" => crate::models::MediaKind::Video,
@@ -118,6 +119,8 @@ fn import_one(
         },
     )?;
     repository::register_files(db, &core_id)?;
+    let file_id:String=db.query_row("SELECT id FROM asset_files WHERE asset_id=?1 AND role='original' AND source_kind='mediaFile' LIMIT 1",[&core_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    super::metadata::save(db, &file_id, &analyzed)?;
     if let Some(project) = &request.project_id {
         crate::media_library::link_projects(
             db,

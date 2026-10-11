@@ -65,6 +65,7 @@ pub fn export_library_with_progress(
         "media-library",
         "media",
         "note-attachments",
+        ".dcc/cache/thumbnails",
     ] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
@@ -132,13 +133,14 @@ pub fn export_library_with_progress(
 }
 
 pub const RESTORE_MARKER: &str = ".restore-pending.json";
-const RESTORE_TARGETS: [&str; 6] = [
+const RESTORE_TARGETS: [&str; 7] = [
     "library.db",
     "images",
     "reference-boards",
     "media-library",
     "media",
     "note-attachments",
+    ".dcc/cache/thumbnails",
 ];
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +192,9 @@ pub fn recover_interrupted_restore(
         let target = active.base_dir.join(name);
         let original = old.join(name);
         if original.exists() || !value.originals.iter().any(|v| v == name) {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
             if target.is_dir() {
                 remove_dir_if_exists(&target)?
             } else {
@@ -244,6 +249,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         "media-library",
         "media",
         "note-attachments",
+        ".dcc/cache/thumbnails",
     ];
     for name in directories {
         if stage.path().join(name).exists() {
@@ -294,8 +300,14 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         .collect::<Vec<_>>();
     let install = (|| -> Result<(), String> {
         for (name, target) in &targets {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
             if target.exists() {
                 let old = rollback.path().join(name);
+                if let Some(parent) = old.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
                 fs::rename(target, &old).map_err(|e| format!("准备恢复 {name} 失败：{e}"))?;
                 moved.push((target.clone(), old));
             }
@@ -358,6 +370,9 @@ fn extract_and_verify(source: &Path, destination: &Path) -> Result<(), String> {
             .enclosed_name()
             .ok_or("备份包包含非法路径")?
             .to_path_buf();
+        if !allowed_backup_path(&enclosed, entry.is_dir()) {
+            return Err("备份包包含不允许恢复的运行时或配置路径".into());
+        }
         if entry.size() > 8 * 1024 * 1024 * 1024 {
             return Err("备份包中的单个文件过大".into());
         }
@@ -383,6 +398,7 @@ fn extract_and_verify(source: &Path, destination: &Path) -> Result<(), String> {
     for expected in manifest.entries {
         let path = Path::new(&expected.path);
         if expected.path.contains("\\")
+            || !allowed_backup_path(path, false)
             || path
                 .components()
                 .any(|part| !matches!(part, std::path::Component::Normal(_)))
@@ -411,6 +427,36 @@ fn extract_and_verify(source: &Path, destination: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn allowed_backup_path(path: &Path, directory: bool) -> bool {
+    let parts = path
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(n) => n.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(parts) = parts else {
+        return false;
+    };
+    let Some(first) = parts.first() else {
+        return false;
+    };
+    if matches!(*first, "library.db" | "manifest.json") {
+        return !directory && parts.len() == 1;
+    }
+    if matches!(
+        *first,
+        "images" | "reference-boards" | "media-library" | "media" | "note-attachments"
+    ) {
+        return true;
+    }
+    let prefix = [".dcc", "cache", "thumbnails"];
+    if directory && parts.len() <= 3 {
+        return prefix.starts_with(&parts);
+    }
+    parts.len() >= 5 && parts[..3] == prefix && uuid::Uuid::parse_str(parts[3]).is_ok()
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
@@ -447,6 +493,70 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn asset_core_cache_versions_survive_restore_without_runtime_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("library");
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("library.db");
+        let mut connection = crate::db::open_database(&path).unwrap();
+        let source = dir.path().join("a.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([1, 2, 3, 255]))
+            .save(&source)
+            .unwrap();
+        let imported = crate::media_library::import(
+            &mut connection,
+            &base,
+            None,
+            crate::models::MediaImportRequest {
+                kind: crate::models::MediaKind::Image,
+                paths: vec![source.to_string_lossy().into_owned()],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+        )
+        .unwrap();
+        let entry = imported.rows[0].entry_id.as_ref().unwrap();
+        let (core,file):(String,String)=connection.query_row("SELECT c.id,f.id FROM asset_core c JOIN asset_files f ON f.asset_id=c.id WHERE c.media_entry_id=?1 AND f.role='original'",[entry],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        connection.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,created_at) VALUES('version',?1,?2,'v001','now')",rusqlite::params![core,file]).unwrap();
+        let cache = format!(".dcc/cache/thumbnails/{file}/preview.png");
+        std::fs::create_dir_all(base.join(&cache).parent().unwrap()).unwrap();
+        std::fs::write(base.join(&cache), b"thumbnail").unwrap();
+        std::fs::create_dir_all(base.join(".dcc/runtime/scans")).unwrap();
+        std::fs::write(base.join(".dcc/runtime/scans/private.jsonl"), b"temporary").unwrap();
+        let output = dir.path().join("backup.dccassetlib");
+        super::export_library(&connection, &base, &output).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        assert!(zip.by_name(&cache).is_ok());
+        assert!(zip.by_name(".dcc/runtime/scans/private.jsonl").is_err());
+        drop(zip);
+        std::fs::write(base.join(&cache), b"changed").unwrap();
+        let mut active = crate::state::ActiveLibrary {
+            base_dir: base.clone(),
+            db_path: path,
+            marker: crate::state::LibraryMarker {
+                format_version: 1,
+                library_id: "test".into(),
+                name: "test".into(),
+                created_at: "now".into(),
+            },
+            connection: Some(connection),
+        };
+        super::restore_library(&mut active, &output).unwrap();
+        assert_eq!(std::fs::read(base.join(&cache)).unwrap(), b"thumbnail");
+        assert_eq!(
+            active
+                .connection
+                .as_ref()
+                .unwrap()
+                .query_row("SELECT file_id FROM asset_versions", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            file
+        );
+        assert!(base.join(".dcc/runtime/scans/private.jsonl").is_file());
+    }
     use super::*;
     use tempfile::tempdir;
     #[test]
