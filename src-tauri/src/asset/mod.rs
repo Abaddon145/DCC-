@@ -1,6 +1,11 @@
 pub mod commands;
+pub mod intelligence_migration;
+pub mod intelligence_models;
+#[cfg(test)]
+mod intelligence_tests;
 pub mod metadata;
 pub mod models;
+pub mod relations;
 pub mod repository;
 pub mod scanner;
 pub mod service;

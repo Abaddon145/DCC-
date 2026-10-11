@@ -45,6 +45,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::reliability::migrate_workflows(&connection)?;
     crate::downloader::service::migrate(&connection)?;
     crate::asset::migrate(&connection)?;
+    crate::asset::intelligence_migration::migrate(&connection)?;
     Ok(connection)
 }
 

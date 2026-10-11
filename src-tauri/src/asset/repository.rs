@@ -307,7 +307,7 @@ fn thumbnail(db: &Connection, owner: &CoreOrigin) -> Result<Option<SourceFileRef
     .map_err(|e| e.to_string())
 }
 
-fn read_asset(db: &Connection, id: &str, locale: &str) -> Result<Asset, String> {
+pub(crate) fn read_asset(db: &Connection, id: &str, locale: &str) -> Result<Asset, String> {
     let mut asset = db.query_row(&format!("{VIEW} SELECT id,owner_id,kind,asset_type,name,description,created_at,updated_at,deleted_at IS NOT NULL FROM unified WHERE id=?2"), params![locale,id], |r| Ok(Asset{id:r.get(0)?,origin:CoreOrigin{id:r.get(1)?,kind:r.get(2)?},asset_type:r.get(3)?,name:r.get(4)?,description:r.get(5)?,created_at:r.get(6)?,updated_at:r.get(7)?,deleted:r.get(8)?,tags:vec![],thumbnail:None})).optional().map_err(|e| e.to_string())?.ok_or("资产不存在或不属于当前素材库")?;
     asset.tags = tags(db, &asset.origin, locale)?;
     asset.thumbnail = thumbnail(db, &asset.origin)?;

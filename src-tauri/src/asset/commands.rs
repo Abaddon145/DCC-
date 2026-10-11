@@ -10,6 +10,37 @@ fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or("素材库已切换，未读取或修改旧库".into())
 }
 #[tauri::command]
+pub fn create_asset_relation(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::RelationInput,
+) -> Result<super::intelligence_models::AssetRelation, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::create(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn delete_asset_relation(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+    relation_id: String,
+) -> Result<(), String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::delete(db, &asset_id, &relation_id)
+    }))
+}
+#[tauri::command]
+pub fn get_asset_graph(
+    state: State<AppState>,
+    expected_library_id: String,
+    request: super::intelligence_models::GraphRequest,
+) -> Result<super::intelligence_models::AssetGraph, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::graph(db, &request)
+    }))
+}
+#[tauri::command]
 pub fn search_core_assets(
     state: State<AppState>,
     expected_library_id: String,

@@ -1,0 +1,22 @@
+.intelligence-hint{color:var(--muted);font-size:13px;line-height:1.6}
+.intelligence-relations h3{margin-right:auto}
+.intelligence-graph-scroll{max-height:380px;overflow:auto;border:1px solid var(--border-light);border-radius:var(--radius-md);background:var(--bg)}
+.intelligence-graph-scroll svg{display:block;width:100%;min-width:300px}
+.intelligence-graph-scroll svg>path{stroke:var(--accent);stroke-width:1.5;opacity:.7}
+.intelligence-graph-scroll marker path{fill:var(--accent)}
+.graph-node{cursor:pointer}
+.graph-node rect{fill:var(--panel-2);stroke:var(--border-light);transition:stroke .15s}
+.graph-node text{fill:var(--text-primary);font-size:12px;pointer-events:none}
+.graph-node:hover rect,.graph-node:focus-visible rect{stroke:var(--accent);stroke-width:3}
+.graph-node.deleted{opacity:.5;cursor:not-allowed}
+.intelligence-relation-list{list-style:none;padding:0;margin:16px 0}
+.intelligence-relation-list li{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+.intelligence-relation-list li>div:first-child{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:6px;overflow-wrap:anywhere}
+.intelligence-relation-list small{flex-basis:100%;color:var(--muted)}
+.relation-label{color:var(--accent-bright)}
+.intelligence-candidates{display:flex;flex-wrap:wrap;gap:8px;max-height:160px;overflow:auto}
+.intelligence-candidates button[aria-pressed=true]{border-color:var(--accent);background:var(--accent-bg)}
+.intelligence-relations :is(button,input,select):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.intelligence-relations :is(button,input,select){min-height:36px}
+@media(max-width:600px){.intelligence-relation-list li{align-items:stretch;flex-direction:column}.intelligence-relation-list .core-actions{justify-content:flex-end}}
+@media(prefers-reduced-motion:reduce){.graph-node rect{transition:none}}

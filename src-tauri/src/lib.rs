@@ -263,6 +263,9 @@ pub fn run() {
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
                     asset::commands::search_core_assets,
+                    asset::commands::create_asset_relation,
+                    asset::commands::delete_asset_relation,
+                    asset::commands::get_asset_graph,
                     asset::commands::get_core_asset,
                     asset::commands::get_asset_scan_page,
                     asset::commands::set_core_asset_tags,
