@@ -117,6 +117,14 @@ pub fn save_model_thumbnail(
             [entry_id],
         )
         .map_err(|e| e.to_string())?;
+        let core_id = crate::asset::repository::register_origin(
+            &tx,
+            &crate::asset::models::CoreOrigin {
+                kind: "media".into(),
+                id: entry_id.into(),
+            },
+        )?;
+        crate::asset::repository::register_files(&tx, &core_id)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(previous)
     })();
@@ -1076,6 +1084,14 @@ fn insert_entry(
         crate::browser_capture::apply_source(&tx, capture, id)?;
     }
     reindex(&tx, id)?;
+    let core_id = crate::asset::repository::register_origin(
+        &tx,
+        &crate::asset::models::CoreOrigin {
+            kind: "media".into(),
+            id: id.into(),
+        },
+    )?;
+    crate::asset::repository::register_files(&tx, &core_id)?;
     tx.commit().map_err(|e| e.to_string())
 }
 fn mime_for(name: &str) -> &'static str {

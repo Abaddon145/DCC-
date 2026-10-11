@@ -485,8 +485,24 @@ pub fn import(
             .unwrap_or(0);
         let timestamp = now();
         let is_cover = !has_cover && position == 0;
-        if let Err(error) = connection.execute("INSERT INTO asset_media(id,asset_id,kind,original_name,original_rel_path,proxy_rel_path,thumbnail_rel_path,mime_type,file_size,duration_ms,pixel_width,pixel_height,sort_order,is_cover,processing_status,processing_message,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", params![id,asset_id,kind,name,original_rel,proxy_value,thumb_value,mime,size,duration,width,height,order,is_cover as i64,status,message,timestamp]) {
-            let _=fs::remove_file(&original); let _=fs::remove_file(&proxy); let _=fs::remove_file(&thumb); return Err(error.to_string());
+        let registered = (|| -> Result<(), String> {
+            let tx = connection.transaction().map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO asset_media(id,asset_id,kind,original_name,original_rel_path,proxy_rel_path,thumbnail_rel_path,mime_type,file_size,duration_ms,pixel_width,pixel_height,sort_order,is_cover,processing_status,processing_message,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", params![id,asset_id,kind,name,original_rel,proxy_value,thumb_value,mime,size,duration,width,height,order,is_cover as i64,status,message,timestamp]).map_err(|e|e.to_string())?;
+            let core_id = crate::asset::repository::register_origin(
+                &tx,
+                &crate::asset::models::CoreOrigin {
+                    kind: "legacy".into(),
+                    id: asset_id.into(),
+                },
+            )?;
+            crate::asset::repository::register_files(&tx, &core_id)?;
+            tx.commit().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = registered {
+            let _ = fs::remove_file(&original);
+            let _ = fs::remove_file(&proxy);
+            let _ = fs::remove_file(&thumb);
+            return Err(error);
         }
         imported_ids.push(id);
         order += 1;
@@ -501,6 +517,15 @@ pub fn import(
 
 pub fn delete(connection: &mut Connection, base_dir: &Path, id: &str) -> Result<(), String> {
     let paths: (String,Option<String>,Option<String>,String) = connection.query_row("SELECT original_rel_path,proxy_rel_path,thumbnail_rel_path,asset_id FROM asset_media WHERE id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(|error| error.to_string())?.ok_or("预览附件不存在")?;
+    crate::asset::repository::protect_file_removal(
+        connection,
+        &[crate::asset::models::SourceFileRef {
+            kind: "assetMedia".into(),
+            id: id.into(),
+            role: "original".into(),
+        }],
+        &[],
+    )?;
     connection
         .execute("DELETE FROM asset_media WHERE id=?1", [id])
         .map_err(|error| error.to_string())?;
@@ -561,6 +586,14 @@ pub fn retry(
             return Err(error);
         }
     }
+    let core_id = crate::asset::repository::register_origin(
+        connection,
+        &crate::asset::models::CoreOrigin {
+            kind: "legacy".into(),
+            id: asset_id.clone(),
+        },
+    )?;
+    crate::asset::repository::register_files(connection, &core_id)?;
     list(connection, &asset_id)?
         .into_iter()
         .find(|item| item.id == id)

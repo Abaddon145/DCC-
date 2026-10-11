@@ -1,0 +1,438 @@
+use super::{models::*, repository};
+use rusqlite::{params, Connection};
+
+const OLD_ID: &str = "06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+
+fn old_fixture() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    db.execute_batch(include_str!("../schema.sql")).unwrap();
+    db.execute_batch(include_str!("../notes_schema.sql"))
+        .unwrap();
+    db.execute(
+        "INSERT INTO schema_meta(key,value) VALUES('schema_version','20')",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO assets(id,name,description,share_url,created_at,updated_at) VALUES(?1,'旧资产','原说明','','old','old')", [OLD_ID]).unwrap();
+    db.execute("INSERT INTO asset_localizations(asset_id,locale,name,description) VALUES(?1,'en','Old asset','Original description')", [OLD_ID]).unwrap();
+    db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'image','旧图片','09003f78-9a59-4fb8-abbc-14dc276f0b4a','old','old')", [OLD_ID]).unwrap();
+    db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,file_size,checksum,created_at) VALUES('09003f78-9a59-4fb8-abbc-14dc276f0b4a',?1,'main','原图.png','原图.png','media-library/image/旧图/原图.png',123,'known-hash','old')", [OLD_ID]).unwrap();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','旧项目','scene','active','old','old')",[]).unwrap();
+    db.execute("INSERT INTO project_assets(project_id,asset_id,status,created_at,updated_at) VALUES('project',?1,'candidate','old','old')",[OLD_ID]).unwrap();
+    db.execute("INSERT INTO knowledge_notes(id,title,document_json,plain_text,created_at,updated_at) VALUES('note','学习笔记','{}','原正文','old','old')",[]).unwrap();
+    db.execute("INSERT INTO knowledge_references(note_id,target_kind,target_id,label) VALUES('note','asset',?1,'旧引用')",[OLD_ID]).unwrap();
+    db
+}
+
+#[test]
+fn database_open_installs_compatible_asset_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    let tables: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('asset_core','asset_files','asset_metadata','asset_sources','asset_versions')", [], |r| r.get(0)).unwrap();
+    assert_eq!(tables, 5, "all compatible core tables must exist");
+    let version: String = db
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "21");
+}
+
+#[test]
+fn migration_is_idempotent_and_preserves_both_origins_and_paths() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let legacy = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let media = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    assert_ne!(legacy, media);
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM asset_files", [], |r| r.get(0))
+        .unwrap();
+    super::migrate(&db).unwrap();
+    assert_eq!(
+        repository::register_origin(
+            &db,
+            &CoreOrigin {
+                kind: "legacy".into(),
+                id: OLD_ID.into()
+            }
+        )
+        .unwrap(),
+        legacy
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_files", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        count
+    );
+    assert_eq!(
+        db.query_row("SELECT rel_path FROM media_files", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "media-library/image/旧图/原图.png"
+    );
+    db.execute("UPDATE assets SET name='即时修改' WHERE id=?1", [OLD_ID])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        repository::get(&db, dir.path(), &legacy, "zh-CN")
+            .unwrap()
+            .asset
+            .name,
+        "即时修改"
+    );
+    assert_eq!(
+        repository::get(&db, dir.path(), &legacy, "en")
+            .unwrap()
+            .asset
+            .name,
+        "Old asset"
+    );
+    let file = &repository::get(&db, dir.path(), &media, "zh-CN")
+        .unwrap()
+        .files[0];
+    assert_eq!(file.size, 123);
+    assert_eq!(file.hash, "known-hash");
+    assert!(!file.available);
+    assert_eq!(
+        db.query_row("SELECT asset_id FROM project_assets", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        OLD_ID
+    );
+    assert_eq!(
+        db.query_row("SELECT target_id FROM knowledge_references", [], |r| r
+            .get::<_, String>(
+            0
+        ))
+        .unwrap(),
+        OLD_ID
+    );
+}
+
+#[test]
+fn core_constraints_and_migration_failure_roll_back() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    assert!(db
+        .execute(
+            "INSERT INTO asset_core(id,created_at) VALUES('bad','now')",
+            []
+        )
+        .is_err());
+    assert!(db.execute("INSERT INTO asset_core(id,legacy_asset_id,media_entry_id,created_at) VALUES('bad',?1,?1,'now')",[OLD_ID]).is_err());
+    assert!(repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: "missing".into()
+        }
+    )
+    .is_err());
+    let broken = old_fixture();
+    broken.execute_batch("DROP TABLE media_files;").unwrap();
+    assert!(super::migrate(&broken).is_err());
+    assert_eq!(
+        broken
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='asset_core'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        broken
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "20"
+    );
+}
+
+fn request() -> CoreSearchRequest {
+    serde_json::from_value(serde_json::json!({})).unwrap()
+}
+
+#[test]
+fn mixed_search_is_bounded_and_reads_live_names_and_soft_deletion() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let mut query = request();
+    query.limit = 1;
+    let page = repository::search(&db, &query).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    query.offset = 1;
+    assert_ne!(
+        repository::search(&db, &query).unwrap().items[0].id,
+        page.items[0].id
+    );
+    query.asset_type = Some("image".into());
+    query.offset = 0;
+    assert_eq!(repository::search(&db, &query).unwrap().total, 1);
+    db.execute("UPDATE media_entries SET deleted_at='now'", [])
+        .unwrap();
+    assert_eq!(repository::search(&db, &query).unwrap().total, 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_core", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    query.asset_type = Some("unexpected".into());
+    assert!(repository::search(&db, &query).is_err());
+    query.asset_type = None;
+    query.source = Some("unexpected".into());
+    assert!(repository::search(&db, &query).is_err());
+}
+
+#[test]
+fn media_import_registers_files_in_the_same_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    let source = dir.path().join("导入.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let input = crate::models::MediaImportRequest {
+        kind: crate::models::MediaKind::Image,
+        paths: vec![source.to_string_lossy().into_owned()],
+        folder_id: None,
+        tags: vec![],
+        favorite: false,
+    };
+    let report = crate::media_library::import(&mut db, dir.path(), None, input).unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_core", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        db.query_row("SELECT count(*) FROM asset_files", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            >= 2
+    );
+}
+
+#[test]
+fn version_file_must_belong_to_core_and_be_original_and_is_protected() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let ids: Vec<String> = db
+        .prepare("SELECT id FROM asset_core ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let (file, owner): (String, String) = db
+        .query_row(
+            "SELECT id,asset_id FROM asset_files WHERE role='original'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let other = ids.iter().find(|id| **id != owner).unwrap();
+    assert!(db.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,created_at) VALUES('v',?1,?2,'v001','now')",params![other,file]).is_err());
+    db.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,created_at) VALUES('v',?1,?2,'v001','now')",params![owner,file]).unwrap();
+    let source = SourceFileRef {
+        kind: "mediaFile".into(),
+        id: "09003f78-9a59-4fb8-abbc-14dc276f0b4a".into(),
+        role: "original".into(),
+    };
+    assert!(repository::protect_file_removal(&db, &[source.clone()], &[]).is_err());
+    assert!(repository::protect_file_removal(&db, &[source], &[owner]).is_ok());
+    assert!(db.execute("DELETE FROM media_files", []).is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_versions", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn purge_blocks_external_version_and_allows_both_owners_in_same_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = old_fixture();
+    super::migrate(&db).unwrap();
+    let legacy = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    db.execute("INSERT INTO asset_files(id,asset_id,source_kind,source_id,role,filename,extension,size,hash,created_at) SELECT 'attached',?1,source_kind,source_id,role,filename,extension,size,hash,created_at FROM asset_files WHERE role='original'",[&legacy]).unwrap();
+    db.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,created_at) VALUES('v',?1,'attached','Final','now')",[legacy]).unwrap();
+    db.execute("INSERT INTO deletion_batches(id,kind,label,created_at) VALUES('batch','media','旧图','now')",[]).unwrap();
+    db.execute(
+        "UPDATE media_entries SET deleted_at='now',delete_batch_id='batch'",
+        [],
+    )
+    .unwrap();
+    let error = crate::db::purge_trash_batch(&mut db, dir.path(), "batch").unwrap_err();
+    assert!(error.contains("版本"), "{error}");
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM deletion_batches", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    db.execute(
+        "UPDATE assets SET deleted_at='now',delete_batch_id='batch'",
+        [],
+    )
+    .unwrap();
+    crate::db::purge_trash_batch(&mut db, dir.path(), "batch").unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_core", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_versions", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn registration_failure_rolls_back_real_import_and_keeps_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_core BEFORE INSERT ON asset_core BEGIN SELECT RAISE(ABORT,'injected core registration failure'); END;").unwrap();
+    let source = dir.path().join("original.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]))
+        .save(&source)
+        .unwrap();
+    let before = std::fs::read(&source).unwrap();
+    let input = crate::models::MediaImportRequest {
+        kind: crate::models::MediaKind::Image,
+        paths: vec![source.to_string_lossy().into_owned()],
+        folder_id: None,
+        tags: vec![],
+        favorite: false,
+    };
+    let result = crate::media_library::import(&mut db, dir.path(), None, input).unwrap();
+    assert_eq!(result.imported, 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_files", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(std::fs::read(source).unwrap(), before);
+    let files = walkdir::WalkDir::new(dir.path().join("media-library"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .count();
+    assert_eq!(files, 0);
+}
+
+#[test]
+fn unregistered_file_and_unsafe_registered_path_are_rejected() {
+    let db = old_fixture();
+    super::migrate(&db).unwrap();
+    let owner = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    assert!(db.execute("INSERT INTO asset_files(id,asset_id,source_kind,source_id,role,filename,extension,created_at) VALUES('bad',?1,'mediaFile','missing','original','file.png','png','now')",[owner]).is_err());
+    db.execute("UPDATE media_files SET rel_path='../outside.png'", [])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(repository::file_path(
+        &db,
+        dir.path(),
+        &SourceFileRef {
+            kind: "mediaFile".into(),
+            id: "09003f78-9a59-4fb8-abbc-14dc276f0b4a".into(),
+            role: "original".into()
+        }
+    )
+    .is_err());
+}
+
+#[test]
+fn old_asset_editor_cannot_remove_an_original_used_by_a_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    let mut input: crate::models::AssetInput = serde_json::from_value(serde_json::json!({
+        "name":"旧素材", "description":"", "categoryId":null,"tags":[],"dccTools":[],
+        "versions":[],"formats":[],"sizeBytes":null,"author":"","sourceUrl":"","license":"",
+        "shareUrl":"","extractionCode":"","favorite":false,"images":[],"localizations":{},"contentLanguage":"zh-CN"
+    })).unwrap();
+    let saved = crate::db::upsert_asset(&mut db, dir.path(), input.clone()).unwrap();
+    let owner = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: saved.card.id.clone(),
+        },
+    )
+    .unwrap();
+    db.execute("INSERT INTO images(id,asset_id,original_name,original_rel_path,thumbnail_rel_path,created_at) VALUES('image',?1,'original.png','images/originals/original.png','images/thumbnails/original.webp','old')",[&saved.card.id]).unwrap();
+    repository::register_files(&db, &owner).unwrap();
+    db.execute("INSERT INTO asset_versions(id,asset_id,file_id,version,created_at) SELECT 'v',asset_id,id,'v001','now' FROM asset_files WHERE source_id='image' AND role='original'",[]).unwrap();
+    input.id = Some(saved.card.id.clone());
+    input.name = "不应保存的修改".into();
+    let error = crate::db::upsert_asset(&mut db, dir.path(), input).unwrap_err();
+    assert!(error.contains("版本"));
+    assert_eq!(
+        db.query_row("SELECT name FROM assets", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "旧素材"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM images", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}

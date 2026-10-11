@@ -1,5 +1,6 @@
 mod ai;
 mod ai_store;
+mod asset;
 mod automatic_backup;
 mod backup;
 mod bilingual;

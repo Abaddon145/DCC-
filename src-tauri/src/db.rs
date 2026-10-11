@@ -44,6 +44,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::browser_capture::migrate(&connection)?;
     crate::reliability::migrate_workflows(&connection)?;
     crate::downloader::service::migrate(&connection)?;
+    crate::asset::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -1395,6 +1396,15 @@ pub fn upsert_asset(
         drop(stmt);
         for (image_id, original, thumb) in existing {
             if !keep.contains(&image_id) {
+                crate::asset::repository::protect_file_removal(
+                    &transaction,
+                    &[crate::asset::models::SourceFileRef {
+                        kind: "image".into(),
+                        id: image_id.clone(),
+                        role: "original".into(),
+                    }],
+                    &[],
+                )?;
                 transaction
                     .execute("DELETE FROM images WHERE id=?1", [&image_id])
                     .map_err(|e| e.to_string())?;
@@ -1419,6 +1429,14 @@ pub fn upsert_asset(
         }
         normalize_cover(&transaction, &id)?;
         reindex_asset(&transaction, &id)?;
+        let core_id = crate::asset::repository::register_origin(
+            &transaction,
+            &crate::asset::models::CoreOrigin {
+                kind: "legacy".into(),
+                id: id.clone(),
+            },
+        )?;
+        crate::asset::repository::register_files(&transaction, &core_id)?;
         Ok(removed)
     })();
     match result {
@@ -2100,6 +2118,12 @@ pub fn purge_trash_batch(
     };
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
+    let deleting_cores = crate::asset::repository::prepare_trash_purge(&transaction, batch_id)?;
+    for id in deleting_cores {
+        transaction
+            .execute("DELETE FROM asset_versions WHERE asset_id=?1", [id])
+            .map_err(|e| e.to_string())?;
+    }
     transaction
         .execute("DELETE FROM assets WHERE delete_batch_id=?1", [batch_id])
         .map_err(|e| e.to_string())?;
@@ -3313,7 +3337,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "20");
+        assert_eq!(version, "21");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
