@@ -180,3 +180,324 @@ fn graph_pages_81_neighbors_and_marks_deleted_endpoints() {
     invalid.locale = "other".into();
     assert!(super::relations::graph(&db, &invalid).is_err());
 }
+
+fn managed_image(db: &Connection, base: &std::path::Path, owner: &str) {
+    let source = repository::origin(db, owner).unwrap().id;
+    let path = base.join("selected.png");
+    image::RgbaImage::from_pixel(2048, 1024, image::Rgba([90, 110, 130, 255]))
+        .save(&path)
+        .unwrap();
+    db.execute("INSERT INTO images(id,asset_id,original_name,original_rel_path,thumbnail_rel_path,created_at) VALUES(?1,?2,'selected.png','selected.png','selected.png','now')",params![uuid::Uuid::new_v4().to_string(),source]).unwrap();
+    repository::register_files(db, owner).unwrap();
+}
+
+#[test]
+fn analysis_preview_contains_only_selected_bounded_material() {
+    use super::intelligence_models::AnalysisMode;
+    use base64::Engine;
+    let (dir, db) = fixture();
+    let owner = asset(&db, "选中的图片");
+    managed_image(&db, dir.path(), &owner);
+    let _other = asset(&db, "不应发送的素材内容");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Visual, &|| {
+            false
+        })
+        .unwrap();
+    let json = serde_json::to_string(&preview).unwrap();
+    assert!(!json.contains("不应发送"));
+    assert!(!json.contains(&dir.path().to_string_lossy().to_string()));
+    assert_eq!(preview.images.len(), 1);
+    assert!(preview.images.len() <= 4);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            preview.images[0]
+                .data_url
+                .strip_prefix("data:image/jpeg;base64,")
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(bytes.len() <= 256 * 1024);
+    let resized = image::load_from_memory(&bytes).unwrap();
+    assert!(resized.width() <= 1024 && resized.height() <= 1024);
+    assert!(preview.warnings.iter().any(|w| w.contains("预览")));
+    assert_eq!(
+        crate::ai::analyzer::video_times(100.0).unwrap(),
+        vec![10.0, 35.0, 65.0, 90.0]
+    );
+    assert!(crate::ai::analyzer::video_times(f64::NAN).is_err());
+    assert!(crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &owner,
+        AnalysisMode::Visual,
+        &|| true
+    )
+    .is_err());
+}
+
+#[test]
+fn analysis_confirmed_input_rejects_replaced_original_and_changed_text() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    let (dir, db) = fixture();
+    let owner = asset(&db, "图片");
+    managed_image(&db, dir.path(), &owner);
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Visual, &|| {
+            false
+        })
+        .unwrap();
+    let request = AnalysisRequest {
+        asset_id: owner.clone(),
+        preview_id: preview.id.clone(),
+        force: false,
+    };
+    assert!(crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).is_ok());
+    let origin = repository::origin(&db, &owner).unwrap().id;
+    db.execute(
+        "UPDATE assets SET description='用户新增资料' WHERE id=?1",
+        [&origin],
+    )
+    .unwrap();
+    assert!(crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).is_err());
+    db.execute("UPDATE assets SET description='' WHERE id=?1", [origin])
+        .unwrap();
+    image::RgbaImage::from_pixel(20, 20, image::Rgba([20, 30, 40, 255]))
+        .save(dir.path().join("selected.png"))
+        .unwrap();
+    assert!(crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).is_err());
+    std::fs::remove_file(dir.path().join("selected.png")).unwrap();
+    assert!(crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).is_err());
+    assert!(crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &owner,
+        AnalysisMode::Visual,
+        &|| false
+    )
+    .is_err());
+    let other = asset(&db, "另一个资产");
+    assert!(crate::ai::analyzer::load_confirmed(
+        &db,
+        dir.path(),
+        &AnalysisRequest {
+            asset_id: other,
+            ..request.clone()
+        }
+    )
+    .is_err());
+    assert!(crate::ai::analyzer::load_confirmed(
+        &db,
+        dir.path(),
+        &AnalysisRequest {
+            preview_id: "../escape".into(),
+            ..request.clone()
+        }
+    )
+    .is_err());
+    let foreign = tempfile::tempdir().unwrap();
+    assert!(crate::ai::analyzer::load_confirmed(&db, foreign.path(), &request).is_err());
+    assert!(serde_json::from_value::<AnalysisRequest>(
+        serde_json::json!({"assetId":owner,"previewId":preview.id,"force":false,"path":"C:/secret"})
+    )
+    .is_err());
+}
+
+#[test]
+fn analysis_cache_is_keyed_by_fingerprint_model_mode_version() {
+    use super::intelligence_models::{AnalysisAnswer, AnalysisMode, AnalysisRequest};
+    let (dir, db) = fixture();
+    let owner = asset(&db, "文字资产");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    assert!(preview.images.is_empty());
+    let request = AnalysisRequest {
+        asset_id: owner.clone(),
+        preview_id: preview.id,
+        force: false,
+    };
+    let input = crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).unwrap();
+    let answer = AnalysisAnswer {
+        description: "雨夜未来城市".into(),
+        keywords: vec!["雨夜".into()],
+        scene: "城市".into(),
+        style: String::new(),
+        camera: String::new(),
+        lighting: String::new(),
+        mood: String::new(),
+    };
+    let saved = super::analysis::save(&db, &input, &answer, Some(42)).unwrap();
+    assert_eq!(
+        super::analysis::cached(&db, &owner, &preview.fingerprint, AnalysisMode::Text)
+            .unwrap()
+            .unwrap()
+            .id,
+        saved.id
+    );
+    assert!(
+        super::analysis::cached(&db, &owner, &preview.fingerprint, AnalysisMode::Visual)
+            .unwrap()
+            .is_none()
+    );
+    for (column, value) in [("model", "different-model"), ("format_version", "99")] {
+        let old: String = db
+            .query_row(
+                &format!("SELECT CAST({column} AS TEXT) FROM asset_ai_analysis WHERE id=?1"),
+                [&saved.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.execute(
+            &format!("UPDATE asset_ai_analysis SET {column}=?1 WHERE id=?2"),
+            params![value, saved.id],
+        )
+        .unwrap();
+        assert!(
+            super::analysis::cached(&db, &owner, &preview.fingerprint, AnalysisMode::Text)
+                .unwrap()
+                .is_none()
+        );
+        db.execute(
+            &format!("UPDATE asset_ai_analysis SET {column}=?1 WHERE id=?2"),
+            params![old, saved.id],
+        )
+        .unwrap();
+    }
+    let origin = repository::origin(&db, &owner).unwrap();
+    db.execute(
+        "UPDATE assets SET description='新的说明' WHERE id=?1",
+        [origin.id],
+    )
+    .unwrap();
+    let changed =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    assert_ne!(changed.fingerprint, preview.fingerprint);
+    assert!(changed.cached_analysis_id.is_none());
+    assert_eq!(
+        super::analysis::latest(&db, &owner).unwrap().unwrap().id,
+        saved.id
+    );
+    assert!(super::analysis::save(
+        &db,
+        &input,
+        &AnalysisAnswer {
+            description: String::new(),
+            keywords: vec![],
+            scene: String::new(),
+            style: String::new(),
+            camera: String::new(),
+            lighting: String::new(),
+            mood: String::new()
+        },
+        None
+    )
+    .is_err());
+}
+
+#[test]
+fn analysis_refuses_expired_corrupt_and_cancelled_previews() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    let (dir, db) = fixture();
+    let owner = asset(&db, "资料");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    let request = AnalysisRequest {
+        asset_id: owner,
+        preview_id: preview.id,
+        force: false,
+    };
+    assert!(
+        crate::ai::analyzer::load_confirmed_controlled(&db, dir.path(), &request, &|| true)
+            .is_err()
+    );
+    let path = dir
+        .path()
+        .join(".dcc/cache/analysis")
+        .join(&request.preview_id)
+        .join("input.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    json["created_at"] = serde_json::json!(chrono::Utc::now().timestamp() - 86401);
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(
+        crate::ai::analyzer::load_confirmed(&db, dir.path(), &request)
+            .err()
+            .unwrap()
+            .contains("过期")
+    );
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(
+        crate::ai::analyzer::load_confirmed(&db, dir.path(), &request)
+            .err()
+            .unwrap()
+            .contains("损坏")
+    );
+}
+
+#[test]
+fn analysis_refuses_corrupt_or_oversized_images() {
+    use super::intelligence_models::AnalysisMode;
+    let (dir, db) = fixture();
+    let owner = asset(&db, "图片");
+    managed_image(&db, dir.path(), &owner);
+    std::fs::write(dir.path().join("selected.png"), b"broken png").unwrap();
+    assert!(crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &owner,
+        AnalysisMode::Visual,
+        &|| false
+    )
+    .is_err());
+    image::RgbImage::new(4001, 4000)
+        .save(dir.path().join("selected.png"))
+        .unwrap();
+    assert!(crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &owner,
+        AnalysisMode::Visual,
+        &|| false
+    )
+    .is_err());
+    assert!(!dir.path().join(".dcc/cache/analysis").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn analysis_cache_directory_cannot_redirect_through_junction() {
+    use super::intelligence_models::AnalysisMode;
+    let (dir, db) = fixture();
+    let owner = asset(&db, "文字");
+    let other = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".dcc").join("cache")).unwrap();
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/c", "mklink", "/J"])
+        .arg(dir.path().join(".dcc").join("cache").join("analysis"))
+        .arg(other.path())
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert!(crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &owner,
+        AnalysisMode::Text,
+        &|| false
+    )
+    .unwrap_err()
+    .contains("链接"));
+    assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 0);
+}

@@ -1,6 +1,6 @@
 use super::{models::*, repository, scanner, service};
 use crate::state::AppState;
-use tauri::State;
+use tauri::{Manager, State};
 fn uuid(id: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(id)
         .map(|_| ())
@@ -8,6 +8,43 @@ fn uuid(id: &str) -> Result<(), String> {
 }
 fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or("素材库已切换，未读取或修改旧库".into())
+}
+#[tauri::command]
+pub async fn prepare_asset_analysis(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    asset_id: String,
+    mode: super::intelligence_models::AnalysisMode,
+) -> Result<super::intelligence_models::AnalysisInputPreview, String> {
+    uuid(&asset_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base =
+            current(state.with_library_if_id(&expected_library_id, |_, base| Ok(base.to_owned())))?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let resource = app.path().resource_dir().ok();
+        let stop =
+            || state.active_library_id().ok().as_deref() != Some(expected_library_id.as_str());
+        let preview =
+            crate::ai::analyzer::prepare(&db, &base, resource.as_deref(), &asset_id, mode, &stop)?;
+        if stop() {
+            return Err("素材库已切换，请在当前库重新预览".into());
+        }
+        Ok(preview)
+    })
+    .await
+    .map_err(|_| "分析资料准备中断，请重试".to_string())?
+}
+#[tauri::command]
+pub fn get_asset_analysis(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+) -> Result<Option<super::intelligence_models::AssetAnalysis>, String> {
+    uuid(&asset_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::analysis::latest(db, &asset_id)
+    }))
 }
 #[tauri::command]
 pub fn create_asset_relation(

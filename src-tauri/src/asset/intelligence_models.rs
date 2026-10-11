@@ -35,3 +35,76 @@ pub struct AssetGraph {
     pub offset: usize,
     pub limit: usize,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnalysisMode {
+    Text,
+    Visual,
+}
+impl AnalysisMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Visual => "visual",
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalysisRequest {
+    pub asset_id: String,
+    pub preview_id: String,
+    pub force: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisImage {
+    pub data_url: String,
+    pub timestamp: Option<f64>,
+    pub label: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisInputPreview {
+    pub id: String,
+    pub asset_id: String,
+    pub model: String,
+    pub mode: AnalysisMode,
+    pub summary: String,
+    pub fingerprint: String,
+    pub images: Vec<AnalysisImage>,
+    pub estimated_tokens: u64,
+    pub warnings: Vec<String>,
+    pub cached_analysis_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalysisAnswer {
+    pub description: String,
+    pub keywords: Vec<String>,
+    pub scene: String,
+    pub style: String,
+    pub camera: String,
+    pub lighting: String,
+    pub mood: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetAnalysis {
+    pub id: String,
+    pub asset_id: String,
+    pub description: String,
+    pub keywords: Vec<String>,
+    pub scene: String,
+    pub style: String,
+    pub camera: String,
+    pub lighting: String,
+    pub mood: String,
+    pub model: String,
+    pub mode: AnalysisMode,
+    pub input_fingerprint: String,
+    pub format_version: i64,
+    pub created_at: String,
+    pub actual_tokens: Option<u64>,
+}

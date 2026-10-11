@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod commands;
 pub mod intelligence_migration;
 pub mod intelligence_models;
