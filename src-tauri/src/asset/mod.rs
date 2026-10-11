@@ -61,6 +61,6 @@ pub(crate) fn migrate_origins(tx: &rusqlite::Connection) -> Result<(), String> {
             repository::register_files(tx, &id)?;
         }
     }
-    tx.execute("UPDATE schema_meta SET value='21' WHERE key='schema_version' AND CAST(value AS INTEGER)<21", []).map_err(|e| e.to_string())?;
+    tx.execute("UPDATE schema_meta SET value='22' WHERE key='schema_version' AND CAST(value AS INTEGER)<22", []).map_err(|e| e.to_string())?;
     Ok(())
 }

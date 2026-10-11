@@ -1266,3 +1266,171 @@ fn shot_trash_does_not_delete_project_unit_or_references() {
         1
     );
 }
+
+fn media_asset(db: &Connection, base: &std::path::Path, kind: &str) -> String {
+    let owner = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    let ext = if kind == "image" { "png" } else { "mp4" };
+    let relative = format!("media-library/{kind}/{owner}/original.{ext}");
+    let absolute = base.join(&relative);
+    std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+    if kind == "image" {
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]))
+            .save(&absolute)
+            .unwrap();
+    } else {
+        std::fs::write(&absolute, b"database fixture video original").unwrap();
+    }
+    db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,?2,?2,?3,'now','now')",params![owner,kind,file]).unwrap();
+    db.execute("INSERT INTO media_files(id,entry_id,role,rel_path,logical_path,original_name,file_size,created_at) VALUES(?1,?2,'main',?3,?4,?4,?5,'now')",params![file,owner,relative,format!("original.{ext}"),std::fs::metadata(&absolute).unwrap().len()]).unwrap();
+    let id = repository::register_origin(
+        db,
+        &super::models::CoreOrigin {
+            kind: "media".into(),
+            id: owner,
+        },
+    )
+    .unwrap();
+    repository::register_files(db, &id).unwrap();
+    id
+}
+#[test]
+fn acceptance_asset_network_backup_restores_identity_analysis_and_soft_delete() {
+    let (dir, mut db) = fixture();
+    let input = media_asset(&db, dir.path(), "image");
+    let output = media_asset(&db, dir.path(), "video");
+    let prompt = super::prompt::upsert(&mut db, &prompt_input()).unwrap();
+    let shot_req = shot_input(&db);
+    let shot = super::shot::upsert(&mut db, &shot_req).unwrap();
+    relation(&db, &prompt.asset.id, &input, "generated_from");
+    relation(&db, &output, &prompt.asset.id, "generated_from");
+    relation(&db, &output, &shot.asset.id, "used_in");
+    let preview = crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &input,
+        super::intelligence_models::AnalysisMode::Text,
+        &|| false,
+    )
+    .unwrap();
+    let analysis = super::analysis::complete_confirmed(
+        &mut db,
+        dir.path(),
+        &super::intelligence_models::AnalysisRequest {
+            asset_id: input.clone(),
+            preview_id: preview.id,
+            force: false,
+        },
+        &analysis_answer().to_string(),
+        Some(123),
+        &|| false,
+    )
+    .unwrap();
+    let batch = super::entities::trash(&mut db, &[prompt.asset.id.clone()]).unwrap();
+    let original = repository::get(&db, dir.path(), &input, "zh-CN")
+        .unwrap()
+        .files[0]
+        .clone();
+    let archive = dir.path().join("network.dccassetlib");
+    crate::backup::export_library(&db, dir.path(), &archive).unwrap();
+    db.execute("DELETE FROM asset_relations", []).unwrap();
+    db.execute("DELETE FROM asset_ai_analysis", []).unwrap();
+    let mut active = crate::state::ActiveLibrary {
+        base_dir: dir.path().to_owned(),
+        db_path: dir.path().join("library.db"),
+        marker: crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: "acceptance".into(),
+            name: "验收".into(),
+            created_at: "now".into(),
+        },
+        connection: Some(db),
+    };
+    crate::backup::restore_library(&mut active, &archive).unwrap();
+    let db = active.connection.as_mut().unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "22"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_relations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        super::analysis::latest(db, &input).unwrap().unwrap().id,
+        analysis.id
+    );
+    assert_eq!(
+        super::shot::get(db, &shot.asset.id)
+            .unwrap()
+            .project_unit_id,
+        shot.project_unit_id
+    );
+    assert!(
+        super::prompt::get(db, &prompt.asset.id)
+            .unwrap()
+            .asset
+            .deleted
+    );
+    crate::db::restore_trash_batch(db, &batch.batch_id).unwrap();
+    assert_eq!(
+        super::prompt::get(db, &prompt.asset.id).unwrap().content,
+        prompt.content
+    );
+    let restored = repository::get(db, dir.path(), &input, "zh-CN")
+        .unwrap()
+        .files;
+    assert_eq!(restored[0].id, original.id);
+    assert!(restored[0].available);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+}
+#[test]
+fn acceptance_10001_assets_keeps_search_and_high_degree_graph_bounded() {
+    let (_, mut db) = fixture();
+    let tx = db.transaction().unwrap();
+    let center = asset(&tx, "中心");
+    for i in 0..10000 {
+        let id = asset(&tx, &format!("资产 {i}"));
+        tx.execute("INSERT INTO asset_relations(id,source_asset_id,target_asset_id,relation_type,created_at) VALUES(?1,?2,?3,'inspired_by','now')",params![uuid::Uuid::new_v4().to_string(),center,id]).unwrap();
+    }
+    tx.commit().unwrap();
+    let request = serde_json::from_value(serde_json::json!({"limit":10001})).unwrap();
+    let start = std::time::Instant::now();
+    let page = repository::search(&db, &request).unwrap();
+    let search = start.elapsed();
+    assert_eq!(page.total, 10001);
+    assert_eq!(page.items.len(), 200);
+    assert_eq!(page.limit, 200);
+    let start = std::time::Instant::now();
+    let graph = super::relations::graph(
+        &db,
+        &super::intelligence_models::GraphRequest {
+            asset_id: center,
+            locale: "zh-CN".into(),
+            offset: 9920,
+            limit: 10001,
+        },
+    )
+    .unwrap();
+    let graph_time = start.elapsed();
+    assert_eq!(graph.total, 10000);
+    assert_eq!(graph.nodes.len(), 81);
+    assert_eq!(graph.limit, 80);
+    assert_eq!(graph.relations.len(), 80);
+    eprintln!("v0.23 benchmark: assets=10001, search={search:?}, graph80={graph_time:?}");
+}
