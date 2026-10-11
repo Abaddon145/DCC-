@@ -74,6 +74,7 @@ pub struct SearchRequest {
 pub fn default_module_order() -> Vec<String> {
     [
         "library",
+        "downloader",
         "browserCapture",
         "imageLibrary",
         "modelLibrary",
@@ -611,6 +612,7 @@ pub struct FabMetadata {
     pub license: String,
     pub preview_images: Vec<FabPreviewImage>,
     pub image_warning: Option<String>,
+    pub format_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -894,6 +896,58 @@ pub struct TranslationRequest {
     pub source_language: String,
     pub target_language: String,
     pub fields: LocalizedAssetText,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FormTranslationCostInput {
+    pub localizations: HashMap<String, LocalizedAssetText>,
+    pub id: Option<String>,
+    pub source_url: String,
+    pub complete_bilingual: bool,
+    pub auto_translate: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TranslationCostRequest {
+    pub ids: Vec<String>,
+    pub form: Option<FormTranslationCostInput>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TranslationQuery {
+    pub from: String,
+    pub to: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationCostRow {
+    pub asset_id: Option<String>,
+    pub name: String,
+    pub pending_fields: Vec<String>,
+    pub status: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationCostEstimate {
+    pub pending_field_count: usize,
+    pub characters: usize,
+    pub cache_hits: usize,
+    pub tokens_min: u64,
+    pub tokens_max: u64,
+    pub month: String,
+    pub month_used: u64,
+    pub month_limit: u64,
+    pub would_exceed: bool,
+    pub online_requests: usize,
+    pub baidu_characters: usize,
+    pub rows: Vec<TranslationCostRow>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

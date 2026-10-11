@@ -10,8 +10,10 @@ import { applyFabMetadata, isFabUrl } from "../lib/fab";
 import { MediaPreview } from "./MediaPreview";
 import { missingTranslationFields, useFabTranslationSettings } from "../lib/bilingual";
 import { useRequestGate } from "../lib/workspace";
+import { TranslationCostDialog } from "./TranslationCostDialog";
+import type { TranslationCostEstimate } from "../types";
 
-interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput, options?: SingleAssetSaveOptions) => Promise<AssetDetail | void>; onMediaImported?: (id:string)=>Promise<void>; onOpenExisting?: (id: string) => void; onRetryTranslation?: (id: string) => Promise<AssetDetail> }
+interface Props { asset: AssetDetail | null; categories: Category[]; contentLanguage: ContentLanguage; expectedLibraryId?: string; initialShare?: ParsedShareText | null; saveShortcut?: string; onClose: () => void; onSave: (input: AssetInput, options?: SingleAssetSaveOptions) => Promise<AssetDetail | void>; onMediaImported?: (id:string)=>Promise<void>; onOpenExisting?: (id: string) => void; onRetryTranslation?: (id: string) => Promise<AssetDetail> }
 
 const blankLocalized = (): LocalizedAssetText => ({ name: "", description: "", tags: [], license: "" });
 
@@ -44,10 +46,13 @@ function flattenCategories(categories: Category[]) {
   walk(null, 0); return result;
 }
 
-export function AssetEditor({ asset, categories, contentLanguage, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onMediaImported, onOpenExisting, onRetryTranslation }: Props) {
+export function AssetEditor({ asset, categories, contentLanguage, expectedLibraryId, initialShare, saveShortcut = "Ctrl+S", onClose, onSave, onMediaImported, onOpenExisting, onRetryTranslation }: Props) {
   const gate = useRequestGate();
+  const costGate = useRequestGate();
+  const [cost, setCost] = useState<{ payload: AssetInput; retryId?: string; estimate: TranslationCostEstimate | null; loading: boolean; error: string; fingerprint: string } | null>(null);
   const policy = useFabTranslationSettings();
   const [fabRead, setFabRead] = useState(false);
+  const [fabFormatWarning, setFabFormatWarning] = useState<string | undefined>();
   const [saveResult, setSaveResult] = useState<AssetDetail | null>(null);
   const [saveError, setSaveError] = useState("");
   const [form, setForm] = useState<AssetInput>(() => toInput(asset, contentLanguage, initialShare));
@@ -73,10 +78,24 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
   const completeBilingual = !asset || fabRead;
   const autoTranslate = policy.settings?.fabAutoTranslate ?? false;
   const willTranslate = completeBilingual && (!isFabUrl(form.sourceUrl) || autoTranslate);
+  const fingerprint = JSON.stringify({ form, assetId: asset?.id, sizeText, pendingMediaPaths, expectedLibraryId, autoTranslate, completeBilingual });
+  const latestFingerprint = useRef(fingerprint); latestFingerprint.current = fingerprint;
+  useEffect(() => { costGate.invalidate(); setCost(null); }, [fingerprint, costGate]);
+  const cancelCost = () => { costGate.invalidate(); setCost(null); };
+  const estimateCost = async (payload: AssetInput, retryId?: string) => {
+    const ticket = costGate.begin(), bound = latestFingerprint.current;
+    setCost({ payload, retryId, estimate: null, loading: true, error: "", fingerprint: bound });
+    try {
+      if (!expectedLibraryId) throw new Error("正在连接素材库，请稍后重新预估");
+      if (!retryId && !asset && isFabUrl(payload.sourceUrl) && !fabRead) throw new Error("请先点击“读取并填充”，再预估完整 Fab 商品补译；也可仅保存原文");
+      const estimate = await api.estimateTranslationCost(retryId ? { ids: [retryId] } : { form: { id: payload.id || undefined, localizations: payload.localizations, sourceUrl: payload.sourceUrl, completeBilingual, autoTranslate } }, expectedLibraryId);
+      if (costGate.isCurrent(ticket) && latestFingerprint.current === bound) setCost({ payload, retryId, estimate, loading: false, error: "", fingerprint: bound });
+    } catch (failure) { if (costGate.isCurrent(ticket) && latestFingerprint.current === bound) setCost({ payload, retryId, estimate: null, loading: false, error: String(failure), fingerprint: bound }); }
+  };
   const close = () => {
     if (savingRef.current) return;
     if (!saveResult && initialDraft.current !== JSON.stringify({ form, sizeText, pendingMediaPaths }) && !window.confirm("还有未保存的素材内容，确定放弃本次编辑？")) return;
-    gate.invalidate(); onClose();
+    gate.invalidate(); costGate.invalidate(); onClose();
   };
 
   const addPaths = (paths: string[]) => setForm(prev => {
@@ -196,10 +215,11 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
       if (!gate.isCurrent(ticket)) return;
       setForm(previous => applyFabMetadata(previous, metadata));
       setFabRead(true);
+      setFabFormatWarning(metadata.formatWarning || undefined);
       setFabUrl(metadata.canonicalUrl);
       const details = [metadata.author && "作者", metadata.tags.length && "标签", metadata.dccTools.length && "DCC", metadata.versions.length && "版本", metadata.formats.length && "格式", metadata.license && "许可", metadata.previewImages.length && `${metadata.previewImages.length} 张预览图`].filter(Boolean).join("、");
       const categoryNote = metadata.suggestedCategoryPath.length ? ` 未手选分类时，保存将归类到“${metadata.suggestedCategoryPath.join(" / ")}”。` : "";
-      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}` });
+      setFabStatus({ kind: "success", message: `已读取“${metadata.name}”${details ? `，并补充${details}` : ""}。已有文字和图片不会被覆盖。${categoryNote}${metadata.imageWarning ? ` ${metadata.imageWarning}` : ""}${metadata.formatWarning ? ` ${metadata.formatWarning}` : ""}` });
     } catch (error) {
       if (gate.isCurrent(ticket)) setFabStatus({ kind: "error", message: String(error) });
     } finally { if (gate.isCurrent(ticket)) { fetchingFabRef.current = false; setFetchingFab(false); } }
@@ -207,13 +227,19 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (savingRef.current || fetchingFabRef.current || translating || policy.busy || saveResult) return;
+    if (savingRef.current || fetchingFabRef.current || translating || policy.busy || saveResult || cost) return;
     const parsedSize = parseSize(sizeText);
     const display = form.localizations[form.contentLanguage] || form.localizations[form.contentLanguage === "en" ? "zh-CN" : "en"] || blankLocalized();
     const next = { ...form, name: display.name, description: display.description, tags: display.tags, license: display.license, sizeBytes: Number.isNaN(parsedSize) ? -1 : parsedSize };
     const validation = validateAsset(next);
     setErrors(validation.errors); setWarnings(validation.warnings);
     if (Object.keys(validation.errors).length) return;
+    if (completeBilingual) { await estimateCost(next); return; }
+    await persist(next);
+  };
+
+  const persist = async (next: AssetInput, skipAutoTranslation = false) => {
+    if (savingRef.current) return;
     savingRef.current = true; setSaving(true); setSaveError("");
     const ticket = gate.begin();
     try {
@@ -227,7 +253,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         ...next,
         images: next.images.map(({ previewDataUrl: _previewDataUrl, remoteUrl: _remoteUrl, ...image }) => image)
       };
-      const saved=await onSave(payload, { completeBilingual: fabRead, autoTranslate });
+      const saved=await onSave(payload, { completeBilingual: fabRead, autoTranslate, ...(fabFormatWarning ? { formatWarning: fabFormatWarning } : {}), ...(skipAutoTranslation ? { skipAutoTranslation: true } : {}) });
       if (!gate.isCurrent(ticket)) return;
       if (saved) { setSaveResult(saved); setForm(toInput(saved, contentLanguage)); setEditLanguage(contentLanguage); }
       if (saved && pendingMediaPaths.length) {
@@ -259,7 +285,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <p>{pendingFields.length ? `待补译：${pendingFields.join("、")}` : "已有原文对应的中英字段已齐全。"}</p>
         <p>分类：{saveResult.categoryName || "未分类"}</p>
         {saveResult.singleImportWarnings?.map((warning, index) => <p key={index}>{warning}</p>)}
-        <div className="translation-actions">{!!pendingFields.length && onRetryTranslation && <button type="button" className="secondary-button" disabled={saving} onClick={() => void retryTranslation()}>{saving ? "正在补译…" : "重试缺失译文"}</button>}<button type="button" className="secondary-button" disabled={saving} onClick={() => { onClose(); window.dispatchEvent(new Event("open-task-center")); }}>查看任务记录</button></div>
+        <div className="translation-actions">{!!pendingFields.length && onRetryTranslation && <button type="button" className="secondary-button" disabled={saving} onClick={() => void estimateCost(form, saveResult.id)}>{saving ? "正在补译…" : "重试缺失译文"}</button>}<button type="button" className="secondary-button" disabled={saving} onClick={() => { onClose(); window.dispatchEvent(new Event("open-task-center")); }}>查看任务记录</button></div>
       </section>}
       <fieldset disabled={saving || translating || !!saveResult} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, flexShrink: 0 }}>
       <div className="form-section"><h3>基本信息</h3>
@@ -284,7 +310,7 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
         <label><span>格式</span><input value={form.formats.join("; ")} onChange={e => update("formats", splitValues(e.target.value))} placeholder="uasset; FBX" /></label>
         <label><span>素材大小</span><input value={sizeText} onChange={e => setSizeText(e.target.value)} placeholder="例如 2.4 GB" />{errors.sizeBytes && <small className="field-error">{errors.sizeBytes}</small>}</label>
         <label><span>{editLanguage === "zh-CN" ? "中文许可" : "English license"}</span><input value={localized.license} onChange={e => updateLocalized("license", e.target.value)} placeholder="个人/商用、CC0…" /></label>
-        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setFabRead(false); setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
+        <label className="wide"><span>来源地址</span><input value={form.sourceUrl} onChange={e => { const sourceUrl = e.target.value; setFabRead(false); setFabFormatWarning(undefined); setForm(previous => ({ ...previous, sourceUrl, fabListingId: null, autoCategoryPath: [] })); }} placeholder="https://…" />{errors.sourceUrl && <small className="field-error">{errors.sourceUrl}</small>}</label>
       </div></div>
       <div className="form-section"><div className="section-heading"><h3>百度网盘</h3><button type="button" className="secondary-button" onClick={parseClipboard}><ClipboardPaste size={15} />从剪贴板解析</button></div><div className="form-grid">
         <label className="wide"><span>分享链接（可选）</span><input value={form.shareUrl} onChange={e => update("shareUrl", e.target.value)} placeholder="https://pan.baidu.com/s/…" />{errors.shareUrl && <small className="field-error">{errors.shareUrl}</small>}</label>
@@ -308,5 +334,12 @@ export function AssetEditor({ asset, categories, contentLanguage, initialShare, 
       </fieldset>
       <footer className="modal-footer"><button type="button" className={saveResult ? "primary-button" : "secondary-button"} disabled={saving} onClick={close}>{saveResult ? "完成" : "取消"}</button>{!saveResult && <button type="submit" className="primary-button" disabled={saving || fetchingFab || translating || policy.busy || (isFabUrl(form.sourceUrl) && !policy.settings)}><Save size={17} />{saving ? willTranslate ? "正在保存并补齐双语…" : "正在保存素材…" : "保存素材"}</button>}</footer>
     </form>
-  </section></div>;
+  </section>{cost && <TranslationCostDialog estimate={cost.estimate} loading={cost.loading} error={cost.error} onCancel={cancelCost} onRetry={() => void estimateCost(cost.payload, cost.retryId)} onConfirm={async () => {
+    if (cost.fingerprint !== latestFingerprint.current || cost.loading || !cost.estimate || cost.estimate.wouldExceed) return;
+    const pending = cost; cancelCost();
+    if (pending.retryId) await retryTranslation(); else await persist(pending.payload);
+  }} onRawSave={cost.retryId ? undefined : async () => {
+    if (cost.fingerprint !== latestFingerprint.current || cost.loading) return;
+    const pending = cost; cancelCost(); await persist(pending.payload, true);
+  }} />}</div>;
 }

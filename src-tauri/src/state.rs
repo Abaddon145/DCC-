@@ -1,8 +1,14 @@
-use crate::{db, glossary::GlossaryStore, models::*};
+use crate::{
+    db,
+    glossary::GlossaryStore,
+    models::*,
+    upgrade_backup::{self, UpgradeBackupRecord, UpgradeBackupStatus},
+};
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -36,6 +42,8 @@ struct RecentLibrary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
+    #[serde(default)]
+    download_settings: crate::downloader::models::DownloadSettings,
     active_library: String,
     recent_libraries: Vec<RecentLibrary>,
     retained_copies: Vec<String>,
@@ -49,6 +57,16 @@ struct AppSettings {
     translation_preferences: crate::translation_service::TranslationPreferences,
     #[serde(default)]
     note_appearance: serde_json::Value,
+    #[serde(default)]
+    last_backup_app_version: String,
+    #[serde(default = "default_auto_backup_keep")]
+    auto_backup_keep: i64,
+    #[serde(default)]
+    upgrade_backups: HashMap<String, UpgradeBackupRecord>,
+}
+
+fn default_auto_backup_keep() -> i64 {
+    5
 }
 
 fn default_language() -> String {
@@ -61,6 +79,7 @@ fn default_true() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            download_settings: crate::downloader::models::DownloadSettings::default(),
             active_library: String::new(),
             recent_libraries: Vec::new(),
             retained_copies: Vec::new(),
@@ -69,6 +88,9 @@ impl Default for AppSettings {
             global_preferences: GlobalPreferences::default(),
             translation_preferences: crate::translation_service::TranslationPreferences::default(),
             note_appearance: serde_json::Value::Null,
+            last_backup_app_version: String::new(),
+            auto_backup_keep: default_auto_backup_keep(),
+            upgrade_backups: HashMap::new(),
         }
     }
 }
@@ -109,6 +131,73 @@ struct PendingMoveUndo {
 }
 
 impl AppState {
+    pub fn recover_interrupted_restore(&self) -> Result<(), String> {
+        self.with_active_mut(|active| {
+            if self.tasks.busy() {
+                return Err("请先等待当前任务结束".into());
+            }
+            let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+            let mut warning = self
+                .startup_warning
+                .lock()
+                .map_err(|_| "启动提示锁已损坏")?;
+            crate::backup::recover_interrupted_restore(active, |path| {
+                protect_existing_library(path, &self.settings_path, &mut settings, &mut warning);
+            })
+        })
+    }
+
+    pub fn upgrade_backup_status(&self, library_id: &str) -> Result<UpgradeBackupStatus, String> {
+        let active = self.active.lock().map_err(|_| "素材库锁已损坏")?;
+        if active.marker.library_id != library_id {
+            return Err("素材库已改变，请重新打开设置".into());
+        }
+        let settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+        let key = upgrade_backup::library_key(&active.base_dir)?;
+        upgrade_backup::status(
+            &active.base_dir,
+            settings.auto_backup_keep,
+            settings
+                .upgrade_backups
+                .get(&key)
+                .unwrap_or(&UpgradeBackupRecord::default()),
+        )
+    }
+
+    pub fn save_upgrade_backup_keep(
+        &self,
+        library_id: &str,
+        keep: i64,
+    ) -> Result<UpgradeBackupStatus, String> {
+        if !(1..=20).contains(&keep) {
+            return Err("升级快照保留数量必须为 1–20 的整数".into());
+        }
+        let active = self.active.lock().map_err(|_| "素材库锁已损坏")?;
+        if active.marker.library_id != library_id {
+            return Err("素材库已改变，未保存升级保护设置".into());
+        }
+        if active.connection.is_none()
+            || active.base_dir.join(crate::backup::RESTORE_MARKER).exists()
+            || self.tasks.maintenance().is_some()
+        {
+            return Err("素材库正在安全维护，未保存升级保护设置".into());
+        }
+        let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+        let mut next = settings.clone();
+        next.auto_backup_keep = keep;
+        let key = upgrade_backup::library_key(&active.base_dir)?;
+        let status = upgrade_backup::status(
+            &active.base_dir,
+            keep,
+            next.upgrade_backups
+                .get(&key)
+                .unwrap_or(&UpgradeBackupRecord::default()),
+        )?;
+        write_settings(&self.settings_path, &next)?;
+        *settings = next;
+        Ok(status)
+    }
+
     pub fn config_directory(&self) -> PathBuf {
         self.settings_path
             .parent()
@@ -157,26 +246,44 @@ impl AppState {
             settings.translation_preferences = Default::default();
         }
         let default_path = config_dir.clone();
-        ensure_library(&default_path, "默认素材库", true)?;
         let desired = if settings.active_library.trim().is_empty() {
             default_path.clone()
         } else {
             PathBuf::from(&settings.active_library)
         };
-        let (active, warning) = match open_library(&desired) {
-            Ok(active) => {
-                let warning=active.base_dir.join(crate::backup::RESTORE_MARKER).exists().then(||"上次素材库恢复中断，已暂停库内操作。请在设置中心→数据与素材库→稳定性与恢复，确认恢复原库。未自动重试。".to_string());
-                (active, warning)
+        let mut warning = None;
+        let prepare = if desired == default_path {
+            ensure_library(&desired, "默认素材库", true)
+        } else if desired.join(crate::backup::RESTORE_MARKER).exists() {
+            Ok(())
+        } else {
+            validate_library(&desired)
+        };
+        let active = match prepare
+            .and_then(|_| open_library(&desired, &settings_path, &mut settings, &mut warning))
+        {
+            Ok(active) => active,
+            Err(error) if desired != default_path => {
+                merge_warning(
+                    &mut warning,
+                    format!("上次使用的素材库无法打开，已回到默认库：{error}"),
+                );
+                ensure_library(&default_path, "默认素材库", true)?;
+                open_library(&default_path, &settings_path, &mut settings, &mut warning)?
             }
-            Err(error) if desired != default_path => (
-                open_library(&default_path)?,
-                Some(format!("上次使用的素材库无法打开，已回到默认库：{error}")),
-            ),
             Err(error) => return Err(error),
         };
+        if active.connection.is_none() {
+            merge_warning(&mut warning, "上次素材库恢复中断，已暂停库内操作。请在设置中心→数据与素材库→稳定性与恢复，确认恢复原库。未自动重试。".into());
+        }
         settings.active_library = path_text(&active.base_dir);
         touch_recent(&mut settings, &active.base_dir);
-        write_settings(&settings_path, &settings)?;
+        if let Err(error) = write_settings(&settings_path, &settings) {
+            merge_warning(
+                &mut warning,
+                format!("应用设置未保存，下次打开会重试升级前保护：{error}"),
+            );
+        }
         Ok(Self {
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
             knowledge_editing: AtomicBool::new(false),
@@ -666,12 +773,18 @@ impl AppState {
             "open" => validate_library(&target)?,
             _ => return Err("未知的素材库切换方式".into()),
         }
-        let next = open_library(&target)?;
         let old_path = path_text(&active.base_dir);
         let mut settings = self
             .settings
             .lock()
             .map_err(|_| "设置锁已损坏".to_string())?;
+        let next = {
+            let mut warning = self
+                .startup_warning
+                .lock()
+                .map_err(|_| "启动状态锁已损坏")?;
+            open_library(&target, &self.settings_path, &mut settings, &mut warning)?
+        };
         if request.mode == "migrate" && !settings.retained_copies.contains(&old_path) {
             settings.retained_copies.push(old_path.clone());
         }
@@ -742,6 +855,27 @@ impl AppState {
         ))
     }
 
+    pub fn download_settings(&self) -> Result<crate::downloader::models::DownloadSettings, String> {
+        Ok(self
+            .settings
+            .lock()
+            .map_err(|_| "设置锁已损坏")?
+            .download_settings
+            .clone())
+    }
+    pub fn save_download_settings(
+        &self,
+        value: crate::downloader::models::DownloadSettings,
+    ) -> Result<(), String> {
+        value.validate()?;
+        let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+        let mut next = settings.clone();
+        next.download_settings = value;
+        write_settings(&self.settings_path, &next)?;
+        *settings = next;
+        Ok(())
+    }
+
     pub fn global_preferences(&self) -> Result<GlobalPreferences, String> {
         Ok(self
             .settings
@@ -810,7 +944,6 @@ fn ensure_library(path: &Path, name: &str, allow_legacy: bool) -> Result<(), Str
         };
         write_json_atomic(&marker_path, &marker)?;
     }
-    drop(db::open_database(&path.join("library.db"))?);
     Ok(())
 }
 
@@ -832,7 +965,12 @@ fn validate_library(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn open_library(path: &Path) -> Result<ActiveLibrary, String> {
+fn open_library(
+    path: &Path,
+    settings_path: &Path,
+    settings: &mut AppSettings,
+    warning: &mut Option<String>,
+) -> Result<ActiveLibrary, String> {
     if path.join(crate::backup::RESTORE_MARKER).exists() {
         return Ok(ActiveLibrary {
             base_dir: path.to_path_buf(),
@@ -841,9 +979,15 @@ fn open_library(path: &Path) -> Result<ActiveLibrary, String> {
             connection: None,
         });
     }
-    validate_library(path)?;
     let marker = read_marker(path)?;
+    if marker.format_version != 1 {
+        return Err("素材库格式版本不受支持".into());
+    }
     let db_path = path.join("library.db");
+    if db_path.exists() {
+        validate_library(path)?;
+        protect_existing_library(path, settings_path, settings, warning);
+    }
     let connection = db::open_database(&db_path)?;
     Ok(ActiveLibrary {
         base_dir: path.to_path_buf(),
@@ -851,6 +995,82 @@ fn open_library(path: &Path) -> Result<ActiveLibrary, String> {
         marker,
         connection: Some(connection),
     })
+}
+
+fn merge_warning(warning: &mut Option<String>, message: String) {
+    match warning {
+        Some(existing) if !existing.contains(&message) => {
+            existing.push('\n');
+            existing.push_str(&message);
+        }
+        None => *warning = Some(message),
+        _ => {}
+    }
+}
+
+fn protect_existing_library(
+    path: &Path,
+    settings_path: &Path,
+    settings: &mut AppSettings,
+    warning: &mut Option<String>,
+) {
+    let key = match upgrade_backup::library_key(path) {
+        Ok(key) => key,
+        Err(error) => {
+            merge_warning(warning, format!("升级前数据库保护未完成：{error}"));
+            return;
+        }
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let previous = settings
+        .upgrade_backups
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    if previous.last_success_app_version == version {
+        return;
+    }
+    let mut record = previous.clone();
+    let result = upgrade_backup::run_upgrade_backup(
+        path,
+        version,
+        settings.auto_backup_keep.clamp(1, 20) as usize,
+        &mut record,
+    );
+    match &result {
+        Ok(status)
+            if status
+                .message
+                .as_ref()
+                .is_some_and(|s| s.contains("未清理")) =>
+        {
+            merge_warning(warning, status.message.clone().unwrap())
+        }
+        Err(error) => merge_warning(
+            warning,
+            format!("升级前数据库保护未完成，已继续打开；请检查目录权限和磁盘空间：{error}"),
+        ),
+        _ => {}
+    }
+    let mut next = settings.clone();
+    next.upgrade_backups.insert(key.clone(), record.clone());
+    if result.is_ok() {
+        next.last_backup_app_version = version.into();
+    }
+    match write_settings(settings_path, &next) {
+        Ok(()) => *settings = next,
+        Err(error) => {
+            // A verified file is kept, but cannot suppress retry until its record is durable.
+            record.last_success_app_version = previous.last_success_app_version;
+            record.snapshots = previous.snapshots;
+            record.result = Some("failed".into());
+            let message =
+                format!("升级前保护记录未能保存到设置，下次打开会重试；已生成的文件保留：{error}");
+            record.message = Some(message.clone());
+            settings.upgrade_backups.insert(key, record);
+            merge_warning(warning, message);
+        }
+    }
 }
 
 fn migrate_library(
@@ -984,8 +1204,11 @@ fn read_marker(path: &Path) -> Result<LibraryMarker, String> {
         .map_err(|e| format!("素材库标记无效：{e}"))
 }
 fn read_settings(path: &Path) -> Result<AppSettings, String> {
-    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("应用设置无效：{e}"))
+    let mut settings: AppSettings =
+        serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("应用设置无效：{e}"))?;
+    settings.auto_backup_keep = settings.auto_backup_keep.clamp(1, 20);
+    Ok(settings)
 }
 fn write_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
     write_json_atomic(path, settings)
@@ -1057,6 +1280,15 @@ fn path_text(path: &Path) -> String {
 #[cfg(test)]
 pub(crate) fn test_state(path: &Path) -> AppState {
     ensure_library(path, "测试库", false).unwrap();
+    let mut settings = AppSettings::default();
+    let mut warning = None;
+    let active = open_library(
+        path,
+        &path.join("settings.json"),
+        &mut settings,
+        &mut warning,
+    )
+    .unwrap();
     AppState {
         knowledge_editing: AtomicBool::new(false),
         tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
@@ -1065,9 +1297,9 @@ pub(crate) fn test_state(path: &Path) -> AppState {
             false,
         ),
         settings_path: path.join("settings.json"),
-        settings: Mutex::new(AppSettings::default()),
-        startup_warning: Mutex::new(None),
-        active: Mutex::new(open_library(path).unwrap()),
+        settings: Mutex::new(settings),
+        startup_warning: Mutex::new(warning),
+        active: Mutex::new(active),
         link_check_job: Mutex::new(None),
         pending_move_undo: Mutex::new(None),
         reference_window_board: Mutex::new(None),
@@ -1080,10 +1312,375 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     #[test]
+    fn upgrade_backup_precedes_migrations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old-library");
+        ensure_library(&path, "旧测试库", false).unwrap();
+        let connection = db::open_database(&path.join("library.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_meta SET value='12' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let active = open_library(
+            &path,
+            &dir.path().join("settings.json"),
+            &mut AppSettings::default(),
+            &mut None,
+        )
+        .unwrap();
+        let backup_root = dir.path().join("升级前自动备份");
+        assert!(
+            backup_root.exists(),
+            "migration must have a pre-upgrade database snapshot"
+        );
+        let database = WalkDir::new(&backup_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.path().extension().is_some_and(|s| s == "db"))
+            .unwrap();
+        let snapshot = Connection::open(database.path()).unwrap();
+        assert_eq!(
+            snapshot
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "12"
+        );
+        assert_ne!(
+            active
+                .connection
+                .as_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "12"
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_second_library_and_copied_uuid_are_protected() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        ensure_library(&first, "第一库", false).unwrap();
+        drop(db::open_database(&first.join("library.db")).unwrap());
+        fs::create_dir(&second).unwrap();
+        fs::copy(first.join("library.db"), second.join("library.db")).unwrap();
+        fs::copy(first.join(MARKER_FILE), second.join(MARKER_FILE)).unwrap();
+        let mut settings = AppSettings::default();
+        let settings_path = dir.path().join("settings.json");
+        let mut warning = None;
+        drop(open_library(&first, &settings_path, &mut settings, &mut warning).unwrap());
+        drop(open_library(&second, &settings_path, &mut settings, &mut warning).unwrap());
+        assert_eq!(
+            settings.upgrade_backups.len(),
+            2,
+            "copied UUID must not bypass path-specific protection"
+        );
+        assert!(settings
+            .upgrade_backups
+            .values()
+            .all(|r| r.snapshots.len() == 1));
+        drop(open_library(&first, &settings_path, &mut settings, &mut warning).unwrap());
+        assert!(settings
+            .upgrade_backups
+            .values()
+            .all(|r| r.snapshots.len() == 1));
+        assert_eq!(
+            read_settings(&settings_path).unwrap().upgrade_backups.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_new_library_skips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new");
+        ensure_library(&path, "新库", false).unwrap();
+        assert!(
+            !path.join("library.db").exists(),
+            "directory preparation must not migrate or initialize a DB"
+        );
+        let mut settings = AppSettings::default();
+        let active = open_library(
+            &path,
+            &dir.path().join("settings.json"),
+            &mut settings,
+            &mut None,
+        )
+        .unwrap();
+        assert!(active.connection.is_some());
+        assert!(settings.upgrade_backups.is_empty());
+        assert!(!dir.path().join("升级前自动备份").exists());
+    }
+
+    #[test]
+    fn upgrade_backup_restore_interruption_skips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("restore");
+        ensure_library(&path, "恢复库", false).unwrap();
+        // The interrupted DB is deliberately unreadable; only its marker may be read.
+        fs::write(path.join("library.db"), b"unfinished-restore").unwrap();
+        fs::write(path.join(crate::backup::RESTORE_MARKER), b"{}").unwrap();
+        let mut settings = AppSettings::default();
+        let active = open_library(
+            &path,
+            &dir.path().join("settings.json"),
+            &mut settings,
+            &mut None,
+        )
+        .unwrap();
+        assert!(active.connection.is_none());
+        assert!(settings.upgrade_backups.is_empty());
+        assert_eq!(
+            fs::read(path.join("library.db")).unwrap(),
+            b"unfinished-restore"
+        );
+        assert!(!dir.path().join("升级前自动备份").exists());
+    }
+
+    #[test]
+    fn upgrade_backup_explicit_restore_precedes_migrations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library");
+        let state = test_state(&path);
+        let id = state.active_library_id().unwrap();
+        state
+            .with_library(|db, _| {
+                db.execute(
+                    "UPDATE schema_meta SET value='12' WHERE key='schema_version'",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+                db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        drop(state.active.lock().unwrap().connection.take());
+        let old = path.join(".restore-old-test");
+        fs::create_dir(&old).unwrap();
+        fs::rename(path.join("library.db"), old.join("library.db")).unwrap();
+        fs::write(path.join("library.db"), b"partial restore").unwrap();
+        crate::reliability::write_json(
+            &path.join(crate::backup::RESTORE_MARKER),
+            &serde_json::json!({"rollback": ".restore-old-test", "originals": ["library.db"]}),
+        )
+        .unwrap();
+
+        state.recover_interrupted_restore().unwrap();
+        let status = state.upgrade_backup_status(&id).unwrap();
+        assert_eq!(
+            status.result.as_deref(),
+            Some("success"),
+            "explicit recovery must protect the restored original before migration"
+        );
+        let database = WalkDir::new(&status.backup_directory)
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.path().extension().is_some_and(|s| s == "db"))
+            .unwrap();
+        let snapshot = Connection::open_with_flags(
+            database.path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "12"
+        );
+        state
+            .with_library(|db, _| {
+                assert_ne!(
+                    db.query_row(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                    "12"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(!path.join(crate::backup::RESTORE_MARKER).exists());
+        assert_eq!(
+            read_settings(&state.settings_path)
+                .unwrap()
+                .last_backup_app_version,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_failure_does_not_block_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old");
+        ensure_library(&path, "旧库", false).unwrap();
+        drop(db::open_database(&path.join("library.db")).unwrap());
+        fs::write(dir.path().join("升级前自动备份"), b"blocked-directory").unwrap();
+        let mut settings = AppSettings::default();
+        let mut warning = Some("原有启动提示".into());
+        let active = open_library(
+            &path,
+            &dir.path().join("settings.json"),
+            &mut settings,
+            &mut warning,
+        )
+        .unwrap();
+        assert!(active.connection.is_some());
+        assert!(warning.as_ref().unwrap().contains("原有启动提示"));
+        assert!(warning.as_ref().unwrap().contains("升级前"));
+        let record = settings.upgrade_backups.values().next().unwrap();
+        assert!(record.last_success_app_version.is_empty());
+        assert_eq!(record.result.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn upgrade_backup_settings_failure_retries_next_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old");
+        ensure_library(&path, "旧库", false).unwrap();
+        drop(db::open_database(&path.join("library.db")).unwrap());
+        let settings_path = dir.path().join("unwritable-settings.json");
+        fs::create_dir(&settings_path).unwrap();
+        let mut settings = AppSettings::default();
+        let mut warning = None;
+        assert!(
+            open_library(&path, &settings_path, &mut settings, &mut warning)
+                .unwrap()
+                .connection
+                .is_some()
+        );
+        assert!(warning.as_ref().unwrap().contains("设置"));
+        let record = settings.upgrade_backups.values().next().unwrap();
+        assert!(record.last_success_app_version.is_empty());
+        assert_ne!(record.result.as_deref(), Some("success"));
+        let before = WalkDir::new(dir.path().join("升级前自动备份"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .count();
+        drop(
+            open_library(
+                &path,
+                &dir.path().join("good-settings.json"),
+                &mut settings,
+                &mut warning,
+            )
+            .unwrap(),
+        );
+        let after = WalkDir::new(dir.path().join("升级前自动备份"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .count();
+        assert_eq!(after, before + 1);
+        assert_eq!(
+            settings
+                .upgrade_backups
+                .values()
+                .next()
+                .unwrap()
+                .last_success_app_version,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_old_settings_defaults_and_invalid_keep_clamps() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            br#"{"activeLibrary":"old", "recentLibraries":[], "retainedCopies":[]}"#,
+        )
+        .unwrap();
+        let defaults = read_settings(&path).unwrap();
+        assert_eq!(defaults.auto_backup_keep, 5);
+        assert!(defaults.last_backup_app_version.is_empty());
+        assert!(defaults.upgrade_backups.is_empty());
+        for (input, expected) in [(i64::MIN, 1), (0, 1), (21, 20), (i64::MAX, 20)] {
+            let value = AppSettings {
+                auto_backup_keep: input,
+                ..defaults.clone()
+            };
+            write_settings(&path, &value).unwrap();
+            assert_eq!(read_settings(&path).unwrap().auto_backup_keep, expected);
+        }
+    }
+
+    #[test]
+    fn upgrade_backup_commands_are_bound_and_keep_validation_is_atomic() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir.path().join("library"));
+        let id = state.active_library_id().unwrap();
+        assert_eq!(state.upgrade_backup_status(&id).unwrap().keep, 5);
+        assert!(state.upgrade_backup_status("previous-library").is_err());
+        assert!(state
+            .save_upgrade_backup_keep("previous-library", 2)
+            .is_err());
+        for keep in [0, 21, -1, i64::MAX] {
+            assert!(state.save_upgrade_backup_keep(&id, keep).is_err());
+        }
+        assert_eq!(state.upgrade_backup_status(&id).unwrap().keep, 5);
+        assert_eq!(state.save_upgrade_backup_keep(&id, 2).unwrap().keep, 2);
+        assert_eq!(
+            read_settings(&state.settings_path)
+                .unwrap()
+                .auto_backup_keep,
+            2
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_restore_allows_read_but_rejects_keep_changes() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir.path().join("library"));
+        let id = state.active_library_id().unwrap();
+        fs::write(
+            state
+                .active
+                .lock()
+                .unwrap()
+                .base_dir
+                .join(crate::backup::RESTORE_MARKER),
+            b"{}",
+        )
+        .unwrap();
+        assert_eq!(state.upgrade_backup_status(&id).unwrap().keep, 5);
+        assert!(state.save_upgrade_backup_keep(&id, 2).is_err());
+        assert_eq!(state.upgrade_backup_status(&id).unwrap().keep, 5);
+    }
+    #[test]
     fn creates_and_validates_library_marker() {
         let dir = tempdir().unwrap();
         let library = dir.path().join("library");
         ensure_library(&library, "测试库", false).unwrap();
+        drop(
+            open_library(
+                &library,
+                &dir.path().join("settings.json"),
+                &mut AppSettings::default(),
+                &mut None,
+            )
+            .unwrap(),
+        );
         validate_library(&library).unwrap();
         assert_eq!(read_marker(&library).unwrap().name, "测试库");
     }
@@ -1187,7 +1784,13 @@ mod tests {
             b"media",
         )
         .unwrap();
-        let mut active = open_library(&source).unwrap();
+        let mut active = open_library(
+            &source,
+            &dir.path().join("settings.json"),
+            &mut AppSettings::default(),
+            &mut None,
+        )
+        .unwrap();
         active
             .connection
             .as_ref()

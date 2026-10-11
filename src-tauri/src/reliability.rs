@@ -125,10 +125,7 @@ pub fn get_interrupted_restore(state: State<AppState>) -> Result<bool, String> {
 }
 #[tauri::command]
 pub fn recover_interrupted_restore(state: State<AppState>) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("请先等待当前任务结束".into());
-    }
-    state.with_active_mut(crate::backup::recover_interrupted_restore)
+    state.recover_interrupted_restore()
 }
 
 #[derive(Clone, Serialize, Deserialize)]

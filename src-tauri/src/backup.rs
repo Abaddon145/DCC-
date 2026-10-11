@@ -147,7 +147,10 @@ struct RestoreCheckpoint {
     originals: Vec<String>,
 }
 
-pub fn recover_interrupted_restore(active: &mut ActiveLibrary) -> Result<(), String> {
+pub fn recover_interrupted_restore(
+    active: &mut ActiveLibrary,
+    before_migration: impl FnOnce(&Path),
+) -> Result<(), String> {
     let marker = active.base_dir.join(RESTORE_MARKER);
     let value: RestoreCheckpoint =
         serde_json::from_slice(&fs::read(&marker).map_err(|_| "没有可恢复的中断记录")?)
@@ -200,6 +203,7 @@ pub fn recover_interrupted_restore(active: &mut ActiveLibrary) -> Result<(), Str
     if !active.db_path.is_file() {
         return Err("原库数据库缺失，已保留中断记录".into());
     }
+    before_migration(&active.base_dir);
     active.connection = Some(db::open_database(&active.db_path)?);
     fs::remove_file(marker).map_err(|_| "原库已恢复，但中断标记未能清除")?;
     Ok(())
@@ -475,7 +479,7 @@ mod tests {
             connection: None,
         };
         assert!(base.join("images/new.txt").exists());
-        recover_interrupted_restore(&mut active).unwrap();
+        recover_interrupted_restore(&mut active, |_| {}).unwrap();
         assert_eq!(
             fs::read(base.join("images/original.txt")).unwrap(),
             b"original"

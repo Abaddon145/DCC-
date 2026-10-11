@@ -6,6 +6,7 @@ mod bilingual;
 mod browser_capture;
 mod commands;
 mod db;
+mod downloader;
 mod epic;
 mod fab;
 mod file_digest;
@@ -18,6 +19,7 @@ mod knowledge_commands;
 mod knowledge_files;
 mod link_checker;
 mod media;
+mod media_engine;
 mod media_library;
 mod model_access;
 mod models;
@@ -31,11 +33,13 @@ mod organization;
 mod projects;
 mod reference_boards;
 mod reliability;
+mod runtime;
 mod search_syntax;
 mod state;
 mod tasks;
 mod translation;
 mod translation_service;
+mod upgrade_backup;
 
 use commands::*;
 use state::AppState;
@@ -67,6 +71,7 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "open_external_url"
             | "set_knowledge_editing"
             | "finish_knowledge_close"
+            | "get_upgrade_backup_status"
     ) || (backup
         && command != "list_reference_boards"
         && (command.starts_with("get_")
@@ -160,6 +165,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
+            if let Err(error) = downloader::auth::clean_stale() {
+                eprintln!("下载Cookie临时文件清理失败：{error}");
+            }
             if let Err(error) = browser_capture::refresh_registered_host() {
                 eprintln!("浏览器连接需要重新设置：{error}");
             }
@@ -228,6 +236,7 @@ pub fn run() {
                     "get_library_locations"
                         | "get_personalization_settings"
                         | "get_automatic_backup_policy"
+                        | "get_upgrade_backup_status"
                         | "get_interrupted_restore"
                         | "recover_interrupted_restore"
                         | "export_diagnostics"
@@ -252,6 +261,18 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    downloader::service::resolve_download,
+                    downloader::service::get_download_tools,
+                    downloader::service::get_download_thumbnail,
+                    downloader::service::get_download_settings,
+                    downloader::service::save_download_settings,
+                    downloader::service::get_download_cookie_status,
+                    downloader::service::import_download_cookies,
+                    downloader::service::delete_download_cookies,
+                    downloader::service::list_download_tasks,
+                    downloader::service::open_download_output,
+                    tasks::pause_download_task,
+                    tasks::resume_download_task,
                     epic::get_fab_ue_options,
                     epic::list_ue_project_targets,
                     epic::inspect_ue_project,
@@ -336,6 +357,8 @@ pub fn run() {
                     reliability::delete_workflow_template,
                     automatic_backup::get_automatic_backup_policy,
                     automatic_backup::save_automatic_backup_policy,
+                    upgrade_backup::get_upgrade_backup_status,
+                    upgrade_backup::save_upgrade_backup_keep,
                     automatic_backup::get_automatic_backup_due,
                     automatic_backup::finish_automatic_backup,
                     tasks::get_task_warning,
@@ -423,6 +446,7 @@ pub fn run() {
                     save_translation_preferences,
                     clear_translation_cache,
                     estimate_translation,
+                    estimate_translation_cost,
                     estimate_missing_translations,
                     save_translation_credentials,
                     delete_translation_credentials,
@@ -518,6 +542,22 @@ mod tests {
         assert!(!maintenance_command_allowed("search_assets", false));
         assert!(maintenance_command_allowed("list_library_tasks", false));
         assert!(!maintenance_command_allowed("list_reference_boards", true));
+        assert!(maintenance_command_allowed(
+            "get_upgrade_backup_status",
+            false
+        ));
+        assert!(maintenance_command_allowed(
+            "get_upgrade_backup_status",
+            true
+        ));
+        assert!(!maintenance_command_allowed(
+            "save_upgrade_backup_keep",
+            false
+        ));
+        assert!(!maintenance_command_allowed(
+            "save_upgrade_backup_keep",
+            true
+        ));
     }
 
     #[test]

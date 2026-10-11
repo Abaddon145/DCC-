@@ -36,4 +36,5 @@ media/
 images/
 safety-backups/
 .tools/
+.dcc/
 *.exe.sha256

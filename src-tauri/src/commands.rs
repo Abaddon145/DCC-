@@ -630,6 +630,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "projects",
         "knowledge",
         "browserCapture",
+        "downloader",
     ]
     .contains(&module_id)
     {
@@ -811,15 +812,33 @@ pub async fn upsert_asset(
     expected_library_id: String,
     complete_bilingual: Option<bool>,
     auto_translate: Option<bool>,
+    format_warning: Option<String>,
+    skip_auto_translation: Option<bool>,
 ) -> Result<AssetDetail, String> {
-    save_single_asset_with_options(
+    save_single_asset_with_skip(
         &state,
         input,
         &expected_library_id,
         complete_bilingual.unwrap_or(false),
         auto_translate,
+        format_warning,
+        skip_auto_translation.unwrap_or(false),
     )
     .await
+}
+
+fn append_fab_read_warnings(messages: &mut Vec<String>, metadata: &FabMetadata) -> bool {
+    let before = messages.len();
+    messages.extend(
+        [
+            metadata.image_warning.as_ref(),
+            metadata.format_warning.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .cloned(),
+    );
+    messages.len() > before
 }
 
 #[cfg(test)]
@@ -828,15 +847,38 @@ pub(crate) async fn save_single_asset(
     input: AssetInput,
     expected_library_id: &str,
 ) -> Result<AssetDetail, String> {
-    save_single_asset_with_options(state, input, expected_library_id, false, None).await
+    save_single_asset_with_options(state, input, expected_library_id, false, None, None).await
 }
 
+#[cfg(test)]
 async fn save_single_asset_with_options(
+    state: &AppState,
+    input: AssetInput,
+    expected_library_id: &str,
+    complete_bilingual: bool,
+    auto_translate: Option<bool>,
+    format_warning: Option<String>,
+) -> Result<AssetDetail, String> {
+    save_single_asset_with_skip(
+        state,
+        input,
+        expected_library_id,
+        complete_bilingual,
+        auto_translate,
+        format_warning,
+        false,
+    )
+    .await
+}
+
+async fn save_single_asset_with_skip(
     state: &AppState,
     mut input: AssetInput,
     expected_library_id: &str,
     complete_bilingual: bool,
     auto_translate: Option<bool>,
+    format_warning: Option<String>,
+    skip_auto_translation: bool,
 ) -> Result<AssetDetail, String> {
     let library_id = expected_library_id.to_string();
     if state.active_library_id()? != library_id {
@@ -848,6 +890,15 @@ async fn save_single_asset_with_options(
         .ok()
         .map(|id| id.to_string());
     let is_fab_source = source_listing_id.is_some();
+    if let Some(warning) = format_warning.filter(|_| is_fab_source) {
+        if !warning.starts_with("该商品还包含非 UE 格式，已忽略：")
+            || warning.chars().count() > 1024
+            || warning.chars().any(char::is_control)
+        {
+            return Err("Fab 格式提示无效，请重新读取商品".into());
+        }
+        warnings.push(warning);
+    }
     let complete_bilingual = is_new || (complete_bilingual && is_fab_source);
     if let (Some(source_id), Some(supplied_id)) = (&source_listing_id, &input.fab_listing_id) {
         if uuid::Uuid::parse_str(supplied_id)
@@ -895,6 +946,7 @@ async fn save_single_asset_with_options(
     if is_new && input.fab_listing_id.is_none() && is_fab_source {
         match fab::fetch_metadata(&input.source_url).await {
             Ok(metadata) => {
+                append_fab_read_warnings(&mut warnings, &metadata);
                 let additions = bilingual::fab_localizations(LocalizedAssetText {
                     name: metadata.name,
                     description: metadata.description,
@@ -927,9 +979,6 @@ async fn save_single_asset_with_options(
                             sort_order: (first_image + index) as i64,
                         },
                     ));
-                if let Some(warning) = metadata.image_warning {
-                    warnings.push(warning);
-                }
             }
             Err(error) => warnings.push(format!("Fab 自动读取未完成，已保留原文：{error}")),
         }
@@ -942,7 +991,9 @@ async fn save_single_asset_with_options(
     }
     db::validate_input(&input)?;
     if complete_bilingual {
-        if !is_fab_source || auto_translate.unwrap_or(state.preferences()?.1) {
+        if skip_auto_translation {
+            warnings.push("已选择仅保存原文，未请求在线补译".into());
+        } else if !is_fab_source || auto_translate.unwrap_or(state.preferences()?.1) {
             warnings.extend(
                 translate_missing_localizations(state, &mut input.localizations, &library_id).await,
             );
@@ -1421,6 +1472,7 @@ pub async fn import_assets(
                 Some(Ok(asset)) => {
                     report.imported += 1;
                     let mut has_warnings = !messages.is_empty();
+                    has_warnings |= append_fab_read_warnings(&mut messages, &metadata);
                     if suggested_category == "其他 / 待整理" {
                         has_warnings = true;
                         messages.push(if category_existed {
@@ -1434,10 +1486,6 @@ pub async fn import_assets(
                         } else {
                             format!("新建分类并自动归类：{suggested_category}")
                         });
-                    }
-                    if let Some(warning) = metadata.image_warning {
-                        has_warnings = true;
-                        messages.push(warning);
                     }
                     report.rows.push(ImportRowResult {
                         row: row.row,
@@ -1998,6 +2046,119 @@ pub fn estimate_translation(
 }
 
 #[tauri::command]
+pub async fn estimate_translation_cost(
+    app: AppHandle,
+    request: TranslationCostRequest,
+    expected_library_id: String,
+) -> Result<TranslationCostEstimate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        estimate_translation_cost_for_state(&app.state::<AppState>(), request, &expected_library_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn estimate_translation_cost_for_state(
+    state: &AppState,
+    request: TranslationCostRequest,
+    expected_library_id: &str,
+) -> Result<TranslationCostEstimate, String> {
+    if state.active_library_id()? != expected_library_id {
+        return Err("素材库已切换，请重新预估".into());
+    }
+    if request.ids.len() > 5000 || (request.form.is_some() && !request.ids.is_empty()) {
+        return Err("预估须使用表单或最多 5000 个素材 ID，不能同时使用".into());
+    }
+    let mut inputs = Vec::new();
+    let mut rows = Vec::new();
+    let is_form = request.form.is_some();
+    if let Some(form) = request.form {
+        inputs.push(form);
+    } else {
+        state
+            .with_library_if_id(expected_library_id, |connection, _| {
+                let mut seen = std::collections::HashSet::new();
+                for id in request.ids.into_iter().filter(|id| seen.insert(id.clone())) {
+                    match db::get_asset(connection, &id, false, "en") {
+                        Ok(asset) => inputs.push(FormTranslationCostInput {
+                            id: Some(id),
+                            localizations: asset.localizations,
+                            complete_bilingual: true,
+                            auto_translate: Some(true),
+                            ..Default::default()
+                        }),
+                        Err(error) if error == "素材不存在" => rows.push(TranslationCostRow {
+                            asset_id: Some(id),
+                            status: "skipped".into(),
+                            reason: "素材不存在或已删除".into(),
+                            ..Default::default()
+                        }),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(())
+            })?
+            .ok_or("素材库已切换，请重新预估")?;
+    }
+    let mut queries = Vec::new();
+    let mut pending_field_count = 0;
+    for form in inputs {
+        let pending_fields = bilingual::pending_fields(&form.localizations);
+        let is_fab = fab::listing_id_from_url(&form.source_url).is_ok();
+        let disabled = is_form
+            && ((form.id.is_some() && (!form.complete_bilingual || !is_fab))
+                || (is_fab && !form.auto_translate.unwrap_or(state.preferences()?.1)));
+        let status = if pending_fields.is_empty() {
+            "skipped"
+        } else if disabled {
+            "disabled"
+        } else {
+            "ready"
+        };
+        let name = form
+            .localizations
+            .get("zh-CN")
+            .filter(|f| !f.name.trim().is_empty())
+            .or_else(|| form.localizations.get("en"))
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        rows.push(TranslationCostRow {
+            asset_id: form.id,
+            name,
+            pending_fields: pending_fields.clone(),
+            status: status.into(),
+            reason: match status {
+                "disabled" => "自动补译已关闭",
+                "skipped" => "双语完整或没有可补译原文",
+                _ => "仅补齐缺失字段",
+            }
+            .into(),
+        });
+        pending_field_count += pending_fields.len();
+        if status != "ready" {
+            continue;
+        }
+        for (source, target) in [("en", "zh-CN"), ("zh-CN", "en")] {
+            if let Some(request) = bilingual::missing_request(&form.localizations, source, target) {
+                queries.extend(translation::translation_queries(
+                    &request,
+                    &state.effective_translation_terms(source, target)?,
+                )?);
+            }
+        }
+    }
+    let mut result = state
+        .translation_service
+        .estimate_queries(&queries, &state.translation_preferences()?)?;
+    if state.active_library_id()? != expected_library_id {
+        return Err("素材库已切换，请重新预估".into());
+    }
+    result.pending_field_count = pending_field_count;
+    result.rows.extend(rows);
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn save_translation_credentials(
     state: State<AppState>,
     app_id: String,
@@ -2335,6 +2496,138 @@ pub fn is_reference_window_open(app: AppHandle, state: State<AppState>) -> Resul
 mod tests {
     use super::*;
 
+    #[test]
+    fn cost_ignores_existing_localizations_and_deduplicates_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_state(dir.path());
+        state.translation_service = crate::translation_service::TranslationService::for_test(
+            &dir.path().join("cost-cache.sqlite"),
+            true,
+        );
+        let mut input = single_fab_input();
+        input.localizations.insert(
+            "zh-CN".into(),
+            LocalizedAssetText {
+                name: "手填标题".into(),
+                ..Default::default()
+            },
+        );
+        input.localizations.get_mut("en").unwrap().description = "Quiet courtyard".into();
+        let saved = state
+            .with_library_mut(|c, p| db::upsert_asset(c, p, input))
+            .unwrap();
+        let before = serde_json::to_value(state.translation_service.usage().unwrap()).unwrap();
+        let result = estimate_translation_cost_for_state(
+            &state,
+            TranslationCostRequest {
+                ids: vec![saved.card.id.clone(), saved.card.id, "missing".into()],
+                form: None,
+            },
+            &state.active_library_id().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.pending_field_count, 1);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .find(|r| r.status == "ready")
+                .unwrap()
+                .pending_fields,
+            ["中文描述"]
+        );
+        assert_eq!(
+            result.rows.iter().filter(|r| r.status == "skipped").count(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(state.translation_service.usage().unwrap()).unwrap(),
+            before
+        );
+    }
+    #[test]
+    fn cost_wrong_library_rejects_without_usage_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(dir.path());
+        let before = serde_json::to_value(state.translation_service.usage().unwrap()).unwrap();
+        assert!(
+            estimate_translation_cost_for_state(&state, Default::default(), "wrong-library")
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(state.translation_service.usage().unwrap()).unwrap(),
+            before
+        );
+    }
+    #[test]
+    fn cost_form_disabled_matches_real_save_switch_and_manual_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(dir.path());
+        let input = single_fab_input();
+        let mut form = FormTranslationCostInput {
+            id: Some("old-asset".into()),
+            localizations: input.localizations.clone(),
+            source_url: String::new(),
+            complete_bilingual: true,
+            auto_translate: Some(true),
+        };
+        let result = estimate_translation_cost_for_state(
+            &state,
+            TranslationCostRequest {
+                ids: vec![],
+                form: Some(form.clone()),
+            },
+            &state.active_library_id().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].status, "disabled");
+        form.id = None;
+        form.source_url = input.source_url.clone();
+        form.auto_translate = Some(false);
+        let result = estimate_translation_cost_for_state(
+            &state,
+            TranslationCostRequest {
+                ids: vec![],
+                form: Some(form),
+            },
+            &state.active_library_id().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].status, "disabled");
+        assert_eq!(result.online_requests, 0);
+    }
+    #[tokio::test]
+    async fn single_save_skip_online_keeps_original_and_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_state(dir.path());
+        state.translation_service = crate::translation_service::TranslationService::for_test(
+            &dir.path().join("cost-cache.sqlite"),
+            true,
+        );
+        let saved = save_single_asset_with_skip(
+            &state,
+            single_fab_input(),
+            &state.active_library_id().unwrap(),
+            true,
+            Some(true),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.localizations["en"].name, "Quiet courtyard");
+        assert!(saved
+            .localizations
+            .get("zh-CN")
+            .is_none_or(|f| f.name.is_empty()));
+        assert_eq!(saved.card.category_name.as_deref(), Some("庭院"));
+        assert_eq!(
+            state.translation_service.usage().unwrap().deepseek_tokens,
+            0
+        );
+    }
+
     fn single_fab_input() -> AssetInput {
         serde_json::from_value(serde_json::json!({
             "name":"Quiet courtyard", "description":"", "categoryId":null,
@@ -2637,9 +2930,10 @@ mod tests {
             state.translation_service.usage().unwrap().deepseek_tokens,
             0
         );
-        let saved = save_single_asset_with_options(&state, reread, &library_id, true, Some(true))
-            .await
-            .unwrap();
+        let saved =
+            save_single_asset_with_options(&state, reread, &library_id, true, Some(true), None)
+                .await
+                .unwrap();
         assert_eq!(saved.category_id, bulk_saved.category_id);
         assert_eq!(saved.card.category_name.as_deref(), Some("沙漠"));
         assert_eq!(saved.localizations["zh-CN"].name, "手填标题");
@@ -2661,10 +2955,16 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
         hand_chosen.category_id = Some(manual.clone());
         hand_chosen.auto_category_path = fab::classify_category("new-unknown-kind", "", "");
-        let saved =
-            save_single_asset_with_options(&state, hand_chosen, &library_id, true, Some(true))
-                .await
-                .unwrap();
+        let saved = save_single_asset_with_options(
+            &state,
+            hand_chosen,
+            &library_id,
+            true,
+            Some(true),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(saved.category_id, Some(manual));
         assert!(!state
             .with_library(|connection, _| db::auto_category_path_exists(
@@ -2672,6 +2972,100 @@ mod tests {
                 &["其他".into(), "待整理".into()]
             ))
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn single_save_retains_fab_format_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(directory.path());
+        let warning = "该商品还包含非 UE 格式，已忽略：blender、fbx";
+        assert_eq!(
+            state
+                .with_library(|c, _| db::library_meta(c, "en"))
+                .unwrap()
+                .total_assets,
+            0
+        );
+        let saved = save_single_asset_with_options(
+            &state,
+            single_fab_input(),
+            &state.active_library_id().unwrap(),
+            true,
+            Some(false),
+            Some(warning.into()),
+        )
+        .await
+        .unwrap();
+        assert!(saved
+            .single_import_warnings
+            .iter()
+            .any(|item| item == warning));
+        let history = state
+            .tasks
+            .list(&state.active_library_id().unwrap())
+            .unwrap();
+        let result = state.tasks.get(&history[0].id).unwrap().result.unwrap();
+        assert!(result["rows"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == warning));
+        assert!(
+            state
+                .with_library(|c, _| db::get_asset(c, &saved.card.id, false, "en"))
+                .unwrap()
+                .single_import_warnings
+                .is_empty(),
+            "warning must not become persistent asset data"
+        );
+    }
+
+    #[test]
+    fn bulk_format_warning_enters_row_messages() {
+        let metadata = FabMetadata {
+            image_warning: Some("1 张图片读取失败".into()),
+            format_warning: Some("该商品还包含非 UE 格式，已忽略：blender".into()),
+            ..Default::default()
+        };
+        let mut messages = vec!["自动归类：环境".into()];
+        assert!(append_fab_read_warnings(&mut messages, &metadata));
+        assert_eq!(
+            messages,
+            vec![
+                "自动归类：环境",
+                "1 张图片读取失败",
+                "该商品还包含非 UE 格式，已忽略：blender"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn single_save_rejects_untrusted_fab_warning_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(directory.path());
+        for warning in [
+            "任意伪造文字".to_string(),
+            format!("该商品还包含非 UE 格式，已忽略：{}", "x".repeat(1024)),
+            "该商品还包含非 UE 格式，已忽略：fbx\n伪造日志".into(),
+        ] {
+            assert!(save_single_asset_with_options(
+                &state,
+                single_fab_input(),
+                &state.active_library_id().unwrap(),
+                true,
+                Some(false),
+                Some(warning)
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(
+            state
+                .with_library(|c, _| db::library_meta(c, "en"))
+                .unwrap()
+                .total_assets,
+            0
+        );
     }
 
     #[tokio::test]
