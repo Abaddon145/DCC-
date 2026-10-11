@@ -359,6 +359,33 @@ fn import_one(
         )?;
         repository::register_files(db, &core_id)?;
         if !deleted {
+            let file_id: String = db.query_row("SELECT id FROM asset_files WHERE asset_id=?1 AND role='original' AND source_kind='mediaFile' LIMIT 1", [&core_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let missing: bool = db
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM asset_metadata WHERE file_id=?1)",
+                    [&file_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if missing {
+                let owned = repository::file_path(
+                    db,
+                    base,
+                    &SourceFileRef {
+                        kind: "mediaFile".into(),
+                        id: db
+                            .query_row(
+                                "SELECT source_id FROM asset_files WHERE id=?1",
+                                [&file_id],
+                                |r| r.get(0),
+                            )
+                            .map_err(|e| e.to_string())?,
+                        role: "original".into(),
+                    },
+                )?;
+                let data = super::metadata::analyze(&owned, kind, resources, stop)?;
+                super::metadata::save(db, &file_id, &data)?;
+            }
             if let Some(project) = &request.project_id {
                 crate::media_library::link_projects(
                     db,
@@ -398,7 +425,7 @@ fn import_one(
         "video" => crate::models::MediaKind::Video,
         _ => crate::models::MediaKind::Audio,
     };
-    let imported = crate::media_library::import_controlled(
+    let imported = crate::media_library::import_controlled_verified(
         db,
         base,
         resources,
@@ -409,8 +436,8 @@ fn import_one(
             tags: request.tags.clone(),
             favorite: false,
         },
-        &|_, _, _, _| {},
         stop,
+        &hash,
     )?;
     let row = imported.rows.first().ok_or("导入停止，未生成条目")?;
     let entry_id = row

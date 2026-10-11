@@ -38,11 +38,15 @@ fn check_ancestors(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+fn belongs_to_library(path: &Path) -> bool {
+    path.ancestors()
+        .any(|parent| parent.join("library.json").is_file() && parent.join("library.db").is_file())
+}
 pub fn validate_source(path: &Path, library: &Path) -> Result<PathBuf, String> {
     check_ancestors(path)?;
     let path = path.canonicalize().map_err(|_| "源文件不存在或无法访问")?;
     let library = library.canonicalize().map_err(|e| e.to_string())?;
-    if !path.is_file() || path.starts_with(&library) {
+    if !path.is_file() || path.starts_with(&library) || belongs_to_library(&path) {
         return Err("请选择素材库托管目录之外的普通文件".into());
     }
     if path
@@ -77,7 +81,7 @@ pub fn scan(
         .canonicalize()
         .map_err(|e| format!("扫描目录不可访问：{e}"))?;
     let library = library_base.canonicalize().map_err(|e| e.to_string())?;
-    if !root.is_dir() || root.starts_with(&library) {
+    if !root.is_dir() || root.starts_with(&library) || belongs_to_library(&root) {
         return Err("请选择素材库之外的扫描目录".into());
     }
     let parent = manifest.parent().ok_or("扫描清单目录无效")?;

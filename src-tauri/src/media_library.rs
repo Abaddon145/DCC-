@@ -706,6 +706,52 @@ pub fn import_controlled_with_capture(
     stop: &dyn Fn() -> bool,
     capture: Option<&crate::browser_capture::Capture>,
 ) -> Result<MediaImportReport, String> {
+    import_checked(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        progress,
+        stop,
+        capture,
+        None,
+    )
+}
+
+/// Core imports bind the analyzed file's digest through final managed-file registration.
+pub(crate) fn import_controlled_verified(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    stop: &dyn Fn() -> bool,
+    expected_hash: &str,
+) -> Result<MediaImportReport, String> {
+    if request.paths.len() != 1 {
+        return Err("校验导入仅接受一个文件".into());
+    }
+    import_checked(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        &|_, _, _, _| {},
+        stop,
+        None,
+        Some(expected_hash),
+    )
+}
+
+fn import_checked(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+    capture: Option<&crate::browser_capture::Capture>,
+    expected_hash: Option<&str>,
+) -> Result<MediaImportReport, String> {
     if request.paths.is_empty() {
         return Ok(MediaImportReport {
             imported: 0,
@@ -747,7 +793,13 @@ pub fn import_controlled_with_capture(
                 return Err("文件不存在".into());
             }
             let (ext, _mime) = validate_kind_path(&request.kind, &source)?;
+            if expected_hash.is_some() {
+                crate::asset::scanner::validate_source(&source, base_dir)?;
+            }
             let checksum = digest(&source)?;
+            if expected_hash.is_some_and(|hash| hash != checksum) {
+                return Err("文件在扫描或分析后发生变化，请重新扫描".into());
+            }
             if let Some(existing)=connection.query_row("SELECT e.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE f.checksum=?1",[&checksum],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())?{return Ok((existing,Some("duplicate".into())))}
             let id = Uuid::new_v4().to_string();
             let root = format!("media-library/{}/{}", request.kind.as_str(), id);
@@ -804,6 +856,9 @@ pub fn import_controlled_with_capture(
                     None,
                     None,
                 ));
+                if expected_hash.is_some() {
+                    crate::asset::scanner::validate_source(&source, base_dir)?;
+                }
                 insert_entry(
                     connection, &id, &request, &name, &main_id, &timestamp, files, capture,
                 )?;
@@ -920,6 +975,9 @@ pub fn import_controlled_with_capture(
                         }
                         Err(error) => return Err(error),
                     }
+                }
+                if expected_hash.is_some() {
+                    crate::asset::scanner::validate_source(&source, base_dir)?;
                 }
                 insert_entry(
                     connection, &id, &request, &name, &main_id, &timestamp, files, capture,

@@ -222,17 +222,17 @@ export default function App() {
   useEffect(() => { refreshMeta(); }, [refreshMeta]);
   useEffect(() => { const handler = (event: KeyboardEvent) => {
     const typing = Boolean((event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]"));
-    if (document.querySelector(".modal-backdrop,.lightbox,.command-backdrop")) return;
+    if (document.querySelector(".modal-backdrop,.lightbox,.command-backdrop,.core-detail")) return;
     if (shortcutMatches(event, personalization.global.shortcuts.commandPalette || "Ctrl+P")) { event.preventDefault(); setShowCommandPalette(true); return; }
     if (typing || document.querySelector(".modal-backdrop,.lightbox,.command-backdrop")) return;
     if (shortcutMatches(event, personalization.global.shortcuts.focusSearch || "Ctrl+K")) { event.preventDefault(); document.querySelector<HTMLInputElement>("[data-workspace-search]")?.focus(); }
     else if (shortcutMatches(event, personalization.global.shortcuts.settings || "Ctrl+,")) { event.preventDefault(); setShowSettings(true); }
-    else if (!isAssetWorkspace(view)) return;
+    else if (!isAssetWorkspace(view) || coreScope !== "normal") return;
     else if (shortcutMatches(event, personalization.global.shortcuts.addAsset || "Ctrl+N")) { event.preventDefault(); setInitialShare(null); setEditor("new"); }
     else if (shortcutMatches(event, personalization.global.shortcuts.quickAdd || "Ctrl+Shift+N")) { event.preventDefault(); setShowQuickAdd(true); }
     else if (shortcutMatches(event, personalization.global.shortcuts.settings || "Ctrl+,")) { event.preventDefault(); setShowSettings(true); }
     else if (shortcutMatches(event, personalization.global.shortcuts.toggleSelection || "Ctrl+M")) { event.preventDefault(); setSelectionMode(value => !value); setSelectedIds(new Set()); }
-  }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [personalization.global.shortcuts, view]);
+  }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [personalization.global.shortcuts, view, coreScope]);
   useEffect(() => () => pointerDragCleanup.current?.(), []);
   useEffect(() => { if(!contextReady)return;const timer = window.setTimeout(() => {
     const changed = request.query !== queryInput;
@@ -587,7 +587,7 @@ export default function App() {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = Boolean(target?.closest("input,textarea,select,[contenteditable=true]"));
-      if (typing || document.querySelector(".modal-backdrop,.lightbox,.command-backdrop") || !isAssetWorkspace(view)) return;
+      if (typing || document.querySelector(".modal-backdrop,.lightbox,.command-backdrop,.core-detail") || !isAssetWorkspace(view) || coreScope !== "normal") return;
       if (selectionMode && shortcutMatches(event, personalization.global.shortcuts.selectAll || "Ctrl+A")) { event.preventDefault(); void selectAllResults(); return; }
       if (shortcutMatches(event, personalization.global.shortcuts.deleteSelected || "Delete")) {
         const categoryId = request.categoryIds.length === 1 ? request.categoryIds[0] : null;
@@ -598,7 +598,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [view, selectionMode, selectedIds, request.categoryIds, detail, personalization.global.shortcuts, selectAllResults, deleteLibraryItems]);
+  }, [view, coreScope, selectionMode, selectedIds, request.categoryIds, detail, personalization.global.shortcuts, selectAllResults, deleteLibraryItems]);
 
   useEffect(() => {
     if (!selectedId || editor) return;

@@ -3,6 +3,202 @@ use rusqlite::{params, Connection};
 
 const OLD_ID: &str = "06003f78-9a59-4fb8-abbc-14dc276f0b4a";
 
+#[test]
+fn review_scan_hash_survives_source_replacement_during_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("library");
+    let root = dir.path().join("source");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("a.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let task = uuid::Uuid::new_v4().to_string();
+    let manifest = super::scanner::manifest_path(&base, &task).unwrap();
+    super::scanner::scan(&root, &base, &manifest, &|_| {}, &|| false).unwrap();
+    let page = super::scanner::read_page(&manifest, 0, 1).unwrap();
+    let req: CoreImportRequest = serde_json::from_value(
+        serde_json::json!({"scanTaskId":task,"scanRowIds":[page.items[0].id]}),
+    )
+    .unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| {
+        calls.set(calls.get() + 1);
+        // Sixth cancellation boundary is after outer hash and image dimensions.
+        if calls.get() == 6 {
+            image::RgbaImage::from_pixel(7, 5, image::Rgba([9, 8, 7, 255]))
+                .save(&source)
+                .unwrap();
+        }
+        false
+    })
+    .unwrap();
+    assert!(calls.get() >= 6);
+    assert_eq!((result.imported, result.failed), (0, 1));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn review_metadata_failure_retry_repairs_existing_managed_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("library");
+    std::fs::create_dir_all(&base).unwrap();
+    let source = dir.path().join("a.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let req: CoreImportRequest =
+        serde_json::from_value(serde_json::json!({"paths":[source]})).unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_metadata BEFORE INSERT ON asset_metadata BEGIN SELECT RAISE(ABORT,'injected metadata failure'); END;").unwrap();
+    let first =
+        super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    assert_eq!(first.failed, 1);
+    let before: (String, String) = db
+        .query_row(
+            "SELECT id,rel_path FROM media_files WHERE role='main'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    db.execute_batch("DROP TRIGGER reject_metadata;").unwrap();
+    let retry =
+        super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    assert_eq!((retry.skipped, retry.failed), (1, 0));
+    assert_eq!(
+        db.query_row(
+            "SELECT id,rel_path FROM media_files WHERE role='main'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )
+        .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_metadata", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn review_import_rechecks_source_library_boundary_after_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("library");
+    let root = dir.path().join("source");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("a.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let req: CoreImportRequest =
+        serde_json::from_value(serde_json::json!({"paths":[source]})).unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 6 {
+            std::fs::write(root.join("library.json"), "{}").unwrap();
+            std::fs::write(root.join("library.db"), "").unwrap();
+        }
+        false
+    })
+    .unwrap();
+    assert!(calls.get() >= 6);
+    assert_eq!((result.imported, result.failed), (0, 1));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn review_scans_and_direct_imports_reject_other_library_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("current");
+    let other = dir.path().join("other");
+    let child = other.join("media-library/image/entry/files");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(other.join("library.json"), "{}").unwrap();
+    std::fs::write(other.join("library.db"), "").unwrap();
+    let source = child.join("original.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    assert!(super::scanner::validate_source(&source, &base).is_err());
+    for root in [&other, &other.join("media-library"), &child] {
+        assert!(
+            super::scanner::scan(root, &base, &base.join("scan.jsonl"), &|_| {}, &|| false)
+                .is_err()
+        );
+    }
+    let summary = super::scanner::scan(
+        dir.path(),
+        &base,
+        &base.join("scan.jsonl"),
+        &|_| {},
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(summary.total, 0);
+}
+
+#[test]
+fn review_legacy_video_preview_uses_proxy_without_changing_version_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = old_fixture();
+    std::fs::write(dir.path().join("original.mov"), "original").unwrap();
+    std::fs::write(dir.path().join("proxy.webm"), "proxy").unwrap();
+    db.execute("INSERT INTO asset_media(id,asset_id,kind,original_name,original_rel_path,proxy_rel_path,mime_type,created_at,updated_at) VALUES('clip',?1,'video','original.mov','original.mov','proxy.webm','video/quicktime','old','old')", [OLD_ID]).unwrap();
+    super::migrate(&db).unwrap();
+    let core = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let detail = repository::get(&db, dir.path(), &core, "zh-CN").unwrap();
+    let original = detail
+        .files
+        .iter()
+        .find(|f| f.source_ref.id == "clip" && f.role == "original")
+        .unwrap();
+    assert_eq!(original.source_ref.role, "original");
+    assert_eq!(original.preview.as_ref().unwrap().role, "proxy");
+    assert_eq!(
+        repository::file_path(&db, dir.path(), original.preview.as_ref().unwrap()).unwrap(),
+        dir.path().join("proxy.webm").canonicalize().unwrap()
+    );
+    std::fs::remove_file(dir.path().join("proxy.webm")).unwrap();
+    let fallback = repository::get(&db, dir.path(), &core, "zh-CN").unwrap();
+    assert_eq!(
+        fallback
+            .files
+            .iter()
+            .find(|f| f.id == original.id)
+            .unwrap()
+            .preview
+            .as_ref()
+            .unwrap()
+            .role,
+        "original"
+    );
+}
+
 fn old_fixture() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();

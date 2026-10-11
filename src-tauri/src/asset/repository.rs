@@ -446,6 +446,19 @@ pub fn get(
                 )
                 .map_err(|e| e.to_string())?;
             let proxy:Option<String>=db.query_row("SELECT id FROM media_files WHERE entry_id=?1 AND role='proxy' ORDER BY sort_order LIMIT 1",[&entry],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+            let proxy = proxy.filter(|id| {
+                file.role == "original"
+                    && file_path(
+                        db,
+                        base,
+                        &SourceFileRef {
+                            kind: "mediaFile".into(),
+                            id: id.clone(),
+                            role: "proxy".into(),
+                        },
+                    )
+                    .is_ok()
+            });
             file.preview = Some(
                 proxy
                     .map(|id| SourceFileRef {
@@ -457,6 +470,17 @@ pub fn get(
             );
             file.media_entry_id = Some(entry);
             file.logical_path = Some(logical);
+        } else if file.source_ref.kind == "assetMedia" && file.role == "original" {
+            let proxy = SourceFileRef {
+                kind: "assetMedia".into(),
+                id: file.source_ref.id.clone(),
+                role: "proxy".into(),
+            };
+            file.preview = Some(if file_path(db, base, &proxy).is_ok() {
+                proxy
+            } else {
+                file.source_ref.clone()
+            });
         } else {
             file.preview = Some(file.source_ref.clone());
         }
