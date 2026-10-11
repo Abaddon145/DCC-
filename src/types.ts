@@ -1,13 +1,45 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
 export type MediaKind = "image" | "model" | "audio" | "video";
-export type ViewMode = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "downloader" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
+export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
+export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
 export type ThemeId = "graphite" | "ue-slate" | "midnight";
 export type AssetViewMode = "grid" | "list";
 export type CardSize = "small" | "medium" | "large";
 export type CommandId = "commandPalette" | "focusSearch" | "addAsset" | "quickAdd" | "settings" | "toggleSelection" | "selectAll" | "saveAsset" | "deleteSelected";
 export type ContentLanguage = "zh-CN" | "en";
+export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string; skipAutoTranslation?: boolean }
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
+export type LibraryTaskRequest =
+  | {kind:"download";request:DownloadRequest}
+  | { kind: "ueAssets"; request: unknown }
+  | { kind: "browserCapture"; request: { id: string } }
+  | { kind: "assetMediaImport"; request: { assetId: string; paths: string[] } }
+  | { kind: "assetMediaRetry"; request: { id: string } }
+  | { kind: "modelThumbnail"; request: { entryId:string } }
+  | { kind: "mediaImport"; request: MediaImportRequest }
+  | { kind: "assetScan"; request: { root: string } }
+  | { kind: "assetImport"; request: CoreAssetImportRequest }
+  | { kind: "assetProcess"; request: { assetId: string; force?: boolean } }
+  | { kind: "fabImport"; request: { path: string; mapping: ImportMapping; autoTranslate: boolean } }
+  | { kind: "translation"; request: { ids: string[] } }
+  | { kind: "links" }
+  | { kind: "backup" | "restore"; request: { path: string } }
+  | { kind: "migration"; request: StorageChangeRequest };
+export interface LibraryTask {
+  id: string; libraryId: string; label: string; status: "queued"|"running"|"completed"|"stopped"|"interrupted"|"failed"|"paused"|"cancelled";
+  phase: string; current: number; total: number; currentName: string; createdAt: string; updatedAt: string;
+  cancellable: boolean; message: string; result: unknown; payload: LibraryTaskRequest;
+}
+export interface CoreAssetImportRequest { paths: string[]; scanTaskId?: string|null; scanRowIds?: string[]; tags?: string[]; projectId?: string|null }
+
+export interface DownloadRequest {url:string;format:string;quality:string;audioOnly:boolean;subtitles:boolean;outputMode:"library"|"libraryAndFolder"}
+export interface DownloadSettings {directory:string;concurrency:number;proxy:string;cookieSource:"none"|"file"|"edge"|"chrome";defaultQuality:string}
+export interface DownloadFormat {id:string;extension:string;width?:number|null;height?:number|null;fps?:number|null;videoCodec?:string|null;audioCodec?:string|null;size?:number|null;audioBitrate?:number|null;sampleRate?:number|null}
+export interface DownloadInfo {url:string;title:string;thumbnail:string|null;duration:number|null;author:string;platform:string;formats:DownloadFormat[];subtitleLanguages:string[];entries:{url:string;title:string;duration:number|null}[]}
+export interface DownloadTool {name:string;path:string|null;version:string|null;ready:boolean;message:string}
+  export interface DownloadResult {progress?:{downloaded:number;total:number|null;speed:number|null;eta:number|null;percent:number|null};rows?:{entryId:string;assetId?:string;name:string;status:string}[];outputPath?:string}
 
 export interface LocalizedAssetText { name: string; description: string; tags: string[]; license: string }
 
@@ -58,6 +90,8 @@ export interface GlobalPreferences {
   theme: ThemeId;
   accentColor: string;
   density: "comfortable" | "compact";
+  fontScale: number;
+  toolbarDensity: "comfortable" | "compact";
   reduceMotion: boolean;
   sidebarWidth: number;
   detailWidth: number;
@@ -73,11 +107,17 @@ export interface LibraryPreferences {
   assetView: AssetViewMode;
   cardSize: CardSize;
   coverFit: "cover" | "contain";
+  coverAspectRatio: "standard" | "square" | "wide";
   cardFields: CardFieldVisibility;
   defaultSort: SortMode;
   rememberSearch: boolean;
   categoryTreeExpanded: boolean;
+  contextPaneWidths: Record<string, number>;
+  collapsedContextPanes: string[];
+  collapsedModuleGroups: string[];
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
+  workspaceContexts?: Record<string, unknown>;
+  rememberWorkspace?: boolean;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }
 
@@ -90,10 +130,10 @@ export type ProjectTaskPriority = "low" | "normal" | "high" | "urgent";
 export interface ProjectInput {
   id?: string | null; name: string; description: string; projectType: ProjectType; status: ProjectStatus;
   targetTools: string[]; versions: string[]; resolutionWidth: number | null; resolutionHeight: number | null;
-  frameRate: number | null; coverAssetId: string | null;
+  frameRate: number | null; coverAssetId: string | null; coverMediaEntryId: string | null;
 }
 export interface ProjectSummary extends Omit<ProjectInput, "id"> {
-  id: string; coverImageId: string | null; assetCount: number; unavailableAssetCount: number; taskCount: number;
+  id: string; coverImageId: string | null; coverMediaFileId: string | null; assetCount: number; unavailableAssetCount: number; taskCount: number;
   completedTaskCount: number; reviewTaskCount: number; progress: number; mainBoardId: string | null;
   createdAt: string; updatedAt: string; lastOpenedAt: string | null; archivedAt: string | null;
 }
@@ -102,7 +142,7 @@ export interface ProjectUnitInput {
   startFrame: number | null; endFrame: number | null; resolutionWidth: number | null; resolutionHeight: number | null;
   frameRate: number | null; sortOrder?: number | null;
 }
-export interface ProjectUnit extends Omit<ProjectUnitInput, "id" | "sortOrder"> { id: string; sortOrder: number; createdAt: string; updatedAt: string }
+export interface ProjectUnit extends Omit<ProjectUnitInput, "id" | "sortOrder"> { id: string; sortOrder: number; videoMediaEntryId: string | null; videoStreamFileId: string | null; videoName: string | null; createdAt: string; updatedAt: string }
 export interface ProjectTaskInput {
   id?: string | null; projectId: string; unitId: string | null; title: string; description: string; status: ProjectTaskStatus;
   priority: ProjectTaskPriority; dueDate: string | null; sortOrder?: number | null; assetIds: string[];
@@ -114,7 +154,7 @@ export interface ProjectBoardLink { boardId: string; name: string; isMain: boole
 export interface ProjectPathInput { id?: string | null; projectId: string; kind: "root" | "project_file" | "output" | "custom"; label: string; path: string; pathType: "file" | "directory"; sortOrder?: number | null }
 export interface ProjectPathShortcut extends Omit<ProjectPathInput, "id" | "sortOrder"> { id: string; sortOrder: number; available: boolean; createdAt: string; updatedAt: string }
 export interface ProjectPathCheck { id: string; available: boolean; message: string }
-export interface CreativeProject extends ProjectSummary { units: ProjectUnit[]; tasks: ProjectTask[]; assets: ProjectAssetLink[]; boards: ProjectBoardLink[]; paths: ProjectPathShortcut[] }
+export interface CreativeProject extends ProjectSummary { units: ProjectUnit[]; tasks: ProjectTask[]; assets: ProjectAssetLink[]; media: MediaEntry[]; boards: ProjectBoardLink[]; paths: ProjectPathShortcut[] }
 
 export interface SmartCollectionRule {
   query: string; categoryIds: string[]; tagIds: string[]; dccTools: string[]; versions: string[];
@@ -171,6 +211,7 @@ export interface AssetMedia {
 }
 
 export interface AssetDetail extends AssetCard {
+  singleImportWarnings?: string[];
   description: string;
   categoryId: string | null;
   sizeBytes: number | null;
@@ -227,13 +268,17 @@ export interface ImportMapping {
 export interface ImportRowResult {
   row: number;
   name: string;
-  status: "valid" | "warning" | "error" | "duplicate" | "skipped" | "imported";
+  status: "valid" | "warning" | "error" | "duplicate" | "skipped" | "imported" | "translationPending";
   messages: string[];
   suggestedCategoryPath?: string | null;
   actualCategoryPath?: string | null;
   duplicateAssetId?: string | null;
   duplicateSource?: "file" | "library" | "trash" | null;
+  assetId?: string | null;
 }
+
+export interface BatchTranslationRow { assetId: string; name: string; status: "complete" | "pending" | "skipped"; messages: string[] }
+export interface BatchTranslationReport { completed: number; pending: number; skipped: number; rows: BatchTranslationRow[] }
 
 export interface ImportPreview {
   headers: string[];
@@ -302,6 +347,15 @@ export interface FabMetadata {
   license: string;
   previewImages: FabPreviewImage[];
   imageWarning: string | null;
+  formatWarning?: string | null;
+}
+
+export interface UpgradeBackupStatus {
+  keep: number;
+  lastAttemptAt: string | null;
+  result: string | null;
+  message: string | null;
+  backupDirectory: string;
 }
 
 export interface FabDuplicateMatch {
@@ -345,6 +399,7 @@ export interface MediaFolder { id: string; kind: MediaKind; parentId: string | n
 export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null }
 export interface MediaEntry { id: string; kind: MediaKind; folderId: string | null; name: string; description: string; author: string; sourceUrl: string; license: string; favorite: boolean; processingStatus: string; processingMessage: string; format: string; fileSize: number; tags: string[]; thumbnailFileId: string | null; primaryFileId: string; createdAt: string; updatedAt: string }
 export interface MediaEntryDetail extends MediaEntry { files: MediaFile[]; assetIds: string[]; projectIds: string[] }
+export interface ModelThumbnailJob { id: string; logicalPath: string; originalName: string }
 export interface LinkedMediaPreview { id: string; kind: MediaKind; name: string; originalName: string; logicalPath: string; primaryFileId: string; streamFileId: string; thumbnailFileId: string | null; processingStatus: string }
 export interface MediaSearchRequest { kind: MediaKind; query: string; folderId: string | null; includeChildFolders: boolean; tags: string[]; formats: string[]; favoriteOnly: boolean; sort: "updated" | "name" | "created" | "favorite"; offset: number; limit: number }
 export interface MediaImportRequest { kind: MediaKind; paths: string[]; folderId: string | null; tags: string[]; favorite: boolean }
@@ -352,7 +407,22 @@ export interface MediaImportRow { path: string; status: "imported" | "duplicate"
 export interface MediaImportReport { imported: number; skipped: number; failed: number; rows: MediaImportRow[] }
 export interface MediaBatchUpdate { ids: string[]; folderId: string | null; clearFolder: boolean; addTags: string[]; removeTags: string[]; favorite: boolean | null }
 
-export interface TranslationSettings { provider: "baidu"; configured: boolean; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
+export interface BrowserCapture { id:string; title:string; pageUrl:string; kind:"image"|"video"|"link"; entryId:string|null; status:"saved"|"duplicate"|"link"|"failed"; message:string; createdAt:string; organized:boolean; thumbnailId:string|null; unavailable:boolean }
+export interface BrowserCaptureState { libraryId:string; name:string; submitted:number; otherLibraries:number; open:boolean }
+
+export type TranslationProvider = "baidu" | "deepseek";
+export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
+export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
+export interface TranslationEstimate { characters: number; estimatedTokens: number }
+export interface FormTranslationCostInput { localizations: Record<string, LocalizedAssetText>; id?: string; sourceUrl: string; completeBilingual: boolean; autoTranslate?: boolean }
+export interface TranslationCostRequest { ids?: string[]; form?: FormTranslationCostInput }
+export interface TranslationCostRow { assetId: string | null; name: string; pendingFields: string[]; status: "ready" | "skipped" | "disabled"; reason: string }
+export interface TranslationCostEstimate {
+  pendingFieldCount: number; characters: number; cacheHits: number; tokensMin: number; tokensMax: number;
+  month: string; monthUsed: number; monthLimit: number; wouldExceed: boolean; onlineRequests: number;
+  baiduCharacters: number; rows: TranslationCostRow[]; warnings: string[];
+}
+export interface TranslationSettings { provider: TranslationProvider; configured: boolean; baiduConfigured?: boolean; deepseekConfigured?: boolean; preferences?: TranslationPreferences; usage?: TranslationUsage; fabAutoTranslate: boolean; contentLanguage: ContentLanguage }
 export interface TranslationRequest { sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; fields: LocalizedAssetText }
 export type TranslationTermMode = "translate" | "preserve";
 export interface TranslationTermInput { id?: string | null; sourceLanguage: ContentLanguage; targetLanguage: ContentLanguage; source: string; target: string; mode: TranslationTermMode; caseSensitive: boolean; enabled: boolean }
@@ -424,3 +494,14 @@ export interface ReferenceBoardChanges {
 export interface ReferencePlacement { x: number; y: number }
 export interface ReferenceImageAddReport { items: ReferenceBoardItem[]; skipped: number; warnings: string[] }
 export interface ReferenceExportOptions { scale: number }
+
+export interface FabUeOptions {
+  assetId: string; listingId: string; canonicalUrl: string; epicUrl: string;
+  supportedVersions: string[]; versionStatus: "known" | "partial" | "unknown"; warnings: string[];
+}
+export interface UeProjectTarget {
+  projectId: string | null; pathId: string | null; projectName: string | null;
+  name: string; path: string; engineAssociation: string | null; engineVersion: string | null;
+  available: boolean; warnings: string[];
+}
+export interface EpicOpenResult { listingId: string; url: string; requested: boolean; message: string }

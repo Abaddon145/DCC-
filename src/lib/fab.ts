@@ -23,19 +23,21 @@ export function applyFabMetadata(input: AssetInput, metadata: FabMetadata): Asse
       isCover: input.images.length === 0 && index === 0,
       sortOrder: input.images.length + index
     }));
-  const english = input.localizations.en || { name: "", description: "", tags: [], license: "" };
-  const nextEnglish = {
-    name: english.name.trim() ? english.name : metadata.name,
-    description: english.description.trim() ? english.description : metadata.description,
-    license: english.license.trim() ? english.license : metadata.license,
-    tags: mergeUnique(english.tags, metadata.tags)
-  };
+  const localizations = { ...input.localizations };
+  const language = (value: string) => /[\u3400-\u9fff\uf900-\ufaff]/.test(value) ? "zh-CN" : "en";
+  (["zh-CN", "en"] as const).forEach(locale => {
+    const current = input.localizations[locale] || { name: "", description: "", tags: [], license: "" };
+    localizations[locale] = { ...current, tags: mergeUnique(current.tags, metadata.tags.filter(tag => language(tag) === locale)) };
+    (["name", "description", "license"] as const).forEach(key => {
+      if (!current[key].trim() && language(metadata[key]) === locale) localizations[locale]![key] = metadata[key];
+    });
+  });
   return {
     ...input,
     name: input.name.trim() ? input.name : metadata.name,
     description: input.description.trim() ? input.description : metadata.description,
     author: input.author.trim() ? input.author : metadata.author,
-    sourceUrl: input.sourceUrl.trim() ? input.sourceUrl : metadata.canonicalUrl,
+    sourceUrl: metadata.canonicalUrl,
     fabListingId: metadata.listingId,
     autoCategoryPath: input.categoryId ? [] : metadata.suggestedCategoryPath,
     license: input.license.trim() ? input.license : metadata.license,
@@ -44,7 +46,7 @@ export function applyFabMetadata(input: AssetInput, metadata: FabMetadata): Asse
     versions: mergeUnique(input.versions, metadata.versions),
     formats: mergeUnique(input.formats, metadata.formats),
     images: [...input.images, ...incomingImages]
-    ,localizations: { ...input.localizations, en: nextEnglish }
+    ,localizations
   };
 }
 

@@ -31,6 +31,20 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     migrate_to_v9(&connection)?;
     migrate_to_v10(&connection)?;
     migrate_to_v11(&connection)?;
+    migrate_to_v12(&connection)?;
+    let migration = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    migration
+        .execute_batch(include_str!("ai_schema.sql"))
+        .map_err(|e| e.to_string())?;
+    migration.execute("UPDATE schema_meta SET value='13' WHERE key='schema_version' AND CAST(value AS INTEGER)<13",[]).map_err(|e|e.to_string())?;
+    migration.commit().map_err(|e| e.to_string())?;
+    crate::knowledge::migrate(&connection)?;
+    crate::browser_capture::migrate(&connection)?;
+    crate::reliability::migrate_workflows(&connection)?;
+    crate::downloader::service::migrate(&connection)?;
+    crate::asset::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -452,6 +466,43 @@ fn migrate_to_v10(connection: &Connection) -> Result<(), String> {
 }
 
 fn migrate_to_v11(connection: &Connection) -> Result<(), String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    migrate_to_v11_inner(&transaction)?;
+    transaction.commit().map_err(|e| e.to_string())
+}
+#[cfg(test)]
+#[test]
+fn legacy_trash_upgrade_rolls_back_on_copy_failure() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value TEXT);INSERT INTO schema_meta VALUES('schema_version','10');CREATE TABLE deletion_batches(id TEXT PRIMARY KEY,kind TEXT,label TEXT,asset_count INTEGER,category_count INTEGER,created_at TEXT);INSERT INTO deletion_batches VALUES('old','unexpected-kind','keep',1,0,'now');").unwrap();
+    assert!(migrate_to_v11(&db).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT label FROM deletion_batches WHERE id='old'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        db.query_row("SELECT value FROM schema_meta", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "10"
+    );
+    assert!(!db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='deletion_batches_v10')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+}
+
+fn migrate_to_v11_inner(connection: &Connection) -> Result<(), String> {
     let version = connection
         .query_row(
             "SELECT value FROM schema_meta WHERE key='schema_version'",
@@ -491,7 +542,57 @@ fn migrate_to_v11(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn insert_localized_tag(
+fn migrate_to_v12(connection: &Connection) -> Result<(), String> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if version >= 12 {
+        return Ok(());
+    }
+    for (table, column, definition) in [
+        (
+            "projects",
+            "cover_media_entry_id",
+            "TEXT REFERENCES media_entries(id) ON DELETE SET NULL",
+        ),
+        (
+            "project_units",
+            "video_media_entry_id",
+            "TEXT REFERENCES media_entries(id) ON DELETE SET NULL",
+        ),
+    ] {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| e.to_string())?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if !names.iter().any(|name| name == column) {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
+                .map_err(|e| format!("升级数据库到 v12 失败：{e}"))?;
+        }
+    }
+    connection
+        .execute_batch(
+            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','12')",
+        )
+        .map_err(|e| format!("升级数据库到 v12 失败：{e}"))?;
+    Ok(())
+}
+
+pub(crate) fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
     locale: &str,
@@ -1045,7 +1146,47 @@ pub fn get_asset(
         media,
         media_library,
         localizations,
+        single_import_warnings: Vec::new(),
     })
+}
+
+pub fn fill_missing_localizations(
+    connection: &mut Connection,
+    asset_id: &str,
+    additions: HashMap<String, LocalizedAssetText>,
+) -> Result<HashMap<String, LocalizedAssetText>, String> {
+    let mut current = get_asset(connection, asset_id, false, "zh-CN")?.localizations;
+    let mut changed = false;
+    for (locale, value) in additions {
+        if !matches!(locale.as_str(), "zh-CN" | "en") {
+            continue;
+        }
+        changed |= crate::bilingual::fill_empty(current.entry(locale).or_default(), value);
+    }
+    if !changed {
+        return Ok(current);
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for (locale, value) in &current {
+        transaction.execute(
+            "INSERT INTO asset_localizations(asset_id,locale,name,description,license) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(asset_id,locale) DO UPDATE SET name=excluded.name,description=excluded.description,license=excluded.license",
+            params![asset_id, locale, value.name.trim(), value.description.trim(), value.license.trim()],
+        ).map_err(|error| error.to_string())?;
+        for tag in &value.tags {
+            insert_localized_tag(&transaction, asset_id, locale, tag)?;
+        }
+    }
+    transaction
+        .execute(
+            "UPDATE assets SET updated_at=?1 WHERE id=?2",
+            params![now(), asset_id],
+        )
+        .map_err(|error| error.to_string())?;
+    reindex_asset(&transaction, asset_id)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(current)
 }
 
 pub fn upsert_asset(
@@ -1108,13 +1249,16 @@ pub fn upsert_asset(
         .transpose()?;
     let existing_listing_id = connection
         .query_row(
-            "SELECT fab_listing_id FROM assets WHERE id=?1",
+            "SELECT fab_listing_id,source_url FROM assets WHERE id=?1",
             [&id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .filter(|value| !value.is_empty());
+        .filter(|(listing_id, source_url)| {
+            !listing_id.is_empty() && source_url.trim() == input.source_url.trim()
+        })
+        .map(|(listing_id, _)| listing_id);
     let fab_listing_id = source_listing_id
         .or(supplied_listing_id)
         .or(existing_listing_id)
@@ -1252,6 +1396,15 @@ pub fn upsert_asset(
         drop(stmt);
         for (image_id, original, thumb) in existing {
             if !keep.contains(&image_id) {
+                crate::asset::repository::protect_file_removal(
+                    &transaction,
+                    &[crate::asset::models::SourceFileRef {
+                        kind: "image".into(),
+                        id: image_id.clone(),
+                        role: "original".into(),
+                    }],
+                    &[],
+                )?;
                 transaction
                     .execute("DELETE FROM images WHERE id=?1", [&image_id])
                     .map_err(|e| e.to_string())?;
@@ -1276,6 +1429,14 @@ pub fn upsert_asset(
         }
         normalize_cover(&transaction, &id)?;
         reindex_asset(&transaction, &id)?;
+        let core_id = crate::asset::repository::register_origin(
+            &transaction,
+            &crate::asset::models::CoreOrigin {
+                kind: "legacy".into(),
+                id: id.clone(),
+            },
+        )?;
+        crate::asset::repository::register_files(&transaction, &core_id)?;
         Ok(removed)
     })();
     match result {
@@ -1298,7 +1459,7 @@ pub fn upsert_asset(
     }
 }
 
-fn validate_input(input: &AssetInput) -> Result<(), String> {
+pub(crate) fn validate_input(input: &AssetInput) -> Result<(), String> {
     if input
         .localizations
         .values()
@@ -1957,6 +2118,12 @@ pub fn purge_trash_batch(
     };
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
+    let deleting_cores = crate::asset::repository::prepare_trash_purge(&transaction, batch_id)?;
+    for id in deleting_cores {
+        transaction
+            .execute("DELETE FROM asset_versions WHERE asset_id=?1", [id])
+            .map_err(|e| e.to_string())?;
+    }
     transaction
         .execute("DELETE FROM assets WHERE delete_batch_id=?1", [batch_id])
         .map_err(|e| e.to_string())?;
@@ -1999,7 +2166,7 @@ pub fn purge_trash_batch(
         return Err("回收站记录不存在".into());
     }
     transaction.execute("DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM asset_tags at WHERE at.tag_id=tags.id)", []).map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
@@ -2232,7 +2399,7 @@ pub fn batch_update_assets(
             [],
         )
         .map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(BatchUpdateReport {
         requested: ids.len(),
@@ -2565,6 +2732,13 @@ fn health_issue_ids(
         "duplicateFab" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' AND fab_listing_id IN (SELECT fab_listing_id FROM assets WHERE deleted_at IS NULL AND fab_listing_id<>'' GROUP BY fab_listing_id HAVING COUNT(*)>1)"),
         "missingZh" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='zh-CN' AND trim(l.name)<>'')"),
         "missingEn" => Some("SELECT id FROM assets a WHERE a.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM asset_localizations l WHERE l.asset_id=a.id AND l.locale='en' AND trim(l.name)<>'')"),
+        "translationPending" => Some("SELECT a.id FROM assets a LEFT JOIN asset_localizations en ON en.asset_id=a.id AND en.locale='en' LEFT JOIN asset_localizations zh ON zh.asset_id=a.id AND zh.locale='zh-CN' WHERE a.deleted_at IS NULL AND (
+          (trim(COALESCE(en.name,''))<>'' AND trim(COALESCE(zh.name,''))='') OR (trim(COALESCE(zh.name,''))<>'' AND trim(COALESCE(en.name,''))='') OR
+          (trim(COALESCE(en.description,''))<>'' AND trim(COALESCE(zh.description,''))='') OR (trim(COALESCE(zh.description,''))<>'' AND trim(COALESCE(en.description,''))='') OR
+          (trim(COALESCE(en.license,''))<>'' AND trim(COALESCE(zh.license,''))='') OR (trim(COALESCE(zh.license,''))<>'' AND trim(COALESCE(en.license,''))='') OR
+          (EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='en') AND NOT EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='zh-CN')) OR
+          (EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='zh-CN') AND NOT EXISTS(SELECT 1 FROM asset_localized_tags x JOIN localized_tags t ON t.id=x.tag_id WHERE x.asset_id=a.id AND t.locale='en'))
+        )"),
         "invalidLink" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='invalid'"),
         "linkCheckError" => Some("SELECT id FROM assets WHERE deleted_at IS NULL AND normalized_share_url<>'' AND link_check_status='error'"),
         "missingFiles" | "missingMediaFiles" => None,
@@ -2635,6 +2809,7 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
         ("duplicateFab", "重复 Fab 素材"),
         ("missingZh", "缺少中文版本"),
         ("missingEn", "缺少英文版本"),
+        ("translationPending", "双语待补译"),
         ("invalidLink", "网盘链接已失效"),
         ("linkCheckError", "网盘链接检查失败"),
     ];
@@ -2790,6 +2965,158 @@ mod tests {
         fs::create_dir_all(dir.path().join("images/thumbnails")).unwrap();
         let connection = open_database(&dir.path().join("test.db")).unwrap();
         (dir, connection)
+    }
+
+    #[test]
+    fn retains_legacy_fab_id_only_while_source_is_unchanged() {
+        let (dir, mut connection) = setup();
+        let mut input: AssetInput = serde_json::from_value(serde_json::json!({
+            "name":"Legacy material", "description":"", "categoryId":null, "tags":[],
+            "dccTools":[], "versions":[], "formats":[], "sizeBytes":null, "author":"",
+            "sourceUrl":"https://example.com/legacy-material", "fabListingId":"06003f78-9a59-4fb8-abbc-14dc276f0b4a",
+            "license":"", "shareUrl":"", "extractionCode":"", "favorite":false,
+            "images":[], "localizations":{}, "contentLanguage":"en"
+        })).unwrap();
+        let saved = upsert_asset(&mut connection, dir.path(), input.clone()).unwrap();
+        input.id = Some(saved.card.id.clone());
+        input.fab_listing_id = None;
+        assert_eq!(
+            upsert_asset(&mut connection, dir.path(), input.clone())
+                .unwrap()
+                .fab_listing_id,
+            saved.fab_listing_id
+        );
+        input.source_url = "https://example.com/replaced-material".into();
+        assert_eq!(
+            upsert_asset(&mut connection, dir.path(), input)
+                .unwrap()
+                .fab_listing_id,
+            ""
+        );
+        assert_eq!(
+            get_asset(&connection, &saved.card.id, false, "en")
+                .unwrap()
+                .fab_listing_id,
+            ""
+        );
+    }
+
+    #[test]
+    fn fills_only_missing_bilingual_fields_and_reindexes_search() {
+        let (dir, mut connection) = setup();
+        let input = AssetInput {
+            id: None,
+            name: "Skeletal Mesh".into(),
+            description: "A rigged model".into(),
+            category_id: None,
+            tags: Vec::new(),
+            dcc_tools: Vec::new(),
+            versions: Vec::new(),
+            formats: Vec::new(),
+            size_bytes: None,
+            author: String::new(),
+            source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
+            license: String::new(),
+            share_url: String::new(),
+            extraction_code: String::new(),
+            favorite: false,
+            images: Vec::new(),
+            content_language: "en".into(),
+            localizations: HashMap::from([
+                (
+                    "en".into(),
+                    LocalizedAssetText {
+                        name: "Skeletal Mesh".into(),
+                        description: "A rigged model".into(),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "zh-CN".into(),
+                    LocalizedAssetText {
+                        name: "手工骨骼网格体".into(),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        };
+        let asset = upsert_asset(&mut connection, dir.path(), input).unwrap();
+        assert!(
+            health_issue_ids(&connection, dir.path(), "translationPending")
+                .unwrap()
+                .contains(&asset.card.id)
+        );
+        let result = fill_missing_localizations(
+            &mut connection,
+            &asset.card.id,
+            HashMap::from([(
+                "zh-CN".into(),
+                LocalizedAssetText {
+                    name: "不能覆盖".into(),
+                    description: "带骨骼的模型".into(),
+                    ..Default::default()
+                },
+            )]),
+        )
+        .unwrap();
+        assert_eq!(result["zh-CN"].name, "手工骨骼网格体");
+        assert_eq!(result["zh-CN"].description, "带骨骼的模型");
+        assert!(
+            health_issue_ids(&connection, dir.path(), "translationPending")
+                .unwrap()
+                .is_empty()
+        );
+        let indexed: String = connection
+            .query_row(
+                "SELECT text FROM asset_search WHERE asset_id=?1",
+                [&asset.card.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(indexed.contains("带骨骼的模型"));
+    }
+
+    #[test]
+    fn migrates_v11_project_media_columns_without_losing_existing_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES('schema_version','11');
+            CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
+            CREATE TABLE project_units(id TEXT PRIMARY KEY,project_id TEXT NOT NULL);
+            INSERT INTO projects VALUES('project-1','旧项目');
+            INSERT INTO project_units VALUES('shot-1','project-1');",
+            )
+            .unwrap();
+        migrate_to_v12(&connection).unwrap();
+        migrate_to_v12(&connection).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cover: Option<String> = connection
+            .query_row(
+                "SELECT cover_media_entry_id FROM projects WHERE id='project-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let video: Option<String> = connection
+            .query_row(
+                "SELECT video_media_entry_id FROM project_units WHERE id='shot-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "12");
+        assert_eq!(cover, None);
+        assert_eq!(video, None);
     }
 
     #[test]
@@ -3010,7 +3337,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "11");
+        assert_eq!(version, "21");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

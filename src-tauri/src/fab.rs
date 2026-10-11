@@ -14,22 +14,22 @@ const MAX_PREVIEW_IMAGES: usize = 30;
 pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     let listing_id = listing_id_from_url(raw_url)?;
     let canonical_url = format!("https://www.fab.com/listings/{listing_id}");
-    let client = Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("无法初始化网络请求：{error}"))?;
+    let client = request_client()?;
 
     let api_url = format!("https://www.fab.com/i/listings/{listing_id}");
     let listing = get_json(&client, &api_url, &canonical_url).await?;
     let mut metadata = metadata_from_listing(&listing, &canonical_url)?;
 
     if let Some(asset_formats) = listing.get("assetFormats").and_then(Value::as_array) {
-        for asset_format in asset_formats.iter().take(12) {
+        for asset_format in asset_formats
+            .iter()
+            .take(12)
+            .filter(|item| is_unreal_format(item))
+        {
             let Some(code) = asset_format
                 .pointer("/assetFormatType/code")
                 .and_then(Value::as_str)
-                .filter(|code| !code.is_empty())
+                .filter(|code| *code == "unreal-engine")
             else {
                 continue;
             };
@@ -61,6 +61,103 @@ pub async fn fetch_metadata(raw_url: &str) -> Result<FabMetadata, String> {
     Ok(metadata)
 }
 
+fn request_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("无法初始化网络请求：{error}"))
+}
+
+pub(crate) async fn fetch_ue_versions(
+    listing_id: Uuid,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let canonical_url = format!("https://www.fab.com/listings/{listing_id}");
+    let detail = get_json(
+        &request_client()?,
+        &format!("https://www.fab.com/i/listings/{listing_id}/asset-formats/unreal-engine"),
+        &canonical_url,
+    )
+    .await?;
+    Ok(ue_versions_from_detail(&detail))
+}
+
+pub(crate) fn normalize_ue_version(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .strip_prefix("UE_")
+        .or_else(|| raw.trim().strip_prefix("UE "))
+        .unwrap_or(raw.trim())
+        .replace('_', ".");
+    let parts: Vec<_> = cleaned.split('.').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let major: u32 = parts[0].parse().ok()?;
+    let minor: u32 = parts[1].parse().ok()?;
+    if !(4..=99).contains(&major) || minor > 99 {
+        return None;
+    }
+    if parts.len() == 3 && parts[2].parse::<u32>().ok()? > 999 {
+        return None;
+    }
+    Some(format!("{major}.{minor}"))
+}
+
+fn ue_versions_from_detail(detail: &Value) -> (Vec<String>, Vec<String>) {
+    let unknown = || {
+        (
+            Vec::new(),
+            vec!["Fab 未提供可确认的 UE 支持版本，请在 Epic 中核对。".into()],
+        )
+    };
+    if detail
+        .pointer("/assetFormatType/code")
+        .is_some_and(|code| code.as_str() != Some("unreal-engine"))
+    {
+        return unknown();
+    }
+    let Some(artifacts) = detail.get("versions").and_then(Value::as_array) else {
+        return unknown();
+    };
+    let mut versions = Vec::new();
+    let mut incomplete = artifacts.is_empty();
+    for artifact in artifacts {
+        let Some(supported) = artifact.get("engineVersions").and_then(Value::as_array) else {
+            incomplete = true;
+            continue;
+        };
+        incomplete |= supported.is_empty();
+        for raw in supported {
+            if let Some(version) = raw.as_str().and_then(normalize_ue_version) {
+                versions.push(version);
+            } else {
+                incomplete = true;
+            }
+        }
+    }
+    versions.sort_by_key(|version| {
+        let mut parts = version
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    });
+    versions.dedup();
+    if versions.is_empty() {
+        return unknown();
+    }
+    let warnings = if incomplete {
+        vec!["Fab 的部分 UE 文件未提供可确认的支持版本；请在 Epic 中核对完整列表。".into()]
+    } else {
+        Vec::new()
+    };
+    (versions, warnings)
+}
+
 pub fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
     let parsed = Url::parse(raw_url.trim()).map_err(|_| "请输入完整的 Fab 商品网址")?;
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
@@ -83,10 +180,10 @@ pub fn listing_id_from_url(raw_url: &str) -> Result<Uuid, String> {
 }
 
 async fn get_json(client: &Client, url: &str, referer: &str) -> Result<Value, String> {
-    let response = client
+    let mut response = client
         .get(url)
         .header(header::ACCEPT, "application/json, text/plain, */*")
-        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.7")
+        .header(header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,zh-CN;q=0.5")
         .header(header::REFERER, referer)
         .header("X-Requested-With", "XMLHttpRequest")
         .header(
@@ -100,12 +197,19 @@ async fn get_json(client: &Client, url: &str, referer: &str) -> Result<Value, St
         return Err("Fab 返回了不安全的重定向，已停止读取".into());
     }
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取 Fab 数据失败：{error}"))?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
+    if response.content_length().unwrap_or(0) > MAX_RESPONSE_BYTES as u64 {
         return Err("Fab 返回的数据过大，已停止读取".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取 Fab 数据失败：{error}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("Fab 返回的数据过大，已停止读取".into());
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let body = String::from_utf8_lossy(&bytes);
     if body.contains("cf_challenge") || body.contains("challenge-platform") {
@@ -134,8 +238,18 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
 
     let mut dcc_tools = Vec::new();
     let mut formats = Vec::new();
+    let mut ignored_formats = Vec::new();
     if let Some(items) = value.get("assetFormats").and_then(Value::as_array) {
         for item in items {
+            if !is_unreal_format(item) {
+                let code = string_at(item, "/assetFormatType/code");
+                ignored_formats.push(if code.is_empty() {
+                    "未标识".into()
+                } else {
+                    code
+                });
+                continue;
+            }
             if let Some(format_type) = item.get("assetFormatType") {
                 push_string(format_type.get("name"), &mut dcc_tools);
                 if let Some(extensions) = format_type.get("extensions").and_then(Value::as_array) {
@@ -164,7 +278,19 @@ fn metadata_from_listing(value: &Value, canonical_url: &str) -> Result<FabMetada
         license: license_name(value),
         preview_images: Vec::new(),
         image_warning: None,
+        format_warning: (!ignored_formats.is_empty()).then(|| {
+            format!(
+                "该商品还包含非 UE 格式，已忽略：{}",
+                unique(ignored_formats).join("、")
+            )
+        }),
     })
+}
+
+fn is_unreal_format(item: &Value) -> bool {
+    item.pointer("/assetFormatType/code")
+        .and_then(Value::as_str)
+        == Some("unreal-engine")
 }
 
 pub fn classify_category(
@@ -472,22 +598,61 @@ fn html_to_text(html: &str) -> String {
     if html.is_empty() {
         return String::new();
     }
-    let breaks = Regex::new(r"(?i)</?(p|div|li|br|h[1-6])[^>]*>").expect("valid regex");
+    // Fab descriptions contain useful external references in anchor hrefs. Keep the
+    // URL alongside its label before stripping markup, but never surface script links.
+    let anchors = Regex::new(
+        r#"(?is)<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>(.*?)</a>"#,
+    )
+    .expect("valid regex");
     let tags = Regex::new(r"(?s)<[^>]*>").expect("valid regex");
-    let spaced = breaks.replace_all(html, "\n");
+    let with_links = anchors.replace_all(html, |captures: &regex::Captures<'_>| {
+        let raw_url = captures
+            .get(1)
+            .or_else(|| captures.get(2))
+            .or_else(|| captures.get(3))
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let url = decode_html_entities(raw_url);
+        let label = decode_html_entities(
+            tags.replace_all(captures.get(4).map_or("", |value| value.as_str()), "")
+                .trim(),
+        );
+        let resolved = Url::parse(&url).or_else(|_| {
+            Url::parse("https://www.fab.com/")
+                .expect("fixed Fab base URL")
+                .join(&url)
+        });
+        match resolved {
+            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                let target = parsed.to_string();
+                if label.is_empty() || label == target {
+                    target
+                } else {
+                    format!("{label} ({target})")
+                }
+            }
+            _ => label,
+        }
+    });
+    let breaks = Regex::new(r"(?i)</?(p|div|li|br|h[1-6])[^>]*>").expect("valid regex");
+    let spaced = breaks.replace_all(&with_links, "\n");
     let plain = tags.replace_all(&spaced, "");
-    plain
+    decode_html_entities(&plain)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]
@@ -505,6 +670,47 @@ mod tests {
             "https://example.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a"
         )
         .is_err());
+    }
+
+    #[test]
+    fn fab_mixed_formats_only_adopts_unreal_information() {
+        let listing = serde_json::json!({
+            "title": "Mixed pack", "assetFormats": [
+                {"assetFormatType": {"code": "blender", "name": "Blender", "extensions": ["blend"]}},
+                {"assetFormatType": {"code": "unreal-engine", "name": "Unreal Engine", "extensions": ["uasset", "uproject"]}},
+                {"assetFormatType": {"code": "fbx", "name": "FBX", "extensions": ["fbx"]}}
+            ]
+        });
+        let metadata = metadata_from_listing(
+            &listing,
+            "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a",
+        )
+        .unwrap();
+        assert_eq!(metadata.dcc_tools, vec!["Unreal Engine"]);
+        assert_eq!(metadata.formats, vec!["uasset", "uproject"]);
+        assert!(metadata.versions.is_empty()); // Versions come only from the UE detail endpoint.
+    }
+
+    #[test]
+    fn fab_format_warning_is_unique_and_absent_for_pure_ue() {
+        let url = "https://www.fab.com/listings/06003f78-9a59-4fb8-abbc-14dc276f0b4a";
+        let listing = serde_json::json!({"title": "Mixed", "assetFormats": [
+            {"assetFormatType": {"code": "unreal-engine"}},
+            {"assetFormatType": {"code": "blender"}},
+            {"assetFormatType": {"code": "BLENDER"}},
+            {"assetFormatType": {"code": "fbx"}}
+        ]});
+        let metadata = serde_json::to_value(metadata_from_listing(&listing, url).unwrap()).unwrap();
+        assert_eq!(
+            metadata["formatWarning"],
+            "该商品还包含非 UE 格式，已忽略：blender、fbx"
+        );
+        let pure = serde_json::json!({"title": "UE", "assetFormats": [{"assetFormatType": {"code": "unreal-engine"}}]});
+        assert!(
+            serde_json::to_value(metadata_from_listing(&pure, url).unwrap()).unwrap()
+                ["formatWarning"]
+                .is_null()
+        );
     }
 
     #[test]
@@ -538,6 +744,17 @@ mod tests {
     }
 
     #[test]
+    fn retains_safe_links_embedded_in_fab_descriptions() {
+        let text = html_to_text(
+            r#"<p>Guide: <a href="https://example.com/watch?v=1&amp;lang=en">Watch tutorial</a></p><p><a href='http://example.com/docs'>http://example.com/docs</a> <a href="/listings/example">Fab reference</a> <a href="javascript:alert(1)">unsafe label</a></p>"#,
+        );
+        assert_eq!(
+            text,
+            "Guide: Watch tutorial (https://example.com/watch?v=1&lang=en)\nhttp://example.com/docs Fab reference (https://www.fab.com/listings/example) unsafe label"
+        );
+    }
+
+    #[test]
     fn normalizes_url_variants_and_maps_fixed_categories() {
         let expected = "06003f78-9a59-4fb8-abbc-14dc276f0b4a";
         for url in [
@@ -566,6 +783,55 @@ mod tests {
         let mut versions = Vec::new();
         collect_versions(&detail, &mut versions);
         assert_eq!(unique(versions), vec!["5.3", "5.4", "5.5"]);
+    }
+
+    #[test]
+    fn ue_support_detail_is_numeric_sorted_and_not_a_package_version_list() {
+        let detail = serde_json::json!({
+            "assetFormatType": {"code": "unreal-engine"},
+            "versions": [
+                {"version": "Marketplace 2026 release", "engineVersions": ["UE_5.10", "UE_5.4.2", "UE_4_27"]},
+                {"engineVersions": ["UE_5.4", "UE 5.3"]}
+            ],
+            "assetFormats": [{"assetFormatType": {"code": "unity"}, "versions": [{"engineVersions": ["6.0"]}]}]
+        });
+        let (versions, warnings) = ue_versions_from_detail(&detail);
+        assert_eq!(versions, vec!["4.27", "5.3", "5.4", "5.10"]);
+        assert!(warnings.is_empty());
+        assert_eq!(normalize_ue_version("5.4.2"), Some("5.4".into()));
+        for invalid in [
+            "2022.3",
+            "5",
+            "5.4-beta",
+            "5..4",
+            "{custom-engine}",
+            "5.4.0.1",
+            "5.4.1000",
+        ] {
+            assert!(normalize_ue_version(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn incomplete_or_unrecognized_ue_support_remains_unknown_or_partial() {
+        let (versions, warnings) = ue_versions_from_detail(&serde_json::json!({"versions": [
+            {"engineVersions": ["UE_5.4", "future-format", 5]},
+            {"name": "missing support"}
+        ]}));
+        assert_eq!(versions, vec!["5.4"]);
+        assert!(!warnings.is_empty());
+        for detail in [
+            serde_json::json!({"assetFormatType": {"code": "unity"}, "versions": [{"engineVersions": ["5.4"]}]}),
+            serde_json::json!({"assetFormatType": {"code": 4}, "versions": [{"engineVersions": ["5.4"]}]}),
+            serde_json::json!({"versions": []}),
+            serde_json::json!({"versions": [{"engineVersions": ["unknown"]}]}),
+            serde_json::json!({"supportedVersions": ["5.4"], "assetFormats": [{"versions": [{"engineVersions": ["5.4"]}]}]}),
+            serde_json::Value::Null,
+        ] {
+            let (versions, warnings) = ue_versions_from_detail(&detail);
+            assert!(versions.is_empty());
+            assert!(!warnings.is_empty());
+        }
     }
 
     #[test]

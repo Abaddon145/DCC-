@@ -1,20 +1,29 @@
-import type { CommandId, GlobalPreferences, LibraryPreferences, ModuleId } from "../types";
+import type { CommandId, GlobalPreferences, LibraryPreferences, ModuleGroupId, ModuleId } from "../types";
+import {noteShortcutDefaults,noteShortcutLabels,setNoteShortcuts} from "./noteShortcutKeys";
 
-export const moduleRegistry: Array<{ id: ModuleId; label: string; description: string }> = [
-  { id: "library", label: "素材库", description: "浏览、搜索与整理全部素材" },
-  { id: "imageLibrary", label: "图片库", description: "集中管理参考图、贴图和概念图" },
-  { id: "modelLibrary", label: "三维模型库", description: "管理并交互预览 GLB、GLTF、FBX、OBJ 和 STL" },
-  { id: "audioLibrary", label: "音频库", description: "管理音效、音乐与波形预览" },
-  { id: "videoLibrary", label: "视频库", description: "管理视频参考与代理预览" },
-  { id: "projects", label: "创作项目", description: "项目素材、镜头任务、参考板与工程入口" },
-  { id: "smartCollections", label: "智能集合", description: "保存可动态更新的搜索条件" },
-  { id: "favorites", label: "收藏", description: "快速访问收藏素材" },
-  { id: "recent", label: "最近查看", description: "回到最近打开的素材" },
-  { id: "tagManager", label: "标签管理", description: "重命名、合并和清理标签" },
-  { id: "health", label: "素材库检查", description: "检查缺失信息和失效链接" },
-  { id: "reference", label: "参考板", description: "PureRef 风格无限画布" },
-  { id: "trash", label: "回收站", description: "恢复或永久清理已删除内容" },
+export const moduleRegistry: Array<{ id: ModuleId; group: ModuleGroupId; label: string; description: string }> = [
+  { id: "library", group: "content", label: "素材库", description: "浏览、搜索与整理全部素材" },
+  { id: "downloader", group: "content", label: "下载中心", description: "解析链接、后台下载并自动收录到媒体库" },
+  { id: "browserCapture", group: "content", label: "采集收件箱", description: "接收浏览器图片、视频和来源链接，再关联创作项目与笔记" },
+  { id: "imageLibrary", group: "content", label: "图片库", description: "集中管理参考图、贴图和概念图" },
+  { id: "modelLibrary", group: "content", label: "三维模型库", description: "管理并交互预览 GLB、GLTF、FBX、OBJ 和 STL" },
+  { id: "audioLibrary", group: "content", label: "音频库", description: "管理音效、音乐与波形预览" },
+  { id: "videoLibrary", group: "content", label: "视频库", description: "管理视频参考与代理预览" },
+  { id: "projects", group: "creation", label: "创作项目", description: "项目素材、镜头任务、参考板与工程入口" },
+  { id: "knowledge", group: "creation", label: "知识库", description: "学习笔记、知识沉淀与创作资料" },
+  { id: "aiAssistant", group: "creation", label: "AI 创作助手", description: "创作方案、整理建议、自然语言检索与项目选材" },
+  { id: "reference", group: "creation", label: "参考板", description: "PureRef 风格无限画布" },
+  { id: "smartCollections", group: "libraryContext", label: "智能集合", description: "保存可动态更新的搜索条件" },
+  { id: "favorites", group: "libraryContext", label: "收藏", description: "快速访问收藏素材" },
+  { id: "recent", group: "libraryContext", label: "最近查看", description: "回到最近打开的素材" },
+  { id: "tagManager", group: "manage", label: "标签管理", description: "重命名、合并和清理标签" },
+  { id: "health", group: "manage", label: "素材库检查", description: "检查缺失信息和失效链接" },
+  { id: "trash", group: "manage", label: "回收站", description: "恢复或永久清理已删除内容" },
 ];
+
+export const moduleGroupLabels: Record<ModuleGroupId, string> = {
+  content: "内容", libraryContext: "素材库快捷入口", creation: "创作", manage: "管理",
+};
 
 export const commandRegistry: Array<{ id: CommandId; label: string; keywords: string }> = [
   { id: "commandPalette", label: "打开命令面板", keywords: "command palette 命令" },
@@ -26,19 +35,22 @@ export const commandRegistry: Array<{ id: CommandId; label: string; keywords: st
   { id: "selectAll", label: "全选当前结果", keywords: "select all 全选" },
   { id: "saveAsset", label: "保存素材编辑", keywords: "save 保存" },
   { id: "deleteSelected", label: "删除选择", keywords: "delete trash 删除" },
+  ...Object.entries(noteShortcutLabels).map(([id,label])=>({id:id as CommandId,label:`知识库 · ${label}`,keywords:"note 笔记"})),
 ];
 
 export const defaultGlobalPreferences: GlobalPreferences = {
-  theme: "graphite", accentColor: "#D99A42", density: "comfortable", reduceMotion: false,
+  theme: "graphite", accentColor: "#D99A42", density: "comfortable", fontScale: 1, toolbarDensity: "comfortable", reduceMotion: false,
   sidebarWidth: 248, detailWidth: 420,
-  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete" },
+  shortcuts: { commandPalette: "Ctrl+P", focusSearch: "Ctrl+K", addAsset: "Ctrl+N", quickAdd: "Ctrl+Shift+N", settings: "Ctrl+,", toggleSelection: "Ctrl+M", selectAll: "Ctrl+A", saveAsset: "Ctrl+S", deleteSelected: "Delete",...noteShortcutDefaults },
 };
 
 export const defaultLibraryPreferences: LibraryPreferences = {
   moduleOrder: moduleRegistry.map(module => module.id), disabledModules: [], startupModule: "library", rememberLastContext: false,
-  assetView: "grid", cardSize: "medium", coverFit: "cover",
+  assetView: "grid", cardSize: "medium", coverFit: "cover", coverAspectRatio: "standard",
   cardFields: { category: true, tags: true, software: true, version: true, format: true, linkStatus: true },
-  defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null,
+  defaultSort: "updated", rememberSearch: false, categoryTreeExpanded: true, lastContext: null, workspaceContexts: {}, rememberWorkspace: true,
+  contextPaneWidths: { library: 248, imageLibrary: 220, modelLibrary: 260, audioLibrary: 220, videoLibrary: 220 },
+  collapsedContextPanes: [], collapsedModuleGroups: ["manage"],
 };
 
 export function isHexColor(value: string) { return /^#[0-9A-F]{6}$/i.test(value); }
@@ -50,9 +62,11 @@ export function textColorFor(background: string) {
 }
 
 export function applyGlobalPreferences(preferences: GlobalPreferences) {
+  setNoteShortcuts(preferences.shortcuts);
   const root = document.documentElement;
   root.dataset.theme = preferences.theme;
   root.dataset.density = preferences.density;
+  root.dataset.toolbarDensity = preferences.toolbarDensity;
   root.dataset.reduceMotion = String(preferences.reduceMotion);
   root.style.setProperty("--accent", preferences.accentColor);
   root.style.setProperty("--accent-bright", preferences.accentColor);
@@ -60,6 +74,7 @@ export function applyGlobalPreferences(preferences: GlobalPreferences) {
   root.style.setProperty("--accent-text", textColorFor(preferences.accentColor));
   root.style.setProperty("--sidebar-width", `${preferences.sidebarWidth}px`);
   root.style.setProperty("--detail-width", `${preferences.detailWidth}px`);
+  root.style.setProperty("--font-scale", String(preferences.fontScale));
 }
 
 export function normalizeShortcut(event: KeyboardEvent) {
@@ -69,7 +84,9 @@ export function normalizeShortcut(event: KeyboardEvent) {
   if (event.ctrlKey || event.metaKey) parts.push("Ctrl");
   if (event.altKey) parts.push("Alt");
   if (event.shiftKey) parts.push("Shift");
-  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  let key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if(/^Digit[1-4]$/.test(event.code))key=event.code.slice(-1);
+  if(key==="+"||(event.code==="Equal"&&(event.ctrlKey||event.metaKey))){key="+";const index=parts.indexOf("Shift");if(index>=0)parts.splice(index,1);}
   parts.push(key === " " ? "Space" : key);
   return parts.join("+");
 }
@@ -82,7 +99,8 @@ export function shortcutConflicts(shortcuts: Record<string, string>) {
   const seen = new Map<string, string>();
   const conflicts = new Set<string>();
   Object.entries(shortcuts).forEach(([id, value]) => {
-    const key = value.trim().toLowerCase();
+    const scope=id.startsWith("note")?"note:":"app:";
+    const key = value.trim()?scope+value.trim().toLowerCase():"";
     const existing = seen.get(key);
     if (key && existing) { conflicts.add(existing); conflicts.add(id); } else if (key) seen.set(key, id);
   });

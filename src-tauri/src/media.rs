@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -80,21 +80,32 @@ pub(crate) fn safe_relative(base_dir: &Path, relative: &str) -> Result<PathBuf, 
 pub(crate) fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
     let parent = target.parent().ok_or("媒体目标目录无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("创建媒体目录失败：{error}"))?;
-    let temp = target.with_extension(format!(
-        "{}.partial",
-        target
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("tmp")
-    ));
-    if temp.exists() {
-        let _ = fs::remove_file(&temp);
+    if target.exists() {
+        return Err("托管目标已存在，未覆盖文件".into());
     }
-    fs::copy(source, &temp).map_err(|error| format!("复制媒体失败：{error}"))?;
-    fs::rename(&temp, target).map_err(|error| {
-        let _ = fs::remove_file(&temp);
-        format!("保存媒体失败：{error}")
-    })
+    let mut stage =
+        tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("创建临时文件失败：{e}"))?;
+    let mut input = fs::File::open(source).map_err(|e| format!("源文件不可读：{e}"))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        if process_stopped() {
+            return Err("媒体复制已安全停止".into());
+        }
+        let count = input
+            .read(&mut buffer)
+            .map_err(|e| format!("复制媒体失败：{e}"))?;
+        if count == 0 {
+            break;
+        }
+        stage
+            .write_all(&buffer[..count])
+            .map_err(|e| format!("复制媒体失败：{e}"))?;
+    }
+    stage.as_file().sync_all().map_err(|e| e.to_string())?;
+    stage
+        .persist_noclobber(target)
+        .map(|_| ())
+        .map_err(|e| format!("保存媒体失败（未覆盖已有文件）：{e}"))
 }
 
 #[cfg(windows)]
@@ -135,11 +146,89 @@ pub fn ffmpeg_paths(resource_dir: Option<&Path>) -> (Option<PathBuf>, Option<Pat
     (None, None)
 }
 
-fn run(command: &mut Command) -> Result<(), String> {
+thread_local! { static PROCESS_STOP: std::cell::RefCell<Option<Box<dyn Fn()->bool>>> = std::cell::RefCell::new(None); }
+pub struct ProcessControl {
+    previous: Option<Box<dyn Fn() -> bool>>,
+}
+impl ProcessControl {
+    pub fn new(check: impl Fn() -> bool + 'static) -> Self {
+        Self {
+            previous: PROCESS_STOP.with(|value| value.replace(Some(Box::new(check)))),
+        }
+    }
+}
+impl Drop for ProcessControl {
+    fn drop(&mut self) {
+        PROCESS_STOP.with(|value| {
+            value.replace(self.previous.take());
+        });
+    }
+}
+pub(crate) fn process_stopped() -> bool {
+    PROCESS_STOP.with(|value| value.borrow().as_ref().is_some_and(|check| check()))
+}
+fn read_process_stream(mut reader: impl std::io::Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        let Ok(count) = reader.read(&mut buffer) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let remaining = (1024usize * 1024).saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    bytes
+}
+fn process_output(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
     quiet(command);
-    let output = command
-        .output()
-        .map_err(|error| format!("启动媒体引擎失败：{error}"))?;
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动媒体引擎失败：{e}"))?;
+    let stdout = child.stdout.take().ok_or("无法读取媒体输出")?;
+    let stderr = child.stderr.take().ok_or("无法读取媒体错误")?;
+    let out = std::thread::spawn(move || read_process_stream(stdout));
+    let err = std::thread::spawn(move || read_process_stream(stderr));
+    let started = std::time::Instant::now();
+    let result = loop {
+        if process_stopped() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("媒体处理已安全停止".into());
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("媒体引擎处理超时，请检查文件后重试".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(e.to_string());
+            }
+        }
+    };
+    let stdout = out.join().map_err(|_| "读取媒体输出失败")?;
+    let stderr = err.join().map_err(|_| "读取媒体错误失败")?;
+    Ok(std::process::Output {
+        status: result?,
+        stdout,
+        stderr,
+    })
+}
+fn run(command: &mut Command) -> Result<(), String> {
+    let output = process_output(command, std::time::Duration::from_secs(1800))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -174,7 +263,7 @@ pub(crate) fn probe(
         ])
         .arg(input);
     quiet(&mut command);
-    let Ok(output) = command.output() else {
+    let Ok(output) = process_output(&mut command, std::time::Duration::from_secs(30)) else {
         return (None, None, None);
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
@@ -222,13 +311,7 @@ pub(crate) fn process(
     fs::create_dir_all(thumbnail.parent().ok_or("缩略图目录无效")?)
         .map_err(|error| error.to_string())?;
     if kind == "video" {
-        let mut thumb = Command::new(ffmpeg);
-        thumb
-            .args(["-y", "-ss", "1", "-i"])
-            .arg(original)
-            .args(["-frames:v", "1", "-vf", "scale=640:-2"])
-            .arg(thumbnail);
-        run(&mut thumb)?;
+        generate_thumbnail(ffmpeg, "video", original, thumbnail, &process_stopped)?;
         if matches!(extension, "mov" | "mkv") {
             let mut transcode = Command::new(ffmpeg);
             transcode
@@ -260,18 +343,7 @@ pub(crate) fn process(
             "ready".into(),
         ))
     } else {
-        let mut waveform = Command::new(ffmpeg);
-        waveform
-            .args(["-y", "-i"])
-            .arg(original)
-            .args([
-                "-filter_complex",
-                "showwavespic=s=800x180:colors=#d99a42",
-                "-frames:v",
-                "1",
-            ])
-            .arg(thumbnail);
-        run(&mut waveform)?;
+        generate_thumbnail(ffmpeg, "audio", original, thumbnail, &process_stopped)?;
         if extension == "flac" {
             let mut transcode = Command::new(ffmpeg);
             transcode
@@ -292,6 +364,43 @@ pub(crate) fn process(
             "ready".into(),
         ))
     }
+}
+
+pub(crate) fn generate_thumbnail(
+    ffmpeg: &Path,
+    kind: &str,
+    original: &Path,
+    thumbnail: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let mut args = vec!["-y".into()];
+    if kind == "video" {
+        args.extend(["-ss".into(), "0".into()]);
+    }
+    args.extend(["-i".into(), original.to_string_lossy().into_owned()]);
+    match kind {
+        "video" => args.extend(["-frames:v", "1", "-vf", "scale=640:-2"].map(str::to_string)),
+        "audio" => args.extend(
+            [
+                "-filter_complex",
+                "showwavespic=s=800x180:colors=#d99a42",
+                "-frames:v",
+                "1",
+            ]
+            .map(str::to_string),
+        ),
+        _ => return Err("不支持的缩略图类型".into()),
+    }
+    args.push(thumbnail.to_string_lossy().into_owned());
+    crate::runtime::process::capture(
+        ffmpeg,
+        &args,
+        std::time::Duration::from_secs(120),
+        stop,
+        &mut |_| {},
+    )
+    .map(|_| ())
+    .map_err(|e| format!("生成缩略图失败：{e}"))
 }
 
 fn row_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetMedia> {
@@ -407,8 +516,24 @@ pub fn import(
             .unwrap_or(0);
         let timestamp = now();
         let is_cover = !has_cover && position == 0;
-        if let Err(error) = connection.execute("INSERT INTO asset_media(id,asset_id,kind,original_name,original_rel_path,proxy_rel_path,thumbnail_rel_path,mime_type,file_size,duration_ms,pixel_width,pixel_height,sort_order,is_cover,processing_status,processing_message,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", params![id,asset_id,kind,name,original_rel,proxy_value,thumb_value,mime,size,duration,width,height,order,is_cover as i64,status,message,timestamp]) {
-            let _=fs::remove_file(&original); let _=fs::remove_file(&proxy); let _=fs::remove_file(&thumb); return Err(error.to_string());
+        let registered = (|| -> Result<(), String> {
+            let tx = connection.transaction().map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO asset_media(id,asset_id,kind,original_name,original_rel_path,proxy_rel_path,thumbnail_rel_path,mime_type,file_size,duration_ms,pixel_width,pixel_height,sort_order,is_cover,processing_status,processing_message,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)", params![id,asset_id,kind,name,original_rel,proxy_value,thumb_value,mime,size,duration,width,height,order,is_cover as i64,status,message,timestamp]).map_err(|e|e.to_string())?;
+            let core_id = crate::asset::repository::register_origin(
+                &tx,
+                &crate::asset::models::CoreOrigin {
+                    kind: "legacy".into(),
+                    id: asset_id.into(),
+                },
+            )?;
+            crate::asset::repository::register_files(&tx, &core_id)?;
+            tx.commit().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = registered {
+            let _ = fs::remove_file(&original);
+            let _ = fs::remove_file(&proxy);
+            let _ = fs::remove_file(&thumb);
+            return Err(error);
         }
         imported_ids.push(id);
         order += 1;
@@ -423,6 +548,15 @@ pub fn import(
 
 pub fn delete(connection: &mut Connection, base_dir: &Path, id: &str) -> Result<(), String> {
     let paths: (String,Option<String>,Option<String>,String) = connection.query_row("SELECT original_rel_path,proxy_rel_path,thumbnail_rel_path,asset_id FROM asset_media WHERE id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(|error| error.to_string())?.ok_or("预览附件不存在")?;
+    crate::asset::repository::protect_file_removal(
+        connection,
+        &[crate::asset::models::SourceFileRef {
+            kind: "assetMedia".into(),
+            id: id.into(),
+            role: "original".into(),
+        }],
+        &[],
+    )?;
     connection
         .execute("DELETE FROM asset_media WHERE id=?1", [id])
         .map_err(|error| error.to_string())?;
@@ -483,6 +617,14 @@ pub fn retry(
             return Err(error);
         }
     }
+    let core_id = crate::asset::repository::register_origin(
+        connection,
+        &crate::asset::models::CoreOrigin {
+            kind: "legacy".into(),
+            id: asset_id.clone(),
+        },
+    )?;
+    crate::asset::repository::register_files(connection, &core_id)?;
     list(connection, &asset_id)?
         .into_iter()
         .find(|item| item.id == id)
@@ -688,6 +830,37 @@ pub(crate) fn file_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subprocess_fixture() {
+        if std::env::var_os("STACK_DCC_CHILD_FIXTURE").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+    fn sleeper() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "media::tests::subprocess_fixture", "--nocapture"])
+            .env("STACK_DCC_CHILD_FIXTURE", "1");
+        command
+    }
+    #[test]
+    fn media_engine_timeout_reaps_child() {
+        let started = std::time::Instant::now();
+        let error =
+            process_output(&mut sleeper(), std::time::Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("超时"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+    #[test]
+    fn media_engine_stop_reaps_child() {
+        let started = std::time::Instant::now();
+        let _control =
+            ProcessControl::new(move || started.elapsed() > std::time::Duration::from_millis(100));
+        let error = process_output(&mut sleeper(), std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("安全停止"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     use crate::db::open_database;
     use std::fs;
     use tempfile::tempdir;

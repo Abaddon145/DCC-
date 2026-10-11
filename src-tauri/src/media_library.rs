@@ -1,14 +1,166 @@
 use crate::{images, media, models::*};
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::{
     collections::{BTreeSet, HashSet},
     fs,
-    io::Read,
+    io::Cursor,
     path::{Component, Path, PathBuf},
 };
 use uuid::Uuid;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelThumbnailJob {
+    pub id: String,
+    pub logical_path: String,
+    pub original_name: String,
+}
+
+pub fn pending_model_thumbnails(connection: &Connection) -> Result<Vec<ModelThumbnailJob>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT e.id, m.logical_path, m.original_name FROM media_entries e \
+         JOIN media_files m ON m.id=e.primary_file_id \
+         WHERE e.kind='model' AND e.deleted_at IS NULL AND e.processing_message='' AND NOT EXISTS \
+         (SELECT 1 FROM media_files t WHERE t.entry_id=e.id AND t.role='thumbnail') \
+         ORDER BY e.created_at, e.id",
+        )
+        .map_err(|e| e.to_string())?;
+    let jobs = statement
+        .query_map([], |row| {
+            Ok(ModelThumbnailJob {
+                id: row.get(0)?,
+                logical_path: row.get(1)?,
+                original_name: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(jobs)
+}
+
+pub fn save_model_thumbnail(
+    connection: &mut Connection,
+    base_dir: &Path,
+    entry_id: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    Uuid::parse_str(entry_id).map_err(|_| "模型 ID 无效")?;
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+        return Err("模型缩略图大小无效".into());
+    }
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT kind FROM media_entries WHERE id=?1 AND deleted_at IS NULL",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if kind.as_deref() != Some("model") {
+        return Err("模型条目不存在".into());
+    }
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (width, height) = reader.into_dimensions().map_err(|_| "缩略图无法解析")?;
+    if width == 0
+        || height == 0
+        || width > 4096
+        || height > 4096
+        || u64::from(width) * u64::from(height) > 16_000_000
+    {
+        return Err("模型缩略图尺寸无效".into());
+    }
+    let picture = image::load_from_memory(bytes)
+        .map_err(|_| "缩略图无法解析")?
+        .resize(480, 480, image::imageops::FilterType::Lanczos3);
+    let file_id = Uuid::new_v4().to_string();
+    let rel_path = format!("media-library/model/{entry_id}/thumbnails/{file_id}.webp");
+    let final_path = media::safe_relative(base_dir, &rel_path)?;
+    let parent = final_path.parent().ok_or("缩略图路径无效")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temp_path = parent.join(format!("{file_id}.tmp"));
+    if let Err(error) = picture.save_with_format(&temp_path, image::ImageFormat::WebP) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("保存模型缩略图失败：{error}"));
+    }
+    if let Err(error) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("提交模型缩略图失败：{error}"));
+    }
+    let result = (|| -> Result<Vec<String>, String> {
+        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let previous = {
+            let mut stmt = tx
+                .prepare("SELECT rel_path FROM media_files WHERE entry_id=?1 AND role='thumbnail'")
+                .map_err(|e| e.to_string())?;
+            let paths = stmt
+                .query_map([entry_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            paths
+        };
+        tx.execute(
+            "DELETE FROM media_files WHERE entry_id=?1 AND role='thumbnail'",
+            [entry_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,mime_type,file_size,checksum,width,height,sort_order,created_at) VALUES(?1,?2,'thumbnail','thumbnail.webp','thumbnail.webp',?3,'image/webp',?4,?5,?6,?7,100,?8)", params![file_id,entry_id,rel_path,fs::metadata(&final_path).map_err(|e|e.to_string())?.len() as i64,digest(&final_path)?,picture.width() as i64,picture.height() as i64,now()]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE media_entries SET processing_message='' WHERE id=?1",
+            [entry_id],
+        )
+        .map_err(|e| e.to_string())?;
+        let core_id = crate::asset::repository::register_origin(
+            &tx,
+            &crate::asset::models::CoreOrigin {
+                kind: "media".into(),
+                id: entry_id.into(),
+            },
+        )?;
+        crate::asset::repository::register_files(&tx, &core_id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(previous)
+    })();
+    match result {
+        Ok(previous) => {
+            for old in previous {
+                if let Ok(path) = media::safe_relative(base_dir, &old) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+            Ok(file_id)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(final_path);
+            Err(error)
+        }
+    }
+}
+
+pub fn report_model_thumbnail_failure(
+    connection: &Connection,
+    entry_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    let detail = format!(
+        "缩略图生成失败：{}",
+        message.chars().take(250).collect::<String>()
+    );
+    let changed = connection.execute(
+        "UPDATE media_entries SET processing_message=?2 WHERE id=?1 AND kind='model' AND deleted_at IS NULL",
+        params![entry_id, detail],
+    ).map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("模型条目不存在".into());
+    }
+    Ok(())
+}
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"];
 
@@ -51,17 +203,7 @@ fn validate_kind_path(kind: &MediaKind, path: &Path) -> Result<(String, String),
     Ok((ext, mime.into()))
 }
 fn digest(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("读取文件失败：{e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    crate::file_digest::digest_file_controlled(path, &media::process_stopped).map(|(_, hash)| hash)
 }
 fn safe_dependency(raw: &str) -> Result<PathBuf, String> {
     let clean = raw.trim().trim_matches('"').replace('\\', "/");
@@ -181,7 +323,11 @@ fn ensure_folder(
     }
     Ok(())
 }
-fn upsert_tags(connection: &Connection, entry_id: &str, tags: &[String]) -> Result<(), String> {
+pub(crate) fn upsert_tags(
+    connection: &Connection,
+    entry_id: &str,
+    tags: &[String],
+) -> Result<(), String> {
     connection
         .execute("DELETE FROM media_entry_tags WHERE entry_id=?1", [entry_id])
         .map_err(|e| e.to_string())?;
@@ -210,7 +356,7 @@ fn upsert_tags(connection: &Connection, entry_id: &str, tags: &[String]) -> Resu
     }
     Ok(())
 }
-fn reindex(connection: &Connection, id: &str) -> Result<(), String> {
+pub(crate) fn reindex(connection: &Connection, id: &str) -> Result<(), String> {
     connection
         .execute("DELETE FROM media_search WHERE entry_id=?1", [id])
         .map_err(|e| e.to_string())?;
@@ -261,19 +407,23 @@ fn entry_row(row: &Row<'_>) -> rusqlite::Result<MediaEntry> {
 }
 const ENTRY_SELECT:&str="SELECT e.id,e.kind,e.folder_id,e.name,e.description,e.author,e.source_url,e.license,e.favorite,e.processing_status,e.processing_message,lower(substr(m.original_name,instr(m.original_name,'.')+1)),m.file_size,COALESCE(group_concat(DISTINCT t.name),'') ,(SELECT id FROM media_files WHERE entry_id=e.id AND role IN ('thumbnail','waveform') ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END LIMIT 1),e.primary_file_id,e.created_at,e.updated_at FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id LEFT JOIN media_entry_tags et ON et.entry_id=e.id LEFT JOIN localized_tags t ON t.id=et.tag_id";
 
-pub fn search(
-    connection: &Connection,
-    request: &MediaSearchRequest,
-) -> Result<Page<MediaEntry>, String> {
+fn search_filter(request: &MediaSearchRequest) -> (String, Vec<Value>) {
     let mut conditions = vec!["e.deleted_at IS NULL".to_string(), "e.kind=?".to_string()];
     let mut values = vec![Value::Text(request.kind.as_str().into())];
     if !request.query.trim().is_empty() {
-        conditions
-            .push("e.id IN (SELECT entry_id FROM media_search WHERE media_search MATCH ?)".into());
-        values.push(Value::Text(format!(
-            "\"{}\"",
-            request.query.trim().replace('"', "\"")
-        )))
+        let query = request.query.trim();
+        if query.chars().count() < 3 {
+            conditions.push(
+                "e.id IN (SELECT entry_id FROM media_search WHERE instr(lower(text),lower(?))>0)"
+                    .into(),
+            );
+            values.push(Value::Text(query.into()));
+        } else {
+            conditions.push(
+                "e.id IN (SELECT entry_id FROM media_search WHERE media_search MATCH ?)".into(),
+            );
+            values.push(Value::Text(format!("\"{}\"", query.replace('"', "\"\""))));
+        }
     }
     if let Some(folder) = &request.folder_id {
         if request.include_child_folders {
@@ -302,19 +452,31 @@ pub fn search(
                 .map(|v| Value::Text(v.to_lowercase())),
         )
     }
-    let where_sql = conditions.join(" AND ");
-    let total=connection.query_row(&format!("SELECT count(*) FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql}"),params_from_iter(values.clone()),|r|r.get(0)).map_err(|e|e.to_string())?;
-    let order = match request.sort.as_str() {
+    (conditions.join(" AND "), values)
+}
+
+fn search_order(sort: &str) -> &str {
+    match sort {
         "name" => "e.name COLLATE NOCASE",
         "created" => "e.created_at DESC",
         "favorite" => "e.favorite DESC,e.updated_at DESC",
         _ => "e.updated_at DESC",
-    };
+    }
+}
+
+pub fn search(
+    connection: &Connection,
+    request: &MediaSearchRequest,
+) -> Result<Page<MediaEntry>, String> {
+    let (where_sql, values) = search_filter(request);
+    let total=connection.query_row(&format!("SELECT count(*) FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql}"),params_from_iter(values.clone()),|r|r.get(0)).map_err(|e|e.to_string())?;
+    let order = search_order(&request.sort);
     let mut page_values = values;
     page_values.push(Value::Integer(request.limit.clamp(1, 500)));
     page_values.push(Value::Integer(request.offset.max(0)));
-    let sql =
-        format!("{ENTRY_SELECT} WHERE {where_sql} GROUP BY e.id ORDER BY {order} LIMIT ? OFFSET ?");
+    let sql = format!(
+        "{ENTRY_SELECT} WHERE {where_sql} GROUP BY e.id ORDER BY {order},e.id LIMIT ? OFFSET ?"
+    );
     let mut stmt = connection.prepare(&sql).map_err(|e| e.to_string())?;
     let items = stmt
         .query_map(params_from_iter(page_values), entry_row)
@@ -327,6 +489,21 @@ pub fn search(
         offset: request.offset.max(0),
         limit: request.limit.clamp(1, 500),
     })
+}
+pub fn select_ids(
+    connection: &Connection,
+    request: &MediaSearchRequest,
+) -> Result<Vec<String>, String> {
+    let (where_sql, values) = search_filter(request);
+    let order = search_order(&request.sort);
+    let sql = format!("SELECT e.id FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id WHERE {where_sql} ORDER BY {order},e.id");
+    let mut statement = connection.prepare(&sql).map_err(|e| e.to_string())?;
+    let ids = statement
+        .query_map(params_from_iter(values), |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
 }
 pub fn get(connection: &Connection, id: &str) -> Result<MediaEntryDetail, String> {
     let sql = format!("{ENTRY_SELECT} WHERE e.id=?1 AND e.deleted_at IS NULL GROUP BY e.id");
@@ -491,6 +668,90 @@ pub fn import(
     resource_dir: Option<&Path>,
     request: MediaImportRequest,
 ) -> Result<MediaImportReport, String> {
+    import_controlled(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        &|_, _, _, _| {},
+        &|| false,
+    )
+}
+
+pub fn import_controlled(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+) -> Result<MediaImportReport, String> {
+    import_controlled_with_capture(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        progress,
+        stop,
+        None,
+    )
+}
+
+pub fn import_controlled_with_capture(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+    capture: Option<&crate::browser_capture::Capture>,
+) -> Result<MediaImportReport, String> {
+    import_checked(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        progress,
+        stop,
+        capture,
+        None,
+    )
+}
+
+/// Core imports bind the analyzed file's digest through final managed-file registration.
+pub(crate) fn import_controlled_verified(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    stop: &dyn Fn() -> bool,
+    expected_hash: &str,
+) -> Result<MediaImportReport, String> {
+    if request.paths.len() != 1 {
+        return Err("校验导入仅接受一个文件".into());
+    }
+    import_checked(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        &|_, _, _, _| {},
+        stop,
+        None,
+        Some(expected_hash),
+    )
+}
+
+fn import_checked(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+    capture: Option<&crate::browser_capture::Capture>,
+    expected_hash: Option<&str>,
+) -> Result<MediaImportReport, String> {
     if request.paths.is_empty() {
         return Ok(MediaImportReport {
             imported: 0,
@@ -510,7 +771,21 @@ pub fn import(
         failed: 0,
         rows: vec![],
     };
-    for raw in request.paths.clone() {
+    let total = request.paths.len();
+    for (index, raw) in request.paths.clone().into_iter().enumerate() {
+        if stop() {
+            break;
+        }
+        progress(
+            index,
+            total,
+            Path::new(&raw)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            &report,
+        );
         let source = PathBuf::from(&raw);
         let mut staged_root: Option<PathBuf> = None;
         let result = (|| -> Result<(String, Option<String>), String> {
@@ -518,7 +793,13 @@ pub fn import(
                 return Err("文件不存在".into());
             }
             let (ext, _mime) = validate_kind_path(&request.kind, &source)?;
+            if expected_hash.is_some() {
+                crate::asset::scanner::validate_source(&source, base_dir)?;
+            }
             let checksum = digest(&source)?;
+            if expected_hash.is_some_and(|hash| hash != checksum) {
+                return Err("文件在扫描或分析后发生变化，请重新扫描".into());
+            }
             if let Some(existing)=connection.query_row("SELECT e.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE f.checksum=?1",[&checksum],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())?{return Ok((existing,Some("duplicate".into())))}
             let id = Uuid::new_v4().to_string();
             let root = format!("media-library/{}/{}", request.kind.as_str(), id);
@@ -545,6 +826,10 @@ pub fn import(
             )> = vec![];
             if request.kind == MediaKind::Image {
                 let stored = images::import_image_to(base_dir, &source, &root)?;
+                if digest(&media::safe_relative(base_dir, &stored.original_rel_path)?)? != checksum
+                {
+                    return Err("源文件在复制时发生变化，未写入素材库".into());
+                }
                 let main_id = Uuid::new_v4().to_string();
                 let thumb_id = Uuid::new_v4().to_string();
                 files.push((
@@ -571,8 +856,11 @@ pub fn import(
                     None,
                     None,
                 ));
+                if expected_hash.is_some() {
+                    crate::asset::scanner::validate_source(&source, base_dir)?;
+                }
                 insert_entry(
-                    connection, &id, &request, &name, &main_id, &timestamp, files,
+                    connection, &id, &request, &name, &main_id, &timestamp, files, capture,
                 )?;
             } else {
                 let deps = if request.kind == MediaKind::Model {
@@ -588,6 +876,9 @@ pub fn import(
                     .to_string();
                 let original_rel = format!("{root}/files/{file_name}");
                 media::copy_atomic(&source, &media::safe_relative(base_dir, &original_rel)?)?;
+                if digest(&media::safe_relative(base_dir, &original_rel)?)? != checksum {
+                    return Err("源文件在复制时发生变化，未写入素材库".into());
+                }
                 let (duration, width, height) = media::probe(ffprobe.as_deref(), &source);
                 files.push((
                     main_id.clone(),
@@ -685,8 +976,11 @@ pub fn import(
                         Err(error) => return Err(error),
                     }
                 }
+                if expected_hash.is_some() {
+                    crate::asset::scanner::validate_source(&source, base_dir)?;
+                }
                 insert_entry(
-                    connection, &id, &request, &name, &main_id, &timestamp, files,
+                    connection, &id, &request, &name, &main_id, &timestamp, files, capture,
                 )?;
             }
             Ok((id, None))
@@ -727,6 +1021,7 @@ pub fn import(
             }
         }
     }
+    progress(report.rows.len(), total, String::new(), &report);
     Ok(report)
 }
 
@@ -829,6 +1124,7 @@ fn insert_entry(
         Option<i64>,
         Option<i64>,
     )>,
+    capture: Option<&crate::browser_capture::Capture>,
 ) -> Result<(), String> {
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO media_entries(id,kind,folder_id,name,favorite,processing_status,primary_file_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'ready',?6,?7,?7)",params![id,request.kind.as_str(),request.folder_id,name,request.favorite as i64,main_id,timestamp]).map_err(|e|e.to_string())?;
@@ -839,7 +1135,18 @@ fn insert_entry(
         tx.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,mime_type,file_size,checksum,width,height,duration_ms,sort_order,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![fid,id,role,logical,original,rel,mime,size,sum,w,h,d,index as i64,timestamp]).map_err(|e|e.to_string())?;
     }
     upsert_tags(&tx, id, &request.tags)?;
+    if let Some(capture) = capture {
+        crate::browser_capture::apply_source(&tx, capture, id)?;
+    }
     reindex(&tx, id)?;
+    let core_id = crate::asset::repository::register_origin(
+        &tx,
+        &crate::asset::models::CoreOrigin {
+            kind: "media".into(),
+            id: id.into(),
+        },
+    )?;
+    crate::asset::repository::register_files(&tx, &core_id)?;
     tx.commit().map_err(|e| e.to_string())
 }
 fn mime_for(name: &str) -> &'static str {
@@ -1009,7 +1316,7 @@ pub fn bundle_response(
         .replace('\\', "/");
     let (rel, mime): (String, String) = connection
         .query_row(
-            "SELECT rel_path,mime_type FROM media_files WHERE entry_id=?1 AND logical_path=?2",
+            "SELECT f.rel_path,f.mime_type FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.entry_id=?1 AND f.logical_path=?2 AND e.deleted_at IS NULL",
             params![entry_id, logical],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1024,6 +1331,38 @@ mod tests {
     use super::*;
     use crate::db::open_database;
     use tempfile::tempdir;
+    #[test]
+    fn selects_every_matching_media_id_beyond_the_first_virtual_page() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let folder = upsert_folder(&db, MediaKind::Image, None, None, "参考图".into()).unwrap();
+        let transaction = db.transaction().unwrap();
+        for index in 0..507 {
+            let id = format!("image-{index}");
+            let file_id = format!("file-{index}");
+            transaction.execute("INSERT INTO media_entries(id,kind,folder_id,name,primary_file_id,created_at,updated_at) VALUES(?1,'image',?2,?1,?3,'now','now')", params![id,folder.id,file_id]).unwrap();
+            transaction.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'main','image.png','image.png',?3,'now')", params![file_id,id,format!("media-library/image/{index}/originals/image.png")]).unwrap();
+        }
+        transaction.commit().unwrap();
+        let ids = select_ids(
+            &db,
+            &MediaSearchRequest {
+                kind: MediaKind::Image,
+                query: String::new(),
+                folder_id: Some(folder.id),
+                include_child_folders: true,
+                tags: vec![],
+                formats: vec![],
+                favorite_only: false,
+                sort: "updated".into(),
+                offset: 150,
+                limit: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 507);
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 507);
+    }
     #[test]
     fn rejects_unsafe_model_dependency_and_folder_cycle() {
         assert!(safe_dependency("../secret.png").is_err());
@@ -1053,6 +1392,26 @@ mod tests {
         let two = import(&mut db, dir.path(), None, req).unwrap();
         assert_eq!(one.imported, 1);
         assert_eq!(two.skipped, 1);
+        assert_eq!(
+            search(
+                &db,
+                &MediaSearchRequest {
+                    kind: MediaKind::Image,
+                    query: "a".into(),
+                    folder_id: None,
+                    include_child_folders: true,
+                    tags: vec![],
+                    formats: vec![],
+                    favorite_only: false,
+                    sort: "updated".into(),
+                    offset: 0,
+                    limit: 80
+                }
+            )
+            .unwrap()
+            .total,
+            1
+        );
         assert_eq!(
             search(
                 &db,
@@ -1132,5 +1491,69 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn stores_and_replaces_a_model_cover_without_touching_its_original() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let source = dir.path().join("mesh.obj");
+        fs::write(&source, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let report = import(
+            &mut db,
+            dir.path(),
+            None,
+            MediaImportRequest {
+                kind: MediaKind::Model,
+                paths: vec![source.to_string_lossy().into_owned()],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+        )
+        .unwrap();
+        let id = report.rows[0].entry_id.as_ref().unwrap();
+        assert_eq!(pending_model_thumbnails(&db).unwrap().len(), 1);
+        let picture = dir.path().join("cover.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([20, 70, 120, 255]))
+            .save(&picture)
+            .unwrap();
+        let bytes = fs::read(picture).unwrap();
+        let first = save_model_thumbnail(&mut db, dir.path(), id, &bytes).unwrap();
+        assert_eq!(
+            get(&db, id).unwrap().entry.thumbnail_file_id.as_deref(),
+            Some(first.as_str())
+        );
+        assert!(pending_model_thumbnails(&db).unwrap().is_empty());
+        let second = save_model_thumbnail(&mut db, dir.path(), id, &bytes).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            get(&db, id).unwrap().entry.thumbnail_file_id.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(
+            get(&db, id)
+                .unwrap()
+                .files
+                .iter()
+                .filter(|file| file.role == "thumbnail")
+                .count(),
+            1
+        );
+        assert!(save_model_thumbnail(&mut db, dir.path(), id, b"not an image").is_err());
+    }
+
+    #[test]
+    fn checksum_runs_on_a_small_callback_stack() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("payload.bin");
+        fs::write(&source, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+        let worker = std::thread::Builder::new()
+            .name("webview-callback-sized-stack".into())
+            .stack_size(256 * 1024)
+            .spawn(move || digest(&source))
+            .unwrap();
+        let checksum = worker.join().unwrap().unwrap();
+        assert_eq!(checksum.len(), 64);
     }
 }

@@ -1,0 +1,55 @@
+/* Existing app tokens remain authoritative. Layers: tray 46, image viewer 47. */
+:root { --feedback-duration:160ms; --feedback-ease:cubic-bezier(.2,.7,.2,1); }
+.primary-button,.secondary-button,.icon-button { transition:background-color var(--feedback-duration),border-color var(--feedback-duration),color var(--feedback-duration),opacity var(--feedback-duration),transform var(--feedback-duration) var(--feedback-ease); }
+.primary-button:active:not(:disabled),.secondary-button:active:not(:disabled),.icon-button:active:not(:disabled) { transform:translateY(1px); }
+.modal-card,.editor-modal,.import-modal,.settings-modal,.quick-capture-modal,.command-palette,.read-failure,.toast { animation:feedback-enter var(--feedback-duration) var(--feedback-ease); }
+@keyframes feedback-enter { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:translateY(0); } }
+.read-failure { gap:16px;flex-wrap:wrap; }
+.load-feedback { min-height:48px; }
+.ai-usage { display:flex;gap:28px;flex-wrap:wrap;font-variant-numeric:tabular-nums; }
+.ai-usage>div { display:grid;gap:4px; }
+.ai-usage span { color:var(--text-muted);font-size:11px; }
+.ai-usage strong { font-size:16px;font-weight:600; }
+.ai-error { border-color:var(--danger);background:color-mix(in srgb,var(--danger) 6%,var(--panel)); }
+.ai-error>p:last-child { color:var(--text-primary); }
+.ai-recovery { display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0 20px; }
+.ai-recovery p { flex-basis:100%;color:var(--text-muted);font-size:12px;line-height:1.7; }
+.ai-session-heading { position:sticky;top:-28px;padding:14px 0;background:var(--bg);z-index:2;overflow-wrap:anywhere }
+.ai-mode-grid>button:disabled { opacity:1; }
+.ai-mode-grid>button:not(.active):disabled { color:var(--text-muted); }
+.workflow-dialog { width:min(940px,calc(100vw - 40px));max-height:calc(100dvh - 48px);overflow:auto; }
+.workflow-dialog h2 { margin:0; }.workflow-dialog p { color:var(--text-muted);font-size:12px;line-height:1.7; }
+.workflow-dialog button:not([class]) { padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--panel-2);cursor:pointer;white-space:nowrap; }
+.workflow-dialog>label { display:grid;gap:8px;font-size:12px; }
+.workflow-dialog input:not([type=checkbox]) { min-width:0;width:100%;padding:9px 11px;border:1px solid var(--border-light);border-radius:var(--radius-sm);background:var(--bg);color:var(--text-primary); }
+.workflow-presets { display:flex;gap:8px;flex-wrap:wrap;margin:16px 0; }
+.workflow-presets button.active { border-color:var(--accent); }
+.workflow-titles { display:grid;gap:8px;margin-bottom:12px;max-height:42dvh;overflow:auto;padding:2px; }
+.workflow-row { display:grid;grid-template-columns:30px 20px minmax(0,1fr) 30px 30px auto;align-items:center;gap:7px;min-height:46px;background:var(--panel-2);padding:5px;border-radius:var(--radius-sm); }
+.workflow-grip { cursor:grab;touch-action:none; }
+.workflow-row input[type=checkbox] { accent-color:var(--accent); }
+.workflow-dialog footer { position:sticky;bottom:-1px;display:flex;gap:10px;flex-wrap:wrap;background:var(--panel);border-top:1px solid var(--border);padding:16px 0 0; }
+.workflow-dialog footer>.primary-button { margin-left:auto; }
+.compare-tray { position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:46;display:flex;align-items:center;gap:12px;max-width:calc(100vw - 32px);padding:12px 16px;background:var(--panel-2);border:1px solid var(--border-light);border-radius:var(--radius-md);box-shadow:0 10px 30px rgb(0 0 0 / .25); }
+.compare-tray>strong { white-space:nowrap;font-size:12px;color:var(--accent); }
+.compare-tray>span { max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px; }
+.compare-tray>button:not([class]),.image-compare button { background:var(--panel-2);border:1px solid var(--border-light);border-radius:var(--radius-sm);padding:8px 12px;cursor:pointer;white-space:nowrap;color:var(--text-primary); }
+.image-compare { z-index:47;background:var(--bg);padding:18px; }
+.image-compare>section { display:flex;flex-direction:column;width:100%;height:100%;min-width:0;min-height:0; }
+.compare-header { display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:0 4px 16px; }
+.compare-header h2 { font-size:18px;margin:0 0 5px; }.compare-header p { font-size:12px;margin:0;color:var(--text-muted); }
+.compare-header>div:last-child { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+.image-compare button[aria-pressed=true] { color:var(--accent);border-color:var(--accent);background:var(--accent-bg); }
+.compare-header output { min-width:52px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums; }
+.compare-panels { flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px; }
+.compare-panels.single { grid-template-columns:minmax(0,1fr); }
+.compare-panels article { display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--border-light);border-radius:var(--radius-md);overflow:hidden;background:var(--panel); }
+.compare-panels article>header { display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);font-size:12px; }
+.compare-panels article>header strong { color:var(--accent); }.compare-panels article>header span { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.compare-stage { flex:1;position:relative;min-height:0;overflow:hidden;cursor:grab;touch-action:none;overscroll-behavior:contain; }
+.compare-stage:active { cursor:grabbing; }
+.compare-image { position:absolute;inset:0;display:grid;place-items:center;transform-origin:center; }
+.compare-image>img { display:block;width:100%;height:100%;object-fit:contain;pointer-events:none;user-select:none; }
+.compare-error { padding:20px;color:var(--text-muted);text-align:center;display:grid;gap:12px; }
+@media(max-width:800px) { .image-compare{padding:10px}.compare-panels.split{grid-template-columns:1fr;grid-template-rows:repeat(2,minmax(0,1fr))}.compare-tray{flex-wrap:wrap;width:calc(100vw - 24px)}.compare-tray>span{max-width:110px}.ai-session-heading{top:-20px}.workflow-dialog{width:calc(100vw - 24px)}.workflow-row{grid-template-columns:24px 18px minmax(0,1fr) 28px 28px auto;gap:4px}.workflow-row button{padding:6px!important} }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important;transition:none!important;scroll-behavior:auto!important; } }

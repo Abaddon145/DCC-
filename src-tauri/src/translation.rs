@@ -17,6 +17,57 @@ const SERVICE: &str = "DCCAssetLibrary.BaiduTranslate";
 const ACCOUNT: &str = "default";
 const ENDPOINT: &str = "https://fanyi-api.baidu.com/api/trans/vip/translate";
 const CHUNK_CHARS: usize = 1800;
+
+pub(crate) fn translation_queries(
+    request: &TranslationRequest,
+    terms: &[TranslationTerm],
+) -> Result<Vec<crate::models::TranslationQuery>, String> {
+    if request.source_language == request.target_language {
+        return Err("源语言和目标语言不能相同".into());
+    }
+    let from = language_code(&request.source_language)?;
+    let to = language_code(&request.target_language)?;
+    let tags = request
+        .fields
+        .tags
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && exact_tag_term(terms, s).is_none())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut queries = Vec::new();
+    for (field, text) in [
+        ("name", request.fields.name.as_str()),
+        ("description", request.fields.description.as_str()),
+        ("license", request.fields.license.as_str()),
+        ("tags", tags.as_str()),
+    ] {
+        let (masked, tokens, _) = protect_text(text, terms, field);
+        let (_, sources) = isolated_translation_parts(&masked, &tokens)?;
+        for batch in fragment_batches(&sources) {
+            queries.push(crate::models::TranslationQuery {
+                from: from.into(),
+                to: to.into(),
+                text: batch
+                    .iter()
+                    .map(|i| sources[*i].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
+    }
+    Ok(queries)
+}
+
+fn exact_tag_term<'a>(terms: &'a [TranslationTerm], source: &str) -> Option<&'a TranslationTerm> {
+    terms.iter().find(|term| {
+        if term.case_sensitive {
+            term.source == source
+        } else {
+            term.source.eq_ignore_ascii_case(source)
+        }
+    })
+}
 // Baidu's standard plan allows one request per second. Leave a little margin
 // for clock and network jitter, and share the queue across all translation jobs.
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1200);
@@ -178,7 +229,7 @@ async fn wait_for_request_slot() {
     }
 }
 
-async fn translate_piece_items(
+async fn baidu_translate_piece_items(
     client: &Client,
     credential: &Credential,
     text: &str,
@@ -250,16 +301,13 @@ async fn translate_piece_items(
     Err(last.unwrap_or_else(|| "翻译请求失败".into()))
 }
 
-async fn translate_piece(
+pub(crate) async fn request_baidu(
     client: &Client,
-    credential: &Credential,
     text: &str,
     from: &str,
     to: &str,
-) -> Result<String, String> {
-    Ok(translate_piece_items(client, credential, text, from, to)
-        .await?
-        .join("\n"))
+) -> Result<Vec<String>, String> {
+    baidu_translate_piece_items(client, &load_credentials()?, text, from, to).await
 }
 
 fn provider_error(code: &str, message: Option<&str>) -> String {
@@ -456,6 +504,10 @@ fn push_plain_line(line: &str, parts: &mut Vec<TranslationPart>, sources: &mut V
     if line.is_empty() {
         return;
     }
+    if !line.chars().any(char::is_alphabetic) {
+        parts.push(TranslationPart::Literal(line.into()));
+        return;
+    }
     let Some(content_start) = line.find(|value: char| !value.is_whitespace()) else {
         parts.push(TranslationPart::Literal(line.into()));
         return;
@@ -499,33 +551,7 @@ fn isolated_translation_parts(
     Ok((parts, sources))
 }
 
-fn normalized_provider_items(items: Vec<String>, expected: usize) -> Vec<String> {
-    if items.len() == expected {
-        return items;
-    }
-    let expanded = items
-        .iter()
-        .flat_map(|item| item.split('\n'))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if expanded.len() == expected {
-        expanded
-    } else {
-        items
-    }
-}
-
-async fn translate_isolated_sources(
-    client: &Client,
-    credential: &Credential,
-    sources: &[String],
-    from: &str,
-    to: &str,
-) -> Result<Vec<String>, String> {
-    if sources.is_empty() {
-        return Ok(Vec::new());
-    }
-
+fn fragment_batches(sources: &[String]) -> Vec<Vec<usize>> {
     let mut initial_batches = Vec::<Vec<usize>>::new();
     let mut current = Vec::new();
     let mut current_chars = 0;
@@ -541,29 +567,27 @@ async fn translate_isolated_sources(
     if !current.is_empty() {
         initial_batches.push(current);
     }
+    initial_batches
+}
 
-    let mut pending = initial_batches;
+async fn translate_isolated_sources(
+    client: &Client,
+    session: &crate::translation_service::TranslationSession<'_>,
+    sources: &[String],
+    from: &str,
+    to: &str,
+) -> Result<Vec<String>, String> {
     let mut translated = vec![None; sources.len()];
-    while let Some(mut batch) = pending.pop() {
+    for batch in fragment_batches(sources) {
         let query = batch
             .iter()
             .map(|index| sources[*index].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let values = normalized_provider_items(
-            translate_piece_items(client, credential, &query, from, to).await?,
-            batch.len(),
-        );
-        if values.len() == batch.len() {
-            for (index, value) in batch.into_iter().zip(values) {
-                translated[index] = Some(value);
-            }
-        } else if batch.len() > 1 {
-            let right = batch.split_off(batch.len() / 2);
-            pending.push(right);
-            pending.push(batch);
-        } else {
-            translated[batch[0]] = Some(values.join("\n"));
+        // The shared session validates, repairs and caches fragment boundaries.
+        let values = session.items(client, &query, from, to).await?;
+        for (index, value) in batch.into_iter().zip(values) {
+            translated[index] = Some(value);
         }
     }
 
@@ -630,7 +654,7 @@ fn restore_tokens(value: &str, tokens: &[ProtectedToken]) -> Result<String, Stri
 
 async fn translate_text(
     client: &Client,
-    credential: &Credential,
+    session: &crate::translation_service::TranslationSession<'_>,
     text: &str,
     from: &str,
     to: &str,
@@ -646,7 +670,7 @@ async fn translate_text(
     // locally. This avoids a provider dropping or rewriting a placeholder and
     // forcing the entire long description to fall back to its source text.
     let (parts, sources) = isolated_translation_parts(&masked, &tokens)?;
-    let translated = translate_isolated_sources(client, credential, &sources, from, to).await?;
+    let translated = translate_isolated_sources(client, session, &sources, from, to).await?;
     Ok(TranslationOutcome {
         value: assemble_isolated_translation(&parts, &translated),
         applications,
@@ -667,7 +691,7 @@ fn parsed_tag_lines(value: &str, expected: usize) -> Option<Vec<String>> {
 
 async fn translate_tags(
     client: &Client,
-    credential: &Credential,
+    session: &crate::translation_service::TranslationSession<'_>,
     tags: &[String],
     from: &str,
     to: &str,
@@ -696,13 +720,7 @@ async fn translate_tags(
     let mut protected_token_count = 0;
     let mut warnings = Vec::new();
     for (index, source) in sources.iter().enumerate() {
-        if let Some(term) = terms.iter().find(|term| {
-            if term.case_sensitive {
-                term.source == *source
-            } else {
-                term.source.eq_ignore_ascii_case(source)
-            }
-        }) {
+        if let Some(term) = exact_tag_term(terms, source) {
             let target = if term.mode == "preserve" {
                 (*source).to_string()
             } else {
@@ -728,26 +746,25 @@ async fn translate_tags(
             .map(|(_, value)| *value)
             .collect::<Vec<_>>()
             .join("\n");
-        let outcome =
-            translate_text(client, credential, &combined, from, to, terms, "tags").await?;
-        let translated_values =
-            if let Some(lines) = parsed_tag_lines(&outcome.value, unresolved.len()) {
-                applications.extend(outcome.applications);
-                protected_token_count += outcome.protected_token_count;
-                warnings.extend(outcome.warnings);
-                lines
-            } else {
-                let mut lines = Vec::with_capacity(unresolved.len());
-                for (_, source) in &unresolved {
-                    let item =
-                        translate_text(client, credential, source, from, to, terms, "tags").await?;
-                    applications.extend(item.applications);
-                    protected_token_count += item.protected_token_count;
-                    warnings.extend(item.warnings);
-                    lines.push(item.value);
-                }
-                lines
-            };
+        let outcome = translate_text(client, session, &combined, from, to, terms, "tags").await?;
+        let translated_values = if let Some(lines) =
+            parsed_tag_lines(&outcome.value, unresolved.len())
+        {
+            applications.extend(outcome.applications);
+            protected_token_count += outcome.protected_token_count;
+            warnings.extend(outcome.warnings);
+            lines
+        } else {
+            let mut lines = Vec::with_capacity(unresolved.len());
+            for (_, source) in &unresolved {
+                let item = translate_text(client, session, source, from, to, terms, "tags").await?;
+                applications.extend(item.applications);
+                protected_token_count += item.protected_token_count;
+                warnings.extend(item.warnings);
+                lines.push(item.value);
+            }
+            lines
+        };
         for ((index, _), translated) in unresolved.into_iter().zip(translated_values) {
             values[index] = Some(translated);
         }
@@ -785,6 +802,7 @@ fn merge_applications(values: Vec<TranslationTermApplication>) -> Vec<Translatio
 }
 
 pub async fn translate(
+    state: &crate::state::AppState,
     request: TranslationRequest,
     terms: &[TranslationTerm],
 ) -> Result<TranslationPreview, String> {
@@ -793,7 +811,10 @@ pub async fn translate(
     }
     let from = language_code(&request.source_language)?;
     let to = language_code(&request.target_language)?;
-    let credential = load_credentials()?;
+    let session = crate::translation_service::TranslationSession::new(
+        &state.translation_service,
+        state.translation_preferences()?,
+    );
     let client = client()?;
     let character_count = request.fields.name.chars().count()
         + request.fields.description.chars().count()
@@ -813,7 +834,7 @@ pub async fn translate(
         ("description", request.fields.description.as_str()),
         ("license", request.fields.license.as_str()),
     ] {
-        match translate_text(&client, &credential, source, from, to, terms, field).await {
+        match translate_text(&client, &session, source, from, to, terms, field).await {
             Ok(outcome) => {
                 match field {
                     "name" => preview.fields.name = outcome.value,
@@ -836,7 +857,7 @@ pub async fn translate(
             _ => {}
         }
     }
-    match translate_tags(&client, &credential, &request.fields.tags, from, to, terms).await {
+    match translate_tags(&client, &session, &request.fields.tags, from, to, terms).await {
         Ok((tags, applications, protected, warnings)) => {
             preview.fields.tags = tags;
             preview.applied_terms.extend(applications);
@@ -852,13 +873,36 @@ pub async fn translate(
             preview.warnings.push(format!("tags：{error}"));
         }
     }
+    preview.warnings.extend(session.notes());
     preview.applied_terms = merge_applications(preview.applied_terms);
     Ok(preview)
 }
 
-pub async fn test_service() -> Result<TranslationTestResult, String> {
-    let credential = load_credentials()?;
-    let value = translate_piece(&client()?, &credential, "test", "en", "zh").await?;
+pub async fn test_service(
+    state: &crate::state::AppState,
+    provider: &str,
+) -> Result<TranslationTestResult, String> {
+    if !matches!(provider, "baidu" | "deepseek") {
+        return Err("未知的翻译服务".into());
+    }
+    if !state.translation_service.configured(provider) {
+        return Err(format!("尚未配置 {provider} 凭据"));
+    }
+    state.translation_service.clear_blocks();
+    let mut policy = state.translation_preferences()?;
+    policy.cache_enabled = false;
+    policy.provider_order = if provider == "deepseek" {
+        vec!["deepseek".into(), "baidu".into()]
+    } else {
+        vec!["baidu".into(), "deepseek".into()]
+    };
+    policy.auto_fallback = false;
+    let session =
+        crate::translation_service::TranslationSession::new(&state.translation_service, policy);
+    let value = session
+        .items(&client()?, "test", "en", "zh")
+        .await?
+        .join("\n");
     Ok(TranslationTestResult {
         success: true,
         message: format!("连接成功，测试译文：{value}"),
@@ -868,6 +912,37 @@ pub async fn test_service() -> Result<TranslationTestResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cost_terms_and_exact_tags_are_local() {
+        let request: TranslationRequest = serde_json::from_value(serde_json::json!({"sourceLanguage":"en","targetLanguage":"zh-CN","fields":{"name":"Skeletal Mesh UE 5.5 .uasset https://fab.com/test", "description":"123 +", "license":"", "tags":["Skeletal Mesh"]}})).unwrap();
+        let terms = vec![term("Skeletal Mesh", "骨骼网格体", "translate", "builtin")];
+        assert!(translation_queries(&request, &terms).unwrap().is_empty());
+    }
+    #[test]
+    fn cost_long_text_matches_live_fragment_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_state(dir.path());
+        state.translation_service = crate::translation_service::TranslationService::for_test(
+            &dir.path().join("test-cache.sqlite"),
+            true,
+        );
+        let request: TranslationRequest = serde_json::from_value(serde_json::json!({"sourceLanguage":"en","targetLanguage":"zh-CN","fields":{"name":"", "description":"courtyard nature ".repeat(350), "license":"", "tags":[]}})).unwrap();
+        let queries = translation_queries(&request, &[]).unwrap();
+        assert!(queries.len() > 1);
+        assert!(queries
+            .iter()
+            .all(|q| q.text.chars().count() <= CHUNK_CHARS && q.to == "zh"));
+        let estimate = state
+            .translation_service
+            .estimate_queries(&queries, &Default::default())
+            .unwrap();
+        let preview = tauri::async_runtime::block_on(translate(&state, request, &[])).unwrap();
+        assert!(preview.failed_fields.is_empty());
+        assert_eq!(
+            state.translation_service.usage().unwrap().deepseek_tokens,
+            estimate.online_requests as u64
+        );
+    }
     fn term(source: &str, target: &str, mode: &str, origin: &str) -> TranslationTerm {
         TranslationTerm {
             id: format!("{origin}-{source}"),
@@ -963,11 +1038,19 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_provider_items_that_return_multiple_lines_as_one_item() {
-        assert_eq!(
-            normalized_provider_items(vec!["第一段\n第二段".into()], 2),
-            vec!["第一段", "第二段"]
+    fn punctuation_between_protected_terms_is_kept_locally() {
+        let terms = vec![
+            term("Nanite", "Nanite", "preserve", "builtin"),
+            term("Lumen", "Lumen", "preserve", "builtin"),
+        ];
+        let source = "Nanite / Lumen: UE 5.5 (2026)\n- 100% ✅";
+        let (masked, tokens, _) = protect_text(source, &terms, "description");
+        let (parts, sources) = isolated_translation_parts(&masked, &tokens).unwrap();
+        assert!(
+            sources.is_empty(),
+            "do not ask the provider to translate punctuation"
         );
+        assert_eq!(assemble_isolated_translation(&parts, &[]), source);
     }
 
     #[test]
