@@ -17,6 +17,36 @@ const PROMPT_VERSION: &str = "dcc-translation-v1";
 const MAX_OUTPUT: u64 = 4096;
 const MAX_RESPONSE_SPLITS: usize = 4;
 
+pub(crate) fn analysis_budget(body: &serde_json::Value, image_count: usize) -> Result<u64, String> {
+    let mut urls = vec![];
+    if let Some(messages) = body["messages"].as_array() {
+        for message in messages {
+            if let Some(blocks) = message["content"].as_array() {
+                for block in blocks {
+                    if block["type"] == "image_url" {
+                        urls.push(block["image_url"]["url"].as_str().ok_or("分析图片无效")?);
+                    }
+                }
+            }
+        }
+    }
+    if image_count > 4
+        || urls.len() != image_count
+        || urls
+            .iter()
+            .any(|s| !s.starts_with("data:image/jpeg;base64,") || s.len() > 350_000)
+    {
+        return Err("分析图片数量或大小无效".into());
+    }
+    Ok(body
+        .to_string()
+        .len()
+        .saturating_sub(urls.iter().map(|s| s.len()).sum()) as u64
+        + 512
+        + body["max_tokens"].as_u64().unwrap_or(4096)
+        + image_count as u64 * 2048)
+}
+
 #[derive(Debug)]
 pub(crate) struct CreativeReply {
     pub content: Result<String, String>,
@@ -138,6 +168,25 @@ pub struct TranslationService {
     mock_configured: Option<bool>,
 }
 impl TranslationService {
+    #[cfg(test)]
+    pub(crate) async fn creative_analysis_fixture(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        image_count: usize,
+        url: &str,
+    ) -> Result<CreativeReply, String> {
+        self.creative_exchange_reserved(
+            body,
+            limit,
+            cancel,
+            "local-analysis-fixture",
+            url,
+            analysis_budget(body, image_count)?,
+        )
+        .await
+    }
     pub fn open(path: &Path) -> Result<Self, String> {
         let db = Connection::open(path).map_err(|e| format!("打开翻译缓存失败：{e}"))?;
         db.busy_timeout(Duration::from_secs(5))
@@ -435,6 +484,18 @@ impl TranslationService {
         self.creative_exchange(body, limit, cancel, &key, DEEPSEEK_URL)
             .await
     }
+    pub(crate) async fn creative_analysis_json_with_usage(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        image_count: usize,
+    ) -> Result<CreativeReply, String> {
+        let reserved = analysis_budget(body, image_count)?;
+        let key = deepseek_key()?;
+        self.creative_exchange_reserved(body, limit, cancel, &key, DEEPSEEK_URL, reserved)
+            .await
+    }
     // URL and key are private implementation inputs. The command surface never accepts them.
     #[cfg(test)]
     pub(crate) async fn creative_json_fixture(
@@ -456,6 +517,20 @@ impl TranslationService {
         key: &str,
         url: &str,
     ) -> Result<CreativeReply, String> {
+        let reserved =
+            body.to_string().len() as u64 + 512 + body["max_tokens"].as_u64().unwrap_or(8192);
+        self.creative_exchange_reserved(body, limit, cancel, key, url, reserved)
+            .await
+    }
+    async fn creative_exchange_reserved(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        key: &str,
+        url: &str,
+        reserved: u64,
+    ) -> Result<CreativeReply, String> {
         use std::sync::atomic::Ordering;
         let builder = Client::builder();
         // Local test servers must not pass through Windows system proxies.
@@ -466,8 +541,6 @@ impl TranslationService {
             .build()
             .map_err(|_| "初始化 AI 请求失败")?;
         let month = month();
-        let reserved =
-            body.to_string().len() as u64 + 512 + body["max_tokens"].as_u64().unwrap_or(8192);
         for attempt in 0..2 {
             if cancel.load(Ordering::SeqCst) {
                 return Err("已取消生成".into());

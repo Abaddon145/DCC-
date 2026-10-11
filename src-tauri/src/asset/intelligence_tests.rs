@@ -501,3 +501,280 @@ fn analysis_cache_directory_cannot_redirect_through_junction() {
     .contains("链接"));
     assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 0);
 }
+
+fn analysis_answer() -> serde_json::Value {
+    serde_json::json!({"description":"雨夜未来城市","keywords":["雨夜","赛博朋克"],"scene":"城市","style":"电影感","camera":"广角","lighting":"霓虹","mood":"安静"})
+}
+#[test]
+fn analysis_rejects_empty_invalid_or_oversized_output() {
+    use crate::ai::analyzer::parse_answer;
+    assert!(parse_answer(&analysis_answer().to_string()).is_ok());
+    assert!(parse_answer("not json").is_err());
+    let mut value = analysis_answer();
+    value["command"] = serde_json::json!("delete");
+    assert!(parse_answer(&value.to_string()).is_err());
+    value = analysis_answer();
+    value["description"] = serde_json::json!("字".repeat(8001));
+    assert!(parse_answer(&value.to_string()).is_err());
+    value = analysis_answer();
+    value["keywords"] = serde_json::json!(vec!["a"; 101]);
+    assert!(parse_answer(&value.to_string()).is_err());
+    value["keywords"] = serde_json::json!(["a".repeat(101)]);
+    assert!(parse_answer(&value.to_string()).is_err());
+    for key in [
+        "description",
+        "scene",
+        "style",
+        "camera",
+        "lighting",
+        "mood",
+    ] {
+        value[key] = serde_json::json!("");
+    }
+    value["keywords"] = serde_json::json!([]);
+    assert!(parse_answer(&value.to_string()).is_err());
+    assert!(parse_answer(&format!("{}{}", analysis_answer(), " ".repeat(65536))).is_err());
+}
+#[test]
+fn analysis_cancel_or_library_switch_never_commits_late_reply() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    let (dir, mut db) = fixture();
+    let owner = asset(&db, "资料");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    let request = AnalysisRequest {
+        asset_id: owner.clone(),
+        preview_id: preview.id,
+        force: false,
+    };
+    assert!(super::analysis::complete_confirmed(
+        &mut db,
+        dir.path(),
+        &request,
+        &analysis_answer().to_string(),
+        Some(50),
+        &|| true
+    )
+    .is_err());
+    let foreign = tempfile::tempdir().unwrap();
+    assert!(super::analysis::complete_confirmed(
+        &mut db,
+        foreign.path(),
+        &request,
+        &analysis_answer().to_string(),
+        Some(50),
+        &|| false
+    )
+    .is_err());
+    assert!(super::analysis::latest(&db, &owner).unwrap().is_none());
+    assert!(super::analysis::complete_confirmed(
+        &mut db,
+        dir.path(),
+        &request,
+        &analysis_answer().to_string(),
+        Some(50),
+        &|| false
+    )
+    .is_ok());
+}
+#[test]
+fn analysis_appends_keywords_without_overwriting_concurrent_tags() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    let (dir, mut db) = fixture();
+    let owner = asset(&db, "图像");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    let input = crate::ai::analyzer::load_confirmed(
+        &db,
+        dir.path(),
+        &AnalysisRequest {
+            asset_id: owner.clone(),
+            preview_id: preview.id,
+            force: false,
+        },
+    )
+    .unwrap();
+    let answer = serde_json::from_value(analysis_answer()).unwrap();
+    let saved = super::analysis::save(&db, &input, &answer, None).unwrap();
+    super::service::set_tags(
+        &mut db,
+        &owner,
+        "zh-CN",
+        &["原有".into(), "稍后编辑".into(), "雨夜".into()],
+    )
+    .unwrap();
+    super::analysis::apply_keywords(
+        &mut db,
+        &owner,
+        &saved.id,
+        "zh-CN",
+        &["雨夜".into(), "赛博朋克".into()],
+    )
+    .unwrap();
+    let tags = repository::read_asset(&db, &owner, "zh-CN").unwrap().tags;
+    assert_eq!(tags.len(), 4);
+    assert!(tags.contains(&"稍后编辑".into()));
+    let before = tags;
+    assert!(super::analysis::apply_keywords(
+        &mut db,
+        &owner,
+        &saved.id,
+        "zh-CN",
+        &["未被建议".into()]
+    )
+    .is_err());
+    let other = asset(&db, "另一资产");
+    assert!(
+        super::analysis::apply_keywords(&mut db, &other, &saved.id, "zh-CN", &["雨夜".into()])
+            .is_err()
+    );
+    assert_eq!(
+        repository::read_asset(&db, &owner, "zh-CN").unwrap().tags,
+        before
+    );
+}
+#[test]
+fn analysis_job_uses_approved_input_and_saves_valid_reply() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    use std::io::{Read, Write};
+    let (dir, mut db) = fixture();
+    let owner = asset(&db, "选中图像");
+    managed_image(&db, dir.path(), &owner);
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Visual, &|| {
+            false
+        })
+        .unwrap();
+    let request = AnalysisRequest {
+        asset_id: owner.clone(),
+        preview_id: preview.id.clone(),
+        force: false,
+    };
+    let input = crate::ai::analyzer::load_confirmed(&db, dir.path(), &request).unwrap();
+    let body = crate::ai::analyzer::request_body(&input);
+    assert!(body["messages"][1]["content"][1]["image_url"]["url"] == preview.images[0].data_url);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let expected = body.clone();
+    let answer = analysis_answer().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = vec![];
+        let mut buf = [0u8; 4096];
+        let start = loop {
+            let n = socket.read(&mut buf).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buf[..n]);
+            if let Some(p) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p + 4;
+            }
+        };
+        let header = String::from_utf8_lossy(&bytes[..start]);
+        let length: usize = header
+            .lines()
+            .find_map(|l| {
+                l.to_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|s| s.trim().parse().unwrap())
+            })
+            .unwrap();
+        while bytes.len() < start + length {
+            let n = socket.read(&mut buf).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes[start..start + length]).unwrap(),
+            expected
+        );
+        let reply=serde_json::json!({"usage":{"total_tokens":67},"choices":[{"finish_reason":"stop","message":{"content":answer}}]}).to_string();
+        write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).unwrap();
+    });
+    let service =
+        crate::translation_service::TranslationService::open(&dir.path().join("usage.db")).unwrap();
+    let reply = tauri::async_runtime::block_on(service.creative_analysis_fixture(
+        &body,
+        preview.estimated_tokens,
+        &std::sync::atomic::AtomicBool::new(false),
+        1,
+        &url,
+    ))
+    .unwrap();
+    let saved = super::analysis::complete_confirmed(
+        &mut db,
+        dir.path(),
+        &request,
+        &reply.content.unwrap(),
+        reply.used,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(saved.actual_tokens, Some(67));
+    assert_eq!(service.usage().unwrap().creative_tokens, 67);
+    server.join().unwrap();
+}
+#[test]
+fn analysis_task_is_typed_and_duplicate_submission_is_coalesced() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = crate::tasks::TaskRegistry::load(dir.path().join("tasks.json"));
+    let payload:crate::tasks::TaskRequest=serde_json::from_value(serde_json::json!({"kind":"aiAnalyze","request":{"assetId":uuid::Uuid::new_v4().to_string(),"previewId":uuid::Uuid::new_v4().to_string(),"force":false}})).expect("analysis task supported");
+    let (first, _) = registry.submit("library".into(), payload.clone()).unwrap();
+    let (second, _) = registry.submit("library".into(), payload).unwrap();
+    assert_eq!(first.id, second.id);
+}
+#[test]
+fn analysis_cached_result_can_be_read_by_id_without_returning_newer_unrelated_input() {
+    use super::intelligence_models::{AnalysisMode, AnalysisRequest};
+    let (dir, db) = fixture();
+    let owner = asset(&db, "输入");
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    let input = crate::ai::analyzer::load_confirmed(
+        &db,
+        dir.path(),
+        &AnalysisRequest {
+            asset_id: owner.clone(),
+            preview_id: preview.id,
+            force: false,
+        },
+    )
+    .unwrap();
+    let first = super::analysis::save(
+        &db,
+        &input,
+        &serde_json::from_value(analysis_answer()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut different = analysis_answer();
+    different["description"] = serde_json::json!("另一版结果");
+    let second = super::analysis::save(
+        &db,
+        &input,
+        &serde_json::from_value(different).unwrap(),
+        None,
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE asset_ai_analysis SET created_at='2099-01-01' WHERE id=?1",
+        [&second.id],
+    )
+    .unwrap();
+    assert_eq!(
+        super::analysis::by_id(&db, &owner, &first.id)
+            .unwrap()
+            .unwrap()
+            .id,
+        first.id
+    );
+    let other = asset(&db, "别的素材");
+    assert!(super::analysis::by_id(&db, &other, &first.id)
+        .unwrap()
+        .is_none());
+}

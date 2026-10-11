@@ -18,6 +18,8 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    #[serde(rename = "aiAnalyze")]
+    AIAnalyze(crate::asset::intelligence_models::AnalysisRequest),
     Download(crate::downloader::models::DownloadRequest),
     AssetMediaImport {
         #[serde(rename = "assetId")]
@@ -68,6 +70,7 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::AIAnalyze(_) => "资产 AI 分析",
             Self::Download(_) => "下载",
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
@@ -94,6 +97,12 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::AIAnalyze(r) => {
+                Uuid::parse_str(&r.asset_id).map_err(|_| "分析资产标识无效")?;
+                Uuid::parse_str(&r.preview_id)
+                    .map(|_| ())
+                    .map_err(|_| "分析资料标识无效".into())
+            }
             Self::Download(request) => crate::downloader::domain::validate_request(request),
             Self::AssetImport(request) => crate::asset::service::validate_import(request),
             Self::AssetProcess { asset_id, .. } => Uuid::parse_str(asset_id)
@@ -518,6 +527,9 @@ impl TaskRegistry {
             pause_requested: false,
         };
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let TaskRequest::AIAnalyze(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
+        }
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
             if let Some(existing)=store.entries.iter().find(|value|active(&value.status)&&matches!(&value.payload,TaskRequest::ModelThumbnail{entry_id:id} if id==entry_id)){return Ok((existing.clone(),false))}
         }
@@ -934,6 +946,7 @@ pub fn start_library_task_for_library(
         TaskRequest::AssetScan { .. }
             | TaskRequest::AssetImport(_)
             | TaskRequest::AssetProcess { .. }
+            | TaskRequest::AIAnalyze(_)
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -1106,6 +1119,7 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::AIAnalyze(request) => crate::asset::analysis::run(app, task, request).await,
         TaskRequest::AssetProcess { asset_id, force } => {
             tauri::async_runtime::spawn_blocking(move || {
                 let state = app.state::<AppState>();

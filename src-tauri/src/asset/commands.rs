@@ -40,10 +40,30 @@ pub fn get_asset_analysis(
     state: State<AppState>,
     expected_library_id: String,
     asset_id: String,
+    analysis_id: Option<String>,
 ) -> Result<Option<super::intelligence_models::AssetAnalysis>, String> {
     uuid(&asset_id)?;
     current(state.with_library_if_id(&expected_library_id, |db, _| {
-        super::analysis::latest(db, &asset_id)
+        if let Some(id) = &analysis_id {
+            super::analysis::by_id(db, &asset_id, id)
+        } else {
+            super::analysis::latest(db, &asset_id)
+        }
+    }))
+}
+#[tauri::command]
+pub fn apply_asset_analysis_tags(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+    analysis_id: String,
+    locale: String,
+    selected: Vec<String>,
+) -> Result<(), String> {
+    uuid(&asset_id)?;
+    uuid(&analysis_id)?;
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::analysis::apply_keywords(db, &asset_id, &analysis_id, &locale, &selected)
     }))
 }
 #[tauri::command]

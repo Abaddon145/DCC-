@@ -223,14 +223,23 @@ pub fn set_tags(
     locale: &str,
     tags: &[String],
 ) -> Result<(), String> {
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    set_tags_in_tx(&tx, core_id, locale, tags)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+pub(crate) fn set_tags_in_tx(
+    tx: &Connection,
+    core_id: &str,
+    locale: &str,
+    tags: &[String],
+) -> Result<(), String> {
     if !matches!(locale, "zh-CN" | "en")
         || tags.len() > 200
         || tags.iter().any(|t| t.chars().count() > 100)
     {
         return Err("标签语言、数量或长度无效".into());
     }
-    let origin = active_origin(db, core_id)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let origin = active_origin(tx, core_id)?;
     if origin.kind == "media" {
         crate::media_library::upsert_tags(&tx, &origin.id, tags)?;
         crate::media_library::reindex(&tx, &origin.id)?;
@@ -263,7 +272,7 @@ pub fn set_tags(
         )
         .map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 pub fn set_tag_color(db: &Connection, tag_id: &str, color: &str) -> Result<(), String> {
     if color.len() != 7

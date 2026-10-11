@@ -268,6 +268,7 @@ pub fn run() {
                     asset::commands::get_asset_graph,
                     asset::commands::prepare_asset_analysis,
                     asset::commands::get_asset_analysis,
+                    asset::commands::apply_asset_analysis_tags,
                     asset::commands::get_core_asset,
                     asset::commands::get_asset_scan_page,
                     asset::commands::set_core_asset_tags,
