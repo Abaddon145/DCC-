@@ -436,3 +436,245 @@ fn old_asset_editor_cannot_remove_an_original_used_by_a_version() {
         1
     );
 }
+
+#[test]
+fn folder_scan_streams_supported_files_and_reports_duplicates_and_reserved_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("学习素材");
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(&library).unwrap();
+    for (name, bytes) in [
+        ("a.png", b"image".as_slice()),
+        ("b.png", b"image"),
+        ("clip.mp4", b"video"),
+        ("music.mp3", b"audio"),
+        ("Mesh.uasset", b"unreal"),
+        ("unknown.txt", b"text"),
+    ] {
+        std::fs::write(root.join(name), bytes).unwrap();
+    }
+    std::fs::write(root.join(".git/ignored.png"), b"git").unwrap();
+    let manifest = library.join("scan.jsonl");
+    let summary = super::scanner::scan(&root, &library, &manifest, &|_| {}, &|| false).unwrap();
+    assert_eq!(summary.total, 6);
+    assert_eq!(summary.importable, 3);
+    assert_eq!(summary.duplicate, 1);
+    assert_eq!(summary.unsupported, 2);
+    assert_eq!(summary.failed, 0);
+}
+
+#[test]
+fn core_import_deduplicates_mixed_rows_and_preserves_source_without_semantic_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    let mut db = crate::db::open_database(&library.join("library.db")).unwrap();
+    let source = dir.path().join("原件.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([4, 5, 6, 255]))
+        .save(&source)
+        .unwrap();
+    let invalid = dir.path().join("损坏.png");
+    std::fs::write(&invalid, b"broken").unwrap();
+    let before = std::fs::read(&source).unwrap();
+    let request: CoreImportRequest =
+        serde_json::from_value(serde_json::json!({"paths":[source,source,invalid]})).unwrap();
+    let result =
+        super::service::import_files(&mut db, &library, None, &request, &|_, _| {}, &|| false)
+            .unwrap();
+    assert_eq!((result.imported, result.skipped, result.failed), (1, 1, 1));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_core", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entry_tags", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM project_media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    db.execute("UPDATE media_entries SET deleted_at='now'", [])
+        .unwrap();
+    let result =
+        super::service::import_files(&mut db, &library, None, &request, &|_, _| {}, &|| false)
+            .unwrap();
+    assert!(result.rows[0].message.contains("回收站"));
+}
+
+#[test]
+fn scan_pages_cancel_safely_and_import_revalidates_changed_files_and_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("source");
+    let base = dir.path().join("library");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&base).unwrap();
+    let source = root.join("a.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let task = uuid::Uuid::new_v4().to_string();
+    let manifest = super::scanner::manifest_path(&base, &task).unwrap();
+    super::scanner::scan(&root, &base, &manifest, &|_| {}, &|| false).unwrap();
+    let page = super::scanner::read_page(&manifest, 0, 1).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        super::scanner::read_page(&manifest, 1, 1)
+            .unwrap()
+            .items
+            .len(),
+        0
+    );
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 8, 7, 255]))
+        .save(&source)
+        .unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    let mut req: CoreImportRequest = serde_json::from_value(
+        serde_json::json!({"scanTaskId":task,"scanRowIds":[page.items[0].id]}),
+    )
+    .unwrap();
+    let result =
+        super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    assert_eq!(result.failed, 1);
+    assert!(result.rows[0].message.contains("发生变化"));
+    req.scan_row_ids = vec![uuid::Uuid::new_v4().to_string()];
+    assert!(
+        super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).is_err()
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(super::scanner::manifest_path(&base, "../secret").is_err());
+    let stopped = super::scanner::scan(&root, &base, &manifest, &|_| {}, &|| true).unwrap();
+    assert!(stopped.cancelled);
+    assert_eq!(stopped.total, 0);
+    assert_eq!(
+        super::scanner::read_page(&manifest, 0, 20).unwrap().total,
+        0
+    );
+}
+
+#[test]
+fn repeated_import_links_only_explicit_project_and_hashing_can_be_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("library");
+    std::fs::create_dir_all(&base).unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','目标项目','scene','active','now','now')",[]).unwrap();
+    let source = dir.path().join("a.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let mut req: CoreImportRequest =
+        serde_json::from_value(serde_json::json!({"paths":[source]})).unwrap();
+    super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    req.project_id = Some("project".into());
+    let result =
+        super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    assert_eq!(result.skipped, 1);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM project_media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    super::service::import_files(&mut db, &base, None, &req, &|_, _| {}, &|| false).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM project_media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let file = dir.path().join("large.bin");
+    std::fs::write(&file, vec![1_u8; 200_000]).unwrap();
+    let checks = std::cell::Cell::new(0);
+    assert!(crate::file_digest::digest_file_controlled(&file, &|| {
+        checks.set(checks.get() + 1);
+        checks.get() > 2
+    })
+    .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_junction_scan_does_not_follow_target() {
+    use std::os::windows::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let target = dir.path().join("target");
+    let library = dir.path().join("library");
+    for path in [&root, &target, &library] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(target.join("hidden.png"), b"outside").unwrap();
+    std::fs::write(root.join("visible.png"), b"inside").unwrap();
+    let link = root.join("junction");
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&target)
+        .creation_flags(0x08000000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(super::scanner::is_link(&link));
+    let result = super::scanner::scan(
+        &root,
+        &library,
+        &library.join("manifest.jsonl"),
+        &|_| {},
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(result.total, 1);
+    assert!(super::scanner::scan(
+        &link,
+        &library,
+        &library.join("other.jsonl"),
+        &|_| {},
+        &|| false
+    )
+    .is_err());
+    assert!(super::scanner::validate_source(&link.join("hidden.png"), &library).is_err());
+}
+
+#[test]
+fn cancelled_atomic_copy_leaves_no_output_and_never_overwrites_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("large.bin");
+    let target = dir.path().join("copy.bin");
+    std::fs::write(&source, vec![42_u8; 200_000]).unwrap();
+    let checks = std::cell::Cell::new(0);
+    let control = crate::media::ProcessControl::new(move || {
+        checks.set(checks.get() + 1);
+        checks.get() > 1
+    });
+    assert!(crate::media::copy_atomic(&source, &target).is_err());
+    assert!(!target.exists());
+    drop(control);
+    std::fs::write(&target, b"existing").unwrap();
+    assert!(crate::media::copy_atomic(&source, &target).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+}

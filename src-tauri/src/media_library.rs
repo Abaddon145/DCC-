@@ -2,11 +2,10 @@ use crate::{images, media, models::*};
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashSet},
     fs,
-    io::{Cursor, Read},
+    io::Cursor,
     path::{Component, Path, PathBuf},
 };
 use uuid::Uuid;
@@ -204,20 +203,7 @@ fn validate_kind_path(kind: &MediaKind, path: &Path) -> Result<(String, String),
     Ok((ext, mime.into()))
 }
 fn digest(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("读取文件失败：{e}"))?;
-    let mut hasher = Sha256::new();
-    // This runs inside Tauri's WebView callback on Windows. A 1 MiB stack array here
-    // exhausted the already-deep WebView2 callback stack before the import could copy
-    // any file. Keep the I/O buffer on the heap and deliberately modest in size.
-    let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    crate::file_digest::digest_file_controlled(path, &media::process_stopped).map(|(_, hash)| hash)
 }
 fn safe_dependency(raw: &str) -> Result<PathBuf, String> {
     let clean = raw.trim().trim_matches('"').replace('\\', "/");
@@ -784,6 +770,10 @@ pub fn import_controlled_with_capture(
             )> = vec![];
             if request.kind == MediaKind::Image {
                 let stored = images::import_image_to(base_dir, &source, &root)?;
+                if digest(&media::safe_relative(base_dir, &stored.original_rel_path)?)? != checksum
+                {
+                    return Err("源文件在复制时发生变化，未写入素材库".into());
+                }
                 let main_id = Uuid::new_v4().to_string();
                 let thumb_id = Uuid::new_v4().to_string();
                 files.push((
@@ -827,6 +817,9 @@ pub fn import_controlled_with_capture(
                     .to_string();
                 let original_rel = format!("{root}/files/{file_name}");
                 media::copy_atomic(&source, &media::safe_relative(base_dir, &original_rel)?)?;
+                if digest(&media::safe_relative(base_dir, &original_rel)?)? != checksum {
+                    return Err("源文件在复制时发生变化，未写入素材库".into());
+                }
                 let (duration, width, height) = media::probe(ffprobe.as_deref(), &source);
                 files.push((
                     main_id.clone(),

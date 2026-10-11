@@ -28,6 +28,10 @@ pub enum TaskRequest {
         id: String,
     },
     MediaImport(MediaImportRequest),
+    AssetScan {
+        root: String,
+    },
+    AssetImport(crate::asset::models::CoreImportRequest),
     BrowserCapture {
         id: String,
     },
@@ -62,6 +66,8 @@ impl TaskRequest {
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
             Self::MediaImport(_) => "媒体导入",
+            Self::AssetScan { .. } => "资产目录扫描",
+            Self::AssetImport(_) => "资产批量导入",
             Self::BrowserCapture { .. } => "浏览器采集",
             Self::ModelThumbnail { .. } => "模型缩略图",
             Self::UeAssets(_) => "UE 原生资产（只读历史）",
@@ -82,6 +88,10 @@ impl TaskRequest {
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::Download(request) => crate::downloader::domain::validate_request(request),
+            Self::AssetImport(request) => crate::asset::service::validate_import(request),
+            Self::AssetScan { root } if root.trim().is_empty() || root.len() > 32768 => {
+                Err("扫描目录无效".into())
+            }
             Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             Self::AssetMediaImport { paths, .. } if paths.len() > 100 => {
                 Err("单次预览附件导入最多 100 项".into())
@@ -911,6 +921,24 @@ pub fn start_library_task_for_library(
 ) -> Result<LibraryTask, String> {
     if matches!(
         payload,
+        TaskRequest::AssetScan { .. } | TaskRequest::AssetImport(_)
+    ) && expected_library.is_none()
+    {
+        return Err("资产任务必须指定目标素材库".into());
+    }
+    if let TaskRequest::AssetImport(request) = &payload {
+        if let Some(id) = &request.scan_task_id {
+            let scan = state.tasks.get(id)?;
+            if Some(scan.library_id.as_str()) != expected_library
+                || !matches!(scan.payload, TaskRequest::AssetScan { .. })
+                || !matches!(scan.status.as_str(), "completed" | "stopped")
+            {
+                return Err("扫描任务未完成或不属于当前素材库".into());
+            }
+        }
+    }
+    if matches!(
+        payload,
         TaskRequest::Restore { .. } | TaskRequest::Migration(_)
     ) && state.reference_window_board_id()?.is_some()
     {
@@ -965,6 +993,9 @@ pub fn retry_library_task(
         );
     }
     let mut payload = previous.payload;
+    if let TaskRequest::AssetImport(request) = &mut payload {
+        retain_incomplete_core_import(request, previous.result.as_ref());
+    }
     if let TaskRequest::MediaImport(request) = &mut payload {
         if let Some(rows) = previous
             .result
@@ -980,6 +1011,27 @@ pub fn retry_library_task(
         }
     }
     start_library_task_for_library(app, state, payload, Some(&previous.library_id))
+}
+fn retain_incomplete_core_import(
+    request: &mut crate::asset::models::CoreImportRequest,
+    result: Option<&Value>,
+) {
+    let Some(rows) = result.and_then(|r| r.get("rows")).and_then(Value::as_array) else {
+        return;
+    };
+    let successful = |field: &str, id: &str| {
+        rows.iter().any(|row| {
+            row[field].as_str() == Some(id)
+                && matches!(row["status"].as_str(), Some("imported" | "duplicate"))
+        })
+    };
+    request.paths.retain(|path| !successful("path", path));
+    request
+        .scan_row_ids
+        .retain(|id| !successful("scanRowId", id));
+    if request.scan_task_id.is_some() && request.scan_row_ids.is_empty() {
+        request.scan_task_id = None;
+    }
 }
 async fn dispatch(app: AppHandle) {
     loop {
@@ -1042,6 +1094,103 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::AssetScan { root } => tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            let base = state.with_active_mut(|active| {
+                if active.marker.library_id != task.library_id {
+                    return Err("扫描所属素材库已切换".into());
+                }
+                Ok(active.base_dir.clone())
+            })?;
+            let manifest = crate::asset::scanner::manifest_path(&base, &task.id)?;
+            let last = std::cell::Cell::new(std::time::Instant::now());
+            let summary = crate::asset::scanner::scan(
+                Path::new(&root),
+                &base,
+                &manifest,
+                &|current| {
+                    if last.get().elapsed() > std::time::Duration::from_millis(300) {
+                        state.tasks.update(
+                            &task.id,
+                            current,
+                            0,
+                            String::new(),
+                            "scanning".into(),
+                            None,
+                        );
+                        last.set(std::time::Instant::now());
+                    }
+                },
+                &|| state.tasks.should_stop(&task.id),
+            )?;
+            let value = serde_json::to_value(summary).map_err(|e| e.to_string())?;
+            state.tasks.update(
+                &task.id,
+                value["total"].as_u64().unwrap_or(0) as usize,
+                0,
+                String::new(),
+                "scanning".into(),
+                Some(value.clone()),
+            );
+            Ok(value)
+        })
+        .await
+        .map_err(|e| e.to_string())?,
+        TaskRequest::AssetImport(request) => tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            let (base, path) = state.with_active_mut(|active| {
+                if active.marker.library_id != task.library_id {
+                    return Err("导入所属素材库已切换".into());
+                }
+                Ok((active.base_dir.clone(), active.db_path.clone()))
+            })?;
+            let mut db = open_media_worker_connection(&path)?;
+            let resource = app.path().resource_dir().ok();
+            let control_app = app.clone();
+            let control_id = task.id.clone();
+            let _control = crate::media::ProcessControl::new(move || {
+                control_app
+                    .state::<AppState>()
+                    .tasks
+                    .should_stop(&control_id)
+            });
+            let report = crate::asset::service::import_files(
+                &mut db,
+                &base,
+                resource.as_deref(),
+                &request,
+                &|current, total| {
+                    state.tasks.update(
+                        &task.id,
+                        current,
+                        total,
+                        String::new(),
+                        "importing".into(),
+                        None,
+                    );
+                },
+                &|| state.tasks.should_stop(&task.id),
+            )?;
+            let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            state.tasks.update(
+                &task.id,
+                report.rows.len(),
+                report.rows.len(),
+                String::new(),
+                "importing".into(),
+                Some(value.clone()),
+            );
+            if report.failed > 0 {
+                Err(format!(
+                    "已导入 {} 项，跳过 {} 项，失败 {} 项；成功内容已保留",
+                    report.imported, report.skipped, report.failed
+                ))
+            } else {
+                Ok(value)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?,
         TaskRequest::Download(request) => tauri::async_runtime::spawn_blocking(move || {
             crate::downloader::service::execute(&app, &task, request)
         })
@@ -1288,6 +1437,53 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn core_import_retry_keeps_only_incomplete_paths_and_scan_rows() {
+        let mut request: crate::asset::models::CoreImportRequest =
+            serde_json::from_value(serde_json::json!({"paths":["one","two"]})).unwrap();
+        let result = serde_json::json!({"rows":[{"path":"one","status":"imported"},{"path":"two","status":"error"}]});
+        retain_incomplete_core_import(&mut request, Some(&result));
+        assert_eq!(request.paths, vec!["two"]);
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        request=serde_json::from_value(serde_json::json!({"scanTaskId":Uuid::new_v4().to_string(),"scanRowIds":[first,second]})).unwrap();
+        let result = serde_json::json!({"rows":[{"scanRowId":first,"status":"duplicate"}]});
+        retain_incomplete_core_import(&mut request, Some(&result));
+        assert_eq!(request.scan_row_ids, vec![second]);
+    }
+    #[test]
+    fn core_scan_uses_existing_queue_cancellation_and_blocks_library_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (scan, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::AssetScan {
+                    root: "C:/source".into(),
+                },
+            )
+            .unwrap();
+        assert!(registry
+            .ensure_library_change_allowed("other", None)
+            .is_err());
+        registry.cancel(&scan.id).unwrap();
+        assert_eq!(registry.get(&scan.id).unwrap().status, "stopped");
+        assert!(registry
+            .ensure_library_change_allowed("other", None)
+            .is_ok());
+        let restored = TaskRegistry::load(dir.path().join("tasks.json"));
+        assert!(matches!(
+            restored.get(&scan.id).unwrap().payload,
+            TaskRequest::AssetScan { .. }
+        ));
+        let malformed = TaskRequest::AssetImport(
+            serde_json::from_value(
+                serde_json::json!({"paths":[],"scanTaskId":"../secret","scanRowIds":["bad"]}),
+            )
+            .unwrap(),
+        );
+        assert!(registry.submit("library".into(), malformed).is_err());
+    }
     #[test]
     fn library_change_only_exempts_the_exact_running_migration() {
         let dir = tempfile::tempdir().unwrap();

@@ -19,6 +19,8 @@ export type LibraryTaskRequest =
   | { kind: "assetMediaRetry"; request: { id: string } }
   | { kind: "modelThumbnail"; request: { entryId:string } }
   | { kind: "mediaImport"; request: MediaImportRequest }
+  | { kind: "assetScan"; request: { root: string } }
+  | { kind: "assetImport"; request: CoreAssetImportRequest }
   | { kind: "fabImport"; request: { path: string; mapping: ImportMapping; autoTranslate: boolean } }
   | { kind: "translation"; request: { ids: string[] } }
   | { kind: "links" }
@@ -29,6 +31,7 @@ export interface LibraryTask {
   phase: string; current: number; total: number; currentName: string; createdAt: string; updatedAt: string;
   cancellable: boolean; message: string; result: unknown; payload: LibraryTaskRequest;
 }
+export interface CoreAssetImportRequest { paths: string[]; scanTaskId?: string|null; scanRowIds?: string[]; tags?: string[]; projectId?: string|null }
 
 export interface DownloadRequest {url:string;format:string;quality:string;audioOnly:boolean;subtitles:boolean;outputMode:"library"|"libraryAndFolder"}
 export interface DownloadSettings {directory:string;concurrency:number;proxy:string;cookieSource:"none"|"file"|"edge"|"chrome";defaultQuality:string}

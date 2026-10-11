@@ -57,7 +57,8 @@ pub fn import_image_to(
     if let Some(parent) = thumbnail_target.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::copy(source, &original_target).map_err(|e| format!("复制图片失败：{e}"))?;
+    crate::media::copy_atomic(source, &original_target)
+        .map_err(|e| format!("复制图片失败：{e}"))?;
     let thumb = image.resize(480, 480, FilterType::Lanczos3);
     if let Err(error) = thumb.save_with_format(&thumbnail_target, image::ImageFormat::WebP) {
         let _ = fs::remove_file(&original_target);

@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -80,21 +80,32 @@ pub(crate) fn safe_relative(base_dir: &Path, relative: &str) -> Result<PathBuf, 
 pub(crate) fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
     let parent = target.parent().ok_or("媒体目标目录无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("创建媒体目录失败：{error}"))?;
-    let temp = target.with_extension(format!(
-        "{}.partial",
-        target
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("tmp")
-    ));
-    if temp.exists() {
-        let _ = fs::remove_file(&temp);
+    if target.exists() {
+        return Err("托管目标已存在，未覆盖文件".into());
     }
-    fs::copy(source, &temp).map_err(|error| format!("复制媒体失败：{error}"))?;
-    fs::rename(&temp, target).map_err(|error| {
-        let _ = fs::remove_file(&temp);
-        format!("保存媒体失败：{error}")
-    })
+    let mut stage =
+        tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("创建临时文件失败：{e}"))?;
+    let mut input = fs::File::open(source).map_err(|e| format!("源文件不可读：{e}"))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        if process_stopped() {
+            return Err("媒体复制已安全停止".into());
+        }
+        let count = input
+            .read(&mut buffer)
+            .map_err(|e| format!("复制媒体失败：{e}"))?;
+        if count == 0 {
+            break;
+        }
+        stage
+            .write_all(&buffer[..count])
+            .map_err(|e| format!("复制媒体失败：{e}"))?;
+    }
+    stage.as_file().sync_all().map_err(|e| e.to_string())?;
+    stage
+        .persist_noclobber(target)
+        .map(|_| ())
+        .map_err(|e| format!("保存媒体失败（未覆盖已有文件）：{e}"))
 }
 
 #[cfg(windows)]
@@ -153,7 +164,7 @@ impl Drop for ProcessControl {
         });
     }
 }
-fn process_stopped() -> bool {
+pub(crate) fn process_stopped() -> bool {
     PROCESS_STOP.with(|value| value.borrow().as_ref().is_some_and(|check| check()))
 }
 fn read_process_stream(mut reader: impl std::io::Read) -> Vec<u8> {

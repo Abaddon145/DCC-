@@ -131,3 +131,62 @@ pub struct Page<T> {
     pub offset: usize,
     pub limit: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRow {
+    pub id: String,
+    pub path: String,
+    pub relative_path: String,
+    pub kind: Option<String>,
+    pub size: u64,
+    pub hash: String,
+    pub status: String,
+    pub message: String,
+    pub duplicate_asset_id: Option<String>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanSummary {
+    pub total: usize,
+    pub importable: usize,
+    pub duplicate: usize,
+    pub unsupported: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreImportRequest {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub scan_task_id: Option<String>,
+    #[serde(default)]
+    pub scan_row_ids: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreImportRow {
+    #[serde(default)]
+    pub scan_row_id: Option<String>,
+    pub path: String,
+    pub status: String,
+    pub message: String,
+    pub asset_id: Option<String>,
+    pub duplicate_asset_id: Option<String>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreImportReport {
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+    pub rows: Vec<CoreImportRow>,
+}
