@@ -1,6 +1,13 @@
 # 第三方组件与许可证
 
-栈藏 DCC 素材库 v0.17.0 随安装包或前端产物使用以下第三方组件：
+栈藏 DCC 素材库 v0.21.0 随安装包或前端产物使用以下第三方组件：
+
+## 下载工具（Phase 1）
+
+- yt-dlp Windows x64 2026.08.19：独立进程调用；上游源码采用 Unlicense，但本次 PyInstaller Windows 二进制包含 GPLv3+ 组件，完整组合须按 GPLv3+ 分发，不能将此 exe 标成 MIT/Unlicense。随包附带 `media-tools/YTDLP-UNLICENSE.txt`、`YTDLP-GPL-3.0.txt` 和 `YTDLP-THIRD-PARTY-LICENSES.txt`。
+- 源码/构建/版本资料：https://github.com/yt-dlp/yt-dlp/tree/2026.08.19 、https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19 。分发者须遵守组合组件的对应源码与版权通知义务；未将下载工具链接进 DCC。
+- Deno 2.9.7 Windows x64：MIT，独立 JavaScript 运行时，供 yt-dlp 解析源站脚本；完整许可证见 `media-tools/DENO-LICENSE.md`，源码与依赖资料：https://github.com/denoland/deno/tree/v2.9.7 。
+- 固定版本、SHA-256 和来源见 `media-tools/DOWNLOAD-TOOLS.md`。没有在线自动更新或任意插件执行入口。
 
 ## FFmpeg / FFprobe 9.0.2
 

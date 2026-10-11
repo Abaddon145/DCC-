@@ -3,6 +3,7 @@ import {noteShortcutDefaults,noteShortcutLabels,setNoteShortcuts} from "./noteSh
 
 export const moduleRegistry: Array<{ id: ModuleId; group: ModuleGroupId; label: string; description: string }> = [
   { id: "library", group: "content", label: "素材库", description: "浏览、搜索与整理全部素材" },
+  { id: "downloader", group: "content", label: "下载中心", description: "解析链接、后台下载并自动收录到媒体库" },
   { id: "browserCapture", group: "content", label: "采集收件箱", description: "接收浏览器图片、视频和来源链接，再关联创作项目与笔记" },
   { id: "imageLibrary", group: "content", label: "图片库", description: "集中管理参考图、贴图和概念图" },
   { id: "modelLibrary", group: "content", label: "三维模型库", description: "管理并交互预览 GLB、GLTF、FBX、OBJ 和 STL" },

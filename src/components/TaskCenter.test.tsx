@@ -4,10 +4,11 @@ import { api } from "../lib/api";
 import type { LibraryTask } from "../types";
 import { TaskCenter } from "./TaskCenter";
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn().mockResolvedValue(()=>{})}));
-vi.mock("../lib/api",()=>({api:{getLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),queueModelThumbnailTasks:vi.fn().mockResolvedValue(0),cancelLibraryTask:vi.fn(),retryLibraryTask:vi.fn()}}));
+vi.mock("../lib/api",()=>({api:{getLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),queueModelThumbnailTasks:vi.fn().mockResolvedValue(0),cancelLibraryTask:vi.fn(),retryLibraryTask:vi.fn(),pauseDownloadTask:vi.fn()}}));
 vi.mock("./ModelThumbnailTask",()=>({ModelThumbnailTask:()=>null}));
 const task=(patch:Partial<LibraryTask>={}):LibraryTask=>({id:"task",libraryId:"lib",label:"媒体导入",status:"completed",phase:"",current:201,total:201,currentName:"",createdAt:"",updatedAt:"",cancellable:true,message:"",result:{rows:Array.from({length:201},(_,index)=>({name:`文件-${index}`,status:"imported",message:"已保存"}))},payload:{kind:"mediaImport",request:{kind:"image",paths:[],folderId:null,tags:[],favorite:false}},...patch});
 describe("TaskCenter",()=>{
+ it("offers pause for a download without stopping unrelated tasks",async()=>{vi.mocked(api.listLibraryTasks).mockResolvedValue([task({label:"下载",status:"running",payload:{kind:"download",request:{url:"https://example.com/video",format:"best",quality:"best",audioOnly:false,subtitles:false,outputMode:"library"}}})]);render(<TaskCenter notify={vi.fn()}/>);fireEvent.click(screen.getByRole("button",{name:/任务中心/}));fireEvent.click(await screen.findByRole("button",{name:"暂停"}));await waitFor(()=>expect(api.pauseDownloadTask).toHaveBeenCalledWith("task"));expect(api.cancelLibraryTask).not.toHaveBeenCalled();});
  it("backs off failed polling and supports explicit retry",async()=>{
    vi.mocked(api.listLibraryTasks).mockRejectedValueOnce(new Error("unavailable"));render(<TaskCenter notify={vi.fn()}/>);fireEvent.click(screen.getByRole("button",{name:"任务中心"}));await screen.findByRole("button",{name:"重新读取"});window.dispatchEvent(new Event("library-task-started"));expect(api.listLibraryTasks).toHaveBeenCalledTimes(1);fireEvent.click(screen.getByRole("button",{name:"重新读取"}));await waitFor(()=>expect(api.listLibraryTasks).toHaveBeenCalledTimes(2));expect(await screen.findByRole("button",{name:"媒体导入"})).toBeInTheDocument();
  });

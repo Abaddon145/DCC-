@@ -1565,6 +1565,8 @@ mod tests {
                         Err(_) => return count,
                     }
                 };
+                // Accepted Windows sockets inherit the listener's nonblocking flag.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();

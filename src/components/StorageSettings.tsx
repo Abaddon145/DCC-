@@ -10,8 +10,9 @@ import { applyGlobalPreferences, commandRegistry, defaultGlobalPreferences, defa
 import { TranslationGlossaryManager } from "./TranslationGlossaryManager";
 import { ReliabilitySettings } from "./ReliabilitySettings";
 import { TranslationServiceOptions } from "./TranslationServiceOptions";
+import {DownloadSettingsPanel} from "../features/download/DownloadSettingsPanel";
 
-type SettingsTab = "appearance" | "view" | "modules" | "shortcuts" | "startup" | "online" | "data";
+type SettingsTab = "appearance" | "view" | "modules" | "shortcuts" | "startup" | "online" | "download" | "data";
 interface Props { onClose: () => void; onLibraryChanged: () => Promise<void>; notify: (message: string, error?: boolean) => void; libraryLocked?: boolean; initialTab?: SettingsTab; onPersonalizationChanged?: (value: PersonalizationState) => void }
 
 const tabs: Array<{ id: SettingsTab; label: string; icon: typeof Eye }> = [
@@ -19,6 +20,7 @@ const tabs: Array<{ id: SettingsTab; label: string; icon: typeof Eye }> = [
   { id: "modules", label: "功能模块", icon: SlidersHorizontal }, { id: "shortcuts", label: "快捷键", icon: Keyboard },
   { id: "startup", label: "启动行为", icon: Play }, { id: "online", label: "在线服务", icon: Languages },
   { id: "data", label: "数据与素材库", icon: Database },
+  { id: "download", label: "下载", icon: FolderInput },
 ];
 
 export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLocked = false, initialTab = "online", onPersonalizationChanged }: Props) {
@@ -95,6 +97,7 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
     <div className="settings-center-layout">
       <nav className="settings-nav">{tabs.map(item => { const Icon = item.icon; return <button key={item.id} className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}><Icon size={16} />{item.label}</button>; })}</nav>
       <div className="settings-body settings-page">
+        {tab === "download" && <DownloadSettingsPanel notify={notify}/>}
         {tab === "appearance" && <><SettingsTitle title="外观" text="主题、强调色与整体界面尺寸会实时预览。" />
           <section><h3>主题预设</h3><div className="theme-cards">{(["graphite", "ue-slate", "midnight"] as const).map((theme, index) => <button key={theme} className={global.theme === theme ? "active" : ""} onClick={() => updateGlobal("theme", theme)}><i className={`theme-swatch ${theme}`} /><strong>{["Graphite", "UE Slate", "Midnight"][index]}</strong></button>)}</div></section>
           <section><h3>强调色</h3><div className="setting-row"><label><span>自定义颜色</span><small>使用 #RRGGBB 格式</small></label><div className="color-setting"><input type="color" value={isHexColor(global.accentColor) ? global.accentColor : "#D99A42"} onChange={event => updateGlobal("accentColor", event.target.value.toUpperCase())} /><input aria-label="强调色" value={global.accentColor} onChange={event => updateGlobal("accentColor", event.target.value.toUpperCase())} className={!isHexColor(global.accentColor) ? "invalid" : ""} /></div></div></section>

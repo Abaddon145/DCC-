@@ -42,6 +42,8 @@ struct RecentLibrary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
+    #[serde(default)]
+    download_settings: crate::downloader::models::DownloadSettings,
     active_library: String,
     recent_libraries: Vec<RecentLibrary>,
     retained_copies: Vec<String>,
@@ -77,6 +79,7 @@ fn default_true() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            download_settings: crate::downloader::models::DownloadSettings::default(),
             active_library: String::new(),
             recent_libraries: Vec::new(),
             retained_copies: Vec::new(),
@@ -850,6 +853,27 @@ impl AppState {
             settings.content_language.clone(),
             settings.fab_auto_translate,
         ))
+    }
+
+    pub fn download_settings(&self) -> Result<crate::downloader::models::DownloadSettings, String> {
+        Ok(self
+            .settings
+            .lock()
+            .map_err(|_| "设置锁已损坏")?
+            .download_settings
+            .clone())
+    }
+    pub fn save_download_settings(
+        &self,
+        value: crate::downloader::models::DownloadSettings,
+    ) -> Result<(), String> {
+        value.validate()?;
+        let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
+        let mut next = settings.clone();
+        next.download_settings = value;
+        write_settings(&self.settings_path, &next)?;
+        *settings = next;
+        Ok(())
     }
 
     pub fn global_preferences(&self) -> Result<GlobalPreferences, String> {

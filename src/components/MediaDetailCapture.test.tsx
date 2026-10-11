@@ -7,7 +7,7 @@ import { MediaDetail } from "./MediaLibraryView";
 vi.mock("../lib/api", () => ({
   mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`,
   mediaLibraryBundleUrl: (id: string, path: string) => `http://dcc-media.localhost/library/bundle/${id}/${path}`,
-  api: { listProjects: vi.fn(), listReferenceBoards: vi.fn(), updateMediaEntry: vi.fn(), linkProjectMedia: vi.fn(), addMediaImagesToBoard: vi.fn() },
+  api: { listProjects: vi.fn(), listReferenceBoards: vi.fn(), updateMediaEntry: vi.fn(), linkProjectMedia: vi.fn(), addMediaImagesToBoard: vi.fn(), openExternal: vi.fn() },
 }));
 vi.mock("./ModelViewer", () => ({ ModelViewer: () => null }));
 const libraryId = "11111111-1111-4111-8111-111111111111";
@@ -19,8 +19,10 @@ const detail: MediaEntryDetail = {
 };
 
 describe("captured media detail bindings", () => {
+  it("shows media dimensions and provides its saved source link", async () => {render(<MediaDetail detail={detail} canAddProject={false} canAddBoard={false} onClose={vi.fn()} onChanged={async()=>{}} onNotify={vi.fn()}/>);expect(screen.getByText("100 × 100")).toBeInTheDocument();fireEvent.click(screen.getByRole("button",{name:"打开来源网页"}));await waitFor(()=>expect(api.openExternal).toHaveBeenCalledWith(detail.sourceUrl));});
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.openExternal).mockResolvedValue();
     vi.mocked(api.listProjects).mockResolvedValue([{ id: "project", name: "作品" }] as Awaited<ReturnType<typeof api.listProjects>>);
     vi.mocked(api.listReferenceBoards).mockResolvedValue([{ id: "board", name: "灵感板" }] as Awaited<ReturnType<typeof api.listReferenceBoards>>);
     vi.mocked(api.updateMediaEntry).mockResolvedValue();
