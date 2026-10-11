@@ -21,3 +21,10 @@ CREATE TABLE IF NOT EXISTS asset_ai_analysis (
 );
 CREATE INDEX IF NOT EXISTS idx_asset_analysis_cache ON asset_ai_analysis(asset_id,input_fingerprint,model,mode,format_version,created_at);
 CREATE INDEX IF NOT EXISTS idx_asset_analysis_latest ON asset_ai_analysis(asset_id,created_at);
+CREATE TABLE IF NOT EXISTS asset_embeddings (
+ asset_id TEXT NOT NULL REFERENCES asset_core(id) ON DELETE CASCADE,
+ model TEXT NOT NULL, input_fingerprint TEXT NOT NULL,
+ vector TEXT NOT NULL CHECK(json_valid(vector) AND json_type(vector)='array'),
+ dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 4096), updated_at TEXT NOT NULL,
+ PRIMARY KEY(asset_id,model)
+);

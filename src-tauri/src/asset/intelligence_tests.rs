@@ -778,3 +778,111 @@ fn analysis_cached_result_can_be_read_by_id_without_returning_newer_unrelated_in
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn search_matches_description_analysis_source_and_project_without_losing_filters() {
+    use super::{
+        intelligence_models::{AnalysisMode, AnalysisRequest},
+        models::CoreSearchRequest,
+    };
+    let (dir, mut db) = fixture();
+    let owner = asset(&db, "普通图像");
+    let origin = repository::origin(&db, &owner).unwrap().id;
+    db.execute("UPDATE assets SET description='用户描述',author='原作者',source_url='https://example.com/原来源' WHERE id=?1",[&origin]).unwrap();
+    super::service::set_tags(&mut db, &owner, "en", &["English Tag".into()]).unwrap();
+    super::service::add_source(
+        &db,
+        &super::models::CoreSourceInput {
+            asset_id: owner.clone(),
+            source_type: "fab".into(),
+            url: "https://fab.com/listings/entry".into(),
+            author: "附加作者".into(),
+        },
+    )
+    .unwrap();
+    let project = uuid::Uuid::new_v4().to_string();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES(?1,'雨夜创作','scene','active','now','now')",[&project]).unwrap();
+    super::service::link_project(&mut db, &owner, &project, true).unwrap();
+    let preview =
+        crate::ai::analyzer::prepare(&db, dir.path(), None, &owner, AnalysisMode::Text, &|| false)
+            .unwrap();
+    let input = crate::ai::analyzer::load_confirmed(
+        &db,
+        dir.path(),
+        &AnalysisRequest {
+            asset_id: owner.clone(),
+            preview_id: preview.id,
+            force: false,
+        },
+    )
+    .unwrap();
+    let mut answer = analysis_answer();
+    answer["description"] = serde_json::json!("分析描述");
+    answer["keywords"] = serde_json::json!(["未来都市"]);
+    super::analysis::save(&db, &input, &serde_json::from_value(answer).unwrap(), None).unwrap();
+    let other = asset(&db, "不匹配");
+    let mut req: CoreSearchRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    for query in [
+        "用户描述",
+        "分析描述",
+        "未来都市",
+        "原作者",
+        "原来源",
+        "附加作者",
+        "listings/entry",
+        "雨夜创作",
+        "english tag",
+    ] {
+        req.query = query.into();
+        let found = repository::search(&db, &req).unwrap();
+        assert_eq!(
+            found.items.iter().map(|a| &a.id).collect::<Vec<_>>(),
+            vec![&owner],
+            "field: {query}"
+        );
+    }
+    req.query = String::new();
+    req.project_id = Some(project.clone());
+    req.source = Some("fab".into());
+    req.asset_type = Some("asset".into());
+    assert_eq!(repository::search(&db, &req).unwrap().total, 1);
+    req.asset_type = Some("image".into());
+    assert_eq!(repository::search(&db, &req).unwrap().total, 0);
+    req.asset_type = None;
+    req.project_id = Some(uuid::Uuid::new_v4().to_string());
+    assert_eq!(repository::search(&db, &req).unwrap().total, 0);
+    req.project_id = Some(project);
+    db.execute("UPDATE assets SET deleted_at='now' WHERE id=?1", [&origin])
+        .unwrap();
+    assert_eq!(repository::search(&db, &req).unwrap().total, 0);
+    assert_eq!(
+        repository::search(&db, &serde_json::from_value(serde_json::json!({})).unwrap())
+            .unwrap()
+            .items[0]
+            .id,
+        other
+    );
+    let (_, foreign) = fixture();
+    assert_eq!(repository::search(&foreign, &req).unwrap().total, 0);
+}
+#[test]
+fn search_treats_quotes_wildcards_and_empty_query_literally() {
+    let (_, db) = fixture();
+    let exact = asset(&db, "文件 50%_完成 ' \"引用\"");
+    asset(&db, "文件 500完成");
+    for query in ["50%_", "'", "\"引用\""] {
+        let req = serde_json::from_value(serde_json::json!({"query":query})).unwrap();
+        let page = repository::search(&db, &req).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, exact);
+    }
+    assert_eq!(
+        repository::search(
+            &db,
+            &serde_json::from_value(serde_json::json!({"query":"  "})).unwrap()
+        )
+        .unwrap()
+        .total,
+        2
+    );
+}

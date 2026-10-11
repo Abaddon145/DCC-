@@ -35,6 +35,7 @@ mod projects;
 mod reference_boards;
 mod reliability;
 mod runtime;
+mod search;
 mod search_syntax;
 mod state;
 mod tasks;

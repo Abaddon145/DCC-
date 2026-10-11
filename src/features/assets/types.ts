@@ -8,7 +8,7 @@ export interface AssetVersion {id:string;assetId:string;fileId:string;version:st
 export interface AssetLink {id:string;name:string}
 export interface CoreTag {id:string;name:string;color:string;createdAt:string}
 export interface CoreAssetDetail {asset:Asset;files:AssetFile[];metadata:AssetMetadata[];sources:AssetSource[];versions:AssetVersion[];projects:AssetLink[];knowledgeLinks:AssetLink[];relatedAssets:AssetLink[];tagDetails:CoreTag[];processingHistory:{id:string;label:string;status:string;phase:string;message:string;updatedAt:string}[]}
-export interface CoreSearchRequest {query:string;assetType:string|null;source:string|null;locale:string;offset:number;limit:number}
+export interface CoreSearchRequest {query:string;assetType:string|null;source:string|null;projectId?:string|null;locale:string;offset:number;limit:number}
 export interface CoreVersionInput {assetId:string;fileId:string;version:string;note:string}
 export interface CoreSourceInput {assetId:string;sourceType:string;url:string;author:string}
 export interface Page<T> {items:T[];total:number;offset:number;limit:number}

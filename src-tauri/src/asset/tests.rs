@@ -376,6 +376,7 @@ fn request() -> CoreSearchRequest {
 fn mixed_search_is_bounded_and_reads_live_names_and_soft_deletion() {
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     let mut query = request();
     query.limit = 1;
     let page = repository::search(&db, &query).unwrap();
@@ -1107,6 +1108,7 @@ fn local_audio_video_metadata_and_short_clip_thumbnail_use_bundled_tools() {
 fn shared_tags_keep_ids_languages_colors_and_media_only_usage() {
     let mut db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     let a = repository::register_origin(
         &db,
         &CoreOrigin {
@@ -1139,6 +1141,7 @@ fn shared_tags_keep_ids_languages_colors_and_media_only_usage() {
                 query: "森林".into(),
                 asset_type: None,
                 source: None,
+                project_id: None,
                 locale: "zh-CN".into(),
                 offset: 0,
                 limit: 80
@@ -1418,6 +1421,7 @@ fn sources_aggregate_old_values_validate_urls_and_preserve_old_edits() {
 fn source_search_uses_the_same_host_rules_and_download_sources_as_details() {
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     crate::downloader::service::migrate(&db).unwrap();
     db.execute(
         "UPDATE assets SET source_url='https://evil.example/fab.com/fake'",
@@ -1438,6 +1442,7 @@ fn source_search_uses_the_same_host_rules_and_download_sources_as_details() {
                 query: String::new(),
                 asset_type: None,
                 source: Some(source.into()),
+                project_id: None,
                 locale: "zh-CN".into(),
                 offset: 0,
                 limit: 80,

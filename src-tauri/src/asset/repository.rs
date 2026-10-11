@@ -180,9 +180,9 @@ pub fn prepare_trash_purge(db: &Connection, batch_id: &str) -> Result<Vec<String
 
 const VIEW: &str = "WITH unified AS (
  SELECT c.id,c.legacy_asset_id AS owner_id,'legacy' AS kind,'asset' AS asset_type,
- COALESCE(NULLIF(l.name,''),a.name) AS name,COALESCE(NULLIF(l.description,''),a.description) AS description,a.created_at,a.updated_at,a.deleted_at,a.source_url
+ COALESCE(NULLIF(l.name,''),a.name) AS name,COALESCE(NULLIF(l.description,''),a.description) AS description,a.created_at,a.updated_at,a.deleted_at,a.source_url,a.author
  FROM asset_core c JOIN assets a ON a.id=c.legacy_asset_id LEFT JOIN asset_localizations l ON l.asset_id=a.id AND l.locale=?1
- UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id)
+ UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url,m.author FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id)
 ";
 
 pub fn source_type(raw: &str) -> String {
@@ -338,6 +338,9 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
         return Err("资产查询超出限制".into());
     }
     let limit = request.limit.clamp(1, 200);
+    if let Some(id) = &request.project_id {
+        uuid::Uuid::parse_str(id).map_err(|_| "项目标识无效")?;
+    }
     // Reuse the detail classifier instead of maintaining a second URL/domain parser in SQL.
     db.create_scalar_function(
         "dcc_asset_source_type",
@@ -352,20 +355,38 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
     } else {
         ""
     };
+    let project_links = "((u.kind='legacy' AND EXISTS(SELECT 1 FROM project_assets l WHERE l.project_id=p.id AND l.asset_id=u.owner_id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM project_media_entries l WHERE l.project_id=p.id AND l.entry_id=u.owner_id)))";
+    let projects = format!("EXISTS(SELECT 1 FROM projects p WHERE p.id=?5 AND {project_links})");
+    let download_text = if downloads {
+        " OR EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND (instr(lower(d.url),?3)>0 OR instr(lower(d.author),?3)>0))"
+    } else {
+        ""
+    };
     let filter = format!("FROM unified u WHERE u.deleted_at IS NULL AND (?2 IS NULL OR u.asset_type=?2)
-      AND (?3='' OR instr(lower(u.name),?3)>0 OR EXISTS(SELECT 1 FROM localized_tags t WHERE instr(lower(t.name),?3)>0 AND ((u.kind='legacy' AND t.locale=?1 AND EXISTS(SELECT 1 FROM asset_localized_tags a WHERE a.asset_id=u.owner_id AND a.tag_id=t.id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM media_entry_tags m WHERE m.entry_id=u.owner_id AND m.tag_id=t.id)))))
-      AND (?4 IS NULL OR (dcc_asset_source_type(u.source_url)=?4 AND (trim(u.source_url)<>'' OR (NOT EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.url<>''){local_download_filter}))) OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.source_type=?4){download_filter})",local_download_filter=if downloads {" AND NOT EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND d.url<>'')"}else{""});
+      AND (?3='' OR instr(lower(u.name),?3)>0 OR instr(lower(u.description),?3)>0 OR instr(lower(u.source_url),?3)>0 OR instr(lower(u.author),?3)>0
+       OR EXISTS(SELECT 1 FROM localized_tags t WHERE instr(lower(t.name),?3)>0 AND ((u.kind='legacy' AND EXISTS(SELECT 1 FROM asset_localized_tags a WHERE a.asset_id=u.owner_id AND a.tag_id=t.id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM media_entry_tags m WHERE m.entry_id=u.owner_id AND m.tag_id=t.id))))
+       OR EXISTS(SELECT 1 FROM asset_ai_analysis a WHERE a.asset_id=u.id AND (instr(lower(a.description),?3)>0 OR EXISTS(SELECT 1 FROM json_each(a.keywords) k WHERE instr(lower(k.value),?3)>0)))
+       OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND (instr(lower(s.url),?3)>0 OR instr(lower(s.author),?3)>0))
+       OR EXISTS(SELECT 1 FROM projects p WHERE instr(lower(p.name),?3)>0 AND {project_links}){download_text})
+      AND (?4 IS NULL OR (dcc_asset_source_type(u.source_url)=?4 AND (trim(u.source_url)<>'' OR (NOT EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.url<>''){local_download_filter}))) OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.source_type=?4){download_filter})
+      AND (?5 IS NULL OR {projects})",local_download_filter=if downloads {" AND NOT EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND d.url<>'')"}else{""});
     let query = request.query.trim().to_lowercase();
     let total: usize = db
         .query_row(
             &format!("{VIEW} SELECT count(*) {filter}"),
-            params![request.locale, request.asset_type, query, request.source],
+            params![
+                request.locale,
+                request.asset_type,
+                query,
+                request.source,
+                request.project_id
+            ],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(&format!(
-            "{VIEW} SELECT id {filter} ORDER BY u.updated_at DESC,u.id LIMIT ?5 OFFSET ?6"
+            "{VIEW} SELECT id {filter} ORDER BY u.updated_at DESC,u.id LIMIT ?6 OFFSET ?7"
         ))
         .map_err(|e| e.to_string())?;
     let ids = stmt
@@ -375,6 +396,7 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
                 request.asset_type,
                 query,
                 request.source,
+                request.project_id,
                 limit as i64,
                 request.offset as i64
             ],

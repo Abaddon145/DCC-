@@ -1,5 +1,6 @@
 //! Text-only creative assistance. Model output is an untrusted proposal, never a command.
 pub mod analyzer;
+pub mod embedding;
 use crate::{
     ai_store::{self, Journal, Scope},
     db, media_library,

@@ -30,6 +30,14 @@ it("关系按需打开，不影响原详情与外部关闭",async()=>{
 it("默认范围保留普通素材，全部资产是独立范围",()=>{const change=vi.fn();const {rerender}=render(<AssetScope scope="normal" onChange={change} browser={<p>统一浏览</p>}><p>Fab 原入口</p></AssetScope>);expect(screen.getByText("Fab 原入口")).toBeTruthy();expect(screen.queryByText("统一浏览")).toBeNull();fireEvent.click(screen.getByRole("button",{name:"全部资产"}));expect(change).toHaveBeenCalledWith("all");rerender(<AssetScope scope="all" onChange={change} browser={<p>统一浏览</p>}><p>Fab 原入口</p></AssetScope>);expect(screen.queryByText("Fab 原入口")).toBeNull();});
 it("混合浏览、分页和旧详情跳转不出现 Fab 批量按钮",async()=>{render(<AssetBrowser {...props}/>);fireEvent.click(await screen.findByRole("button",{name:"打开 森林图"}));await screen.findByRole("dialog",{name:"资产详情"});fireEvent.click(screen.getByRole("button",{name:"打开原详情"}));expect(props.onOpenOrigin).toHaveBeenCalledWith(image.origin,"image");fireEvent.click(screen.getByRole("button",{name:"关闭资产详情"}));fireEvent.click(screen.getByRole("button",{name:"下一页"}));await waitFor(()=>expect(coreApi.search).toHaveBeenLastCalledWith("lib",expect.objectContaining({offset:80})));expect(screen.queryByText("补齐双语")).toBeNull();});
 it("搜索和类型筛选发送分页查询，失败可重试",async()=>{vi.mocked(coreApi.search).mockRejectedValueOnce(new Error("读取失败"));render(<AssetBrowser {...props}/>);fireEvent.click(await screen.findByRole("button",{name:"重新读取"}));await screen.findByText("演示视频");fireEvent.change(screen.getByLabelText("搜索全部资产"),{target:{value:"森林"}});fireEvent.change(screen.getByLabelText("资产类型"),{target:{value:"image"}});await waitFor(()=>expect(coreApi.search).toHaveBeenLastCalledWith("lib",expect.objectContaining({query:"森林",assetType:"image",offset:0})));});
+it("项目、来源和类型组合筛选，读取失败保留上一次有效卡片",async()=>{
+ vi.mocked(api.listProjects).mockResolvedValueOnce([{id:"project",name:"雨夜项目"}] as Awaited<ReturnType<typeof api.listProjects>>);
+ render(<AssetBrowser {...props}/>);await screen.findByText("森林图");await screen.findByRole("option",{name:"雨夜项目"});
+ vi.mocked(coreApi.search).mockRejectedValueOnce(new Error("暂时读取失败"));
+ fireEvent.change(screen.getByLabelText("关联项目"),{target:{value:"project"}});fireEvent.change(screen.getByLabelText("资产类型"),{target:{value:"image"}});fireEvent.change(screen.getByLabelText("来源筛选"),{target:{value:"fab"}});
+ await screen.findByRole("button",{name:"重新读取"});expect(screen.getByText("森林图")).toBeTruthy();
+ expect(coreApi.search).toHaveBeenLastCalledWith("lib",expect.objectContaining({projectId:"project",assetType:"image",source:"fab",offset:0}));
+});
 
 it("标签移除、来源与版本创建走类型化接口，失败不伪装成功",async()=>{
  const file={id:"file",assetId:image.id,sourceRef:{kind:"mediaFile" as const,id:"original",role:"original"},role:"original",filename:"森林.png",extension:"png",size:20,hash:"sha",createdAt:"now",available:true};
