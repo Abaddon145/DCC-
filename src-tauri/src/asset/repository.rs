@@ -360,13 +360,24 @@ pub fn get(
         .map_err(|e| e.to_string())?
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
+    let mut project_stmt=db.prepare(if asset.origin.kind=="legacy" {"SELECT p.id,p.name FROM projects p JOIN project_assets l ON l.project_id=p.id WHERE l.asset_id=?1 ORDER BY p.name"}else {"SELECT p.id,p.name FROM projects p JOIN project_media_entries l ON l.project_id=p.id WHERE l.entry_id=?1 ORDER BY p.name"}).map_err(|e|e.to_string())?;
+    let projects = project_stmt
+        .query_map([&asset.origin.id], |r| {
+            Ok(AssetLink {
+                id: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
     Ok(CoreAssetDetail {
         asset,
         files,
         metadata,
         versions,
         sources: vec![],
-        projects: vec![],
+        projects,
         knowledge_links: vec![],
         related_assets: vec![],
         processing_history: vec![],

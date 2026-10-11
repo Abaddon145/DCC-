@@ -509,6 +509,7 @@ pub fn rename_tag(
         ));
     }
     let affected = tag_asset_ids(connection, &[id.to_string()])?;
+    let media = tag_media_ids(connection, &[id.to_string()])?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction
         .execute(
@@ -518,6 +519,9 @@ pub fn rename_tag(
         .map_err(|e| e.to_string())?;
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
+    }
+    for id in &media {
+        crate::media_library::reindex(&transaction, id)?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     let _ = old;
@@ -568,14 +572,19 @@ pub fn merge_tags(
         }
     }
     let affected = tag_asset_ids(connection, &sources)?;
+    let media = tag_media_ids(connection, &sources)?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     for source in &sources {
         transaction.execute("INSERT OR IGNORE INTO asset_localized_tags(asset_id,tag_id) SELECT asset_id,?1 FROM asset_localized_tags WHERE tag_id=?2", params![target_id,source]).map_err(|e| e.to_string())?;
+        transaction.execute("INSERT OR IGNORE INTO media_entry_tags(entry_id,tag_id) SELECT entry_id,?1 FROM media_entry_tags WHERE tag_id=?2", params![target_id,source]).map_err(|e| e.to_string())?;
         transaction
             .execute("DELETE FROM localized_tags WHERE id=?1", [source])
             .map_err(|e| e.to_string())?;
     }
     rewrite_collection_tag_ids(&transaction, &sources, Some(target_id))?;
+    for id in &media {
+        crate::media_library::reindex(&transaction, id)?;
+    }
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
     }
@@ -602,6 +611,7 @@ pub fn delete_tags(
         });
     }
     let affected = tag_asset_ids(connection, &ids)?;
+    let media = tag_media_ids(connection, &ids)?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     for id in &ids {
         transaction
@@ -610,6 +620,9 @@ pub fn delete_tags(
     }
     for asset_id in &affected {
         db::reindex_asset(&transaction, asset_id)?;
+    }
+    for id in &media {
+        crate::media_library::reindex(&transaction, id)?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(TagMutationReport {
@@ -623,13 +636,33 @@ pub fn delete_unused_tags(
     locale: &str,
 ) -> Result<TagMutationReport, String> {
     let locale = if locale == "en" { "en" } else { "zh-CN" };
-    let removed = connection.execute("DELETE FROM localized_tags WHERE locale=?1 AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id)", [locale]).map_err(|e| e.to_string())?;
+    let removed = connection.execute("DELETE FROM localized_tags WHERE locale=?1 AND NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", [locale]).map_err(|e| e.to_string())?;
     Ok(TagMutationReport {
         affected_assets: 0,
         removed_tags: removed,
     })
 }
 
+fn tag_media_ids(connection: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let marks = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut stmt = connection
+        .prepare(&format!(
+            "SELECT DISTINCT entry_id FROM media_entry_tags WHERE tag_id IN ({marks})"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(ids), |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
 fn tag_asset_ids(connection: &Connection, ids: &[String]) -> Result<Vec<String>, String> {
     if ids.is_empty() {
         return Ok(vec![]);

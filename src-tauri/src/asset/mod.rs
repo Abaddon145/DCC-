@@ -10,6 +10,27 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     tx.execute_batch(include_str!("schema.sql"))
         .map_err(|e| e.to_string())?;
+    for table in ["tags", "localized_tags"] {
+        let mut stmt = tx
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| e.to_string())?;
+        let columns = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for (name, definition) in [
+            ("color", "TEXT NOT NULL DEFAULT ''"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|c| c == name) {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                ))
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
     for (kind, table) in [("legacy", "assets"), ("media", "media_entries")] {
         let mut statement = tx
             .prepare(&format!("SELECT id FROM {table}"))

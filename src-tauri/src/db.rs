@@ -592,7 +592,7 @@ fn migrate_to_v12(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn insert_localized_tag(
+pub(crate) fn insert_localized_tag(
     connection: &Connection,
     asset_id: &str,
     locale: &str,
@@ -2166,7 +2166,7 @@ pub fn purge_trash_batch(
         return Err("回收站记录不存在".into());
     }
     transaction.execute("DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM asset_tags at WHERE at.tag_id=tags.id)", []).map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
@@ -2399,7 +2399,7 @@ pub fn batch_update_assets(
             [],
         )
         .map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(BatchUpdateReport {
         requested: ids.len(),

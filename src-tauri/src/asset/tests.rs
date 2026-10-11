@@ -906,3 +906,199 @@ fn local_audio_video_metadata_and_short_clip_thumbnail_use_bundled_tools() {
     )
     .is_err());
 }
+
+#[test]
+fn shared_tags_keep_ids_languages_colors_and_media_only_usage() {
+    let mut db = old_fixture();
+    super::migrate(&db).unwrap();
+    let a = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "legacy".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    let m = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: OLD_ID.into(),
+        },
+    )
+    .unwrap();
+    super::service::set_tags(&mut db, &a, "zh-CN", &["森林".into()]).unwrap();
+    super::service::set_tags(&mut db, &m, "zh-CN", &["森林".into()]).unwrap();
+    let id: String = db
+        .query_row(
+            "SELECT id FROM localized_tags WHERE name='森林'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        repository::search(
+            &db,
+            &CoreSearchRequest {
+                query: "森林".into(),
+                asset_type: None,
+                source: None,
+                locale: "zh-CN".into(),
+                offset: 0,
+                limit: 80
+            }
+        )
+        .unwrap()
+        .total,
+        2
+    );
+    super::service::set_tags(&mut db, &a, "en", &["Forest".into()]).unwrap();
+    super::service::set_tags(&mut db, &a, "zh-CN", &[]).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM asset_localized_tags WHERE asset_id=?1",
+            [OLD_ID],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::organization::delete_unused_tags(&db, "zh-CN")
+            .unwrap()
+            .removed_tags,
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT id FROM localized_tags WHERE name='森林'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        id
+    );
+    super::service::set_tag_color(&db, &id, "#AABBCC").unwrap();
+    assert!(super::service::set_tag_color(&db, &id, "red; background:white").is_err());
+    assert_eq!(
+        db.query_row("SELECT color FROM localized_tags WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "#AABBCC"
+    );
+    let foreign = Connection::open_in_memory().unwrap();
+    foreign
+        .execute_batch(include_str!("../schema.sql"))
+        .unwrap();
+    super::migrate(&foreign).unwrap();
+    assert!(super::service::set_tag_color(&foreign, "missing", "#AABBCC").is_err());
+}
+
+#[test]
+fn core_project_links_reuse_both_origins_and_reject_archived_or_foreign_assets() {
+    let mut db = old_fixture();
+    super::migrate(&db).unwrap();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('second','第二项目','scene','active','now','now')",[]).unwrap();
+    for kind in ["legacy", "media"] {
+        let core = repository::register_origin(
+            &db,
+            &CoreOrigin {
+                kind: kind.into(),
+                id: OLD_ID.into(),
+            },
+        )
+        .unwrap();
+        for _ in 0..2 {
+            super::service::link_project(&mut db, &core, "project", true).unwrap();
+            super::service::link_project(&mut db, &core, "second", true).unwrap();
+        }
+        assert_eq!(
+            repository::get(&db, std::path::Path::new("."), &core, "zh-CN")
+                .unwrap()
+                .projects
+                .len(),
+            2
+        );
+        super::service::link_project(&mut db, &core, "second", false).unwrap();
+        assert_eq!(
+            repository::get(&db, std::path::Path::new("."), &core, "zh-CN")
+                .unwrap()
+                .projects
+                .len(),
+            1
+        );
+        db.execute(
+            "UPDATE projects SET status='archived' WHERE id='second'",
+            [],
+        )
+        .unwrap();
+        assert!(super::service::link_project(&mut db, &core, "second", true).is_err());
+        db.execute("UPDATE projects SET status='active' WHERE id='second'", [])
+            .unwrap();
+    }
+    assert!(super::service::link_project(&mut db, "foreign", "project", true).is_err());
+    db.execute("DELETE FROM projects WHERE id='project'", [])
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_files", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn shared_tag_merge_and_rename_preserve_media_relationships_and_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('entry','image','图','file','now','now')",[]).unwrap();
+    let core = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: "entry".into(),
+        },
+    )
+    .unwrap();
+    super::service::set_tags(&mut db, &core, "zh-CN", &["森林".into(), "树林".into()]).unwrap();
+    let forest: String = db
+        .query_row(
+            "SELECT id FROM localized_tags WHERE name='森林'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let woods: String = db
+        .query_row(
+            "SELECT id FROM localized_tags WHERE name='树林'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    crate::organization::merge_tags(&mut db, vec![forest], &woods).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entry_tags", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    crate::organization::rename_tag(&mut db, &woods, "绿色树林").unwrap();
+    let text: String = db
+        .query_row(
+            "SELECT text FROM media_search WHERE entry_id='entry'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(text.contains("绿色树林"));
+    db.execute("INSERT INTO assets(id,name,description,share_url,created_at,updated_at) VALUES('unrelated','无关','','','now','now')",[]).unwrap();
+    crate::db::delete_asset(&mut db, dir.path(), "unrelated").unwrap();
+    crate::db::empty_trash(&mut db, dir.path()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM media_entry_tags", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}

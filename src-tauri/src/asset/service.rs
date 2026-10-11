@@ -2,6 +2,117 @@ use super::{models::*, repository, scanner};
 use rusqlite::{Connection, OptionalExtension};
 use std::{collections::HashSet, path::Path};
 
+pub fn active_origin(db: &Connection, core_id: &str) -> Result<CoreOrigin, String> {
+    let origin = repository::origin(db, core_id)?;
+    let table = if origin.kind == "legacy" {
+        "assets"
+    } else {
+        "media_entries"
+    };
+    let active: bool = db
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?1 AND deleted_at IS NULL)"),
+            [&origin.id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !active {
+        return Err("资产已在回收站，不能修改".into());
+    }
+    Ok(origin)
+}
+pub fn set_tags(
+    db: &mut Connection,
+    core_id: &str,
+    locale: &str,
+    tags: &[String],
+) -> Result<(), String> {
+    if !matches!(locale, "zh-CN" | "en")
+        || tags.len() > 200
+        || tags.iter().any(|t| t.chars().count() > 100)
+    {
+        return Err("标签语言、数量或长度无效".into());
+    }
+    let origin = active_origin(db, core_id)?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    if origin.kind == "media" {
+        crate::media_library::upsert_tags(&tx, &origin.id, tags)?;
+        crate::media_library::reindex(&tx, &origin.id)?;
+        tx.execute(
+            "UPDATE media_entries SET updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), origin.id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM asset_localized_tags WHERE asset_id=?1 AND tag_id IN (SELECT id FROM localized_tags WHERE locale=?2)",rusqlite::params![origin.id,locale]).map_err(|e|e.to_string())?;
+        for tag in tags {
+            crate::db::insert_localized_tag(&tx, &origin.id, locale, tag)?;
+        }
+        if locale == "zh-CN" {
+            tx.execute("DELETE FROM asset_tags WHERE asset_id=?1", [&origin.id])
+                .map_err(|e| e.to_string())?;
+            for tag in tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tags(id,name,normalized_name) VALUES(?1,?2,?3)",
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), tag, tag.to_lowercase()],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute("INSERT OR IGNORE INTO asset_tags(asset_id,tag_id) SELECT ?1,id FROM tags WHERE normalized_name=?2",rusqlite::params![origin.id,tag.to_lowercase()]).map_err(|e|e.to_string())?;
+            }
+        }
+        crate::db::reindex_asset(&tx, &origin.id)?;
+        tx.execute(
+            "UPDATE assets SET updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), origin.id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+pub fn set_tag_color(db: &Connection, tag_id: &str, color: &str) -> Result<(), String> {
+    if color.len() != 7
+        || !color.starts_with('#')
+        || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err("标签颜色必须是 #RRGGBB".into());
+    }
+    let count=db.execute("UPDATE localized_tags SET color=?1,created_at=CASE WHEN created_at='' THEN ?2 ELSE created_at END WHERE id=?3",rusqlite::params![color,chrono::Utc::now().to_rfc3339(),tag_id]).map_err(|e|e.to_string())?;
+    if count == 0 {
+        return Err("标签不存在或不属于当前素材库".into());
+    }
+    Ok(())
+}
+pub fn link_project(
+    db: &mut Connection,
+    core_id: &str,
+    project_id: &str,
+    link: bool,
+) -> Result<(), String> {
+    let origin = active_origin(db, core_id)?;
+    let active: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1 AND status<>'archived')",
+            [project_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !active {
+        return Err("目标项目不存在或已归档".into());
+    }
+    if origin.kind == "legacy" {
+        if link {
+            crate::projects::add_project_assets(db, project_id, vec![origin.id])?;
+        } else {
+            crate::projects::remove_project_assets(db, project_id, vec![origin.id])?;
+        }
+    } else {
+        let tx = db.transaction().map_err(|e| e.to_string())?;
+        crate::media_library::link_projects(&tx, vec![origin.id], vec![project_id.into()], link)?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn validate_import(request: &CoreImportRequest) -> Result<(), String> {
     if request.paths.len() > 500 {
         return Err("单次文件选择最多 500 项".into());

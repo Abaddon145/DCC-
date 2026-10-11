@@ -323,7 +323,11 @@ fn ensure_folder(
     }
     Ok(())
 }
-fn upsert_tags(connection: &Connection, entry_id: &str, tags: &[String]) -> Result<(), String> {
+pub(crate) fn upsert_tags(
+    connection: &Connection,
+    entry_id: &str,
+    tags: &[String],
+) -> Result<(), String> {
     connection
         .execute("DELETE FROM media_entry_tags WHERE entry_id=?1", [entry_id])
         .map_err(|e| e.to_string())?;
