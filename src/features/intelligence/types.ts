@@ -13,3 +13,5 @@ export interface AnalysisInputPreview {id:string;assetId:string;model:string;mod
 export interface AssetAnalysis {id:string;assetId:string;description:string;keywords:string[];scene:string;style:string;camera:string;lighting:string;mood:string;model:string;mode:AnalysisMode;inputFingerprint:string;formatVersion:number;createdAt:string;actualTokens:number|null}
 export interface PromptInput {assetId:string|null;expectedRevision:number|null;name:string;description:string;content:string;model:string;parameters:Record<string,unknown>}
 export interface PromptAsset {asset:Asset;content:string;model:string;parameters:Record<string,unknown>;revision:number;createdAt:string;updatedAt:string}
+export interface ShotInput {assetId:string|null;expectedRevision:number|null;projectId:string|null;projectUnitId:string|null;parentSceneId:string|null;act:string;shotNumber:string;name:string;description:string;status:string}
+export interface ShotAsset {asset:Asset;revision:number;projectId:string|null;projectUnitId:string|null;act:string;shotNumber:string;status:string;unit:import("../../types").ProjectUnit|null;createdAt:string;updatedAt:string}

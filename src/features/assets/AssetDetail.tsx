@@ -13,17 +13,18 @@ import {VersionPanel} from "./VersionPanel";
 import {GraphView} from "../intelligence/relations/GraphView";
 import {AIAnalysisPanel} from "../intelligence/analysis/AIAnalysisPanel";
 import {PromptEditor} from "../intelligence/prompt/PromptEditor";
+import {ShotPanel} from "../intelligence/shot/ShotPanel";
 import {intelligenceApi} from "../intelligence/api";
 import type {AssetFile,CoreAssetDetail} from "./types";
 import type {AssetBrowserProps} from "./AssetBrowser";
 const detailTabs=["基础信息","文件","Metadata","标签","来源","版本","关系","AI分析","Prompt","项目"] as const;
 type DetailTab=typeof detailTabs[number];
-export function AssetDetail({assetId,onClose,onChanged,onSelect,...props}:AssetBrowserProps&{assetId:string;onClose:()=>void;onChanged:()=>void;onSelect:(id:string)=>void}){
- const [tab,setTab]=useState<DetailTab>("基础信息"),[promptVisited,setPromptVisited]=useState(false),[dirty,setDirty]=useState(false),[pending,setPending]=useState<(()=>void)|null>(null),[deleting,setDeleting]=useState(false);
+export function AssetDetail({assetId,initialTab="基础信息",onClose,onChanged,onSelect,...props}:AssetBrowserProps&{assetId:string;initialTab?:DetailTab;onClose:()=>void;onChanged:()=>void;onSelect:(id:string)=>void}){
+ const [tab,setTab]=useState<DetailTab>(initialTab),[promptVisited,setPromptVisited]=useState(initialTab==="Prompt"),[shotVisited,setShotVisited]=useState(initialTab==="项目"),[dirty,setDirty]=useState(false),[pending,setPending]=useState<(()=>void)|null>(null),[deleting,setDeleting]=useState(false);
  const [detail,setDetail]=useState<CoreAssetDetail|null>(null),[error,setError]=useState(""),[revision,setRevision]=useState(0),[busy,setBusy]=useState(false),[project,setProject]=useState(""),[projects,setProjects]=useState<ProjectSummary[]>([]),[preview,setPreview]=useState<string|null>(null);
  const mounted=useRef(false),operation=useRef(false),close=useRef<HTMLButtonElement>(null);
  const navigate=(action:()=>void)=>dirty?setPending(()=>action):action();
- const chooseTab=(next:DetailTab)=>{setTab(next);if(next==="Prompt")setPromptVisited(true);};
+ const chooseTab=(next:DetailTab)=>{setTab(next);if(next==="Prompt")setPromptVisited(true);if(next==="项目")setShotVisited(true);};
  useEffect(()=>{mounted.current=true;close.current?.focus();return()=>{mounted.current=false;};},[]);
  useEffect(()=>{let active=true;setError("");void coreApi.get(props.libraryId,assetId,props.locale).then(data=>{if(active)setDetail(data);}).catch(e=>{if(active)setError(String(e));});return()=>{active=false;};},[props.libraryId,assetId,props.locale,revision]);
  useEffect(()=>{let active=true;void api.listProjects().then(p=>{if(active)setProjects(p);}).catch(()=>{});return()=>{active=false;};},[props.libraryId]);
@@ -47,7 +48,7 @@ export function AssetDetail({assetId,onClose,onChanged,onSelect,...props}:AssetB
  <div id="asset-panel-6" role="tabpanel" aria-labelledby="asset-tab-6" hidden={tab!=="关系"}>{tab==="关系"&&<GraphView libraryId={props.libraryId} assetId={assetId} locale={props.locale} onOpenAsset={id=>navigate(()=>onSelect(id))} onChanged={onChanged}/>}</div>
  <div id="asset-panel-7" role="tabpanel" aria-labelledby="asset-tab-7" hidden={tab!=="AI分析"}>{tab==="AI分析"&&(detail.asset.deleted?<p>回收站资产请先恢复再分析。</p>:<AIAnalysisPanel libraryId={props.libraryId} assetId={assetId} locale={props.locale} onChanged={()=>{setRevision(r=>r+1);onChanged();}}/>)}</div>
  <div id="asset-panel-8" role="tabpanel" aria-labelledby="asset-tab-8" hidden={tab!=="Prompt"}>{detail.asset.assetType==="prompt"?(detail.asset.deleted?<p>请先恢复资产再编辑。</p>:promptVisited&&<PromptEditor libraryId={props.libraryId} assetId={assetId} onDirty={setDirty} onSaved={()=>{setRevision(r=>r+1);onChanged();}}/>):<p>此资产不是 Prompt，可在资产关系中连接 Prompt。</p>}</div>
- <div id="asset-panel-9" role="tabpanel" aria-labelledby="asset-tab-9" hidden={tab!=="项目"}><section><h3>关联项目</h3>{detail.projects.map(p=><div key={p.id} className="core-file-row"><button onClick={()=>navigate(()=>props.onOpenProject?.(p.id))}>{p.name}</button><button disabled={busy||detail.asset.deleted} onClick={()=>void run(()=>coreApi.project(props.libraryId,assetId,p.id,false))}>解除关联</button></div>)}<label>加入项目<select value={project} onChange={e=>setProject(e.target.value)}><option value="">不关联项目</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><button disabled={busy||!project||detail.asset.deleted} onClick={()=>void run(()=>coreApi.project(props.libraryId,assetId,project,true))}>关联所选项目</button></section></div>
+ <div id="asset-panel-9" role="tabpanel" aria-labelledby="asset-tab-9" hidden={tab!=="项目"}>{detail.asset.assetType==="shot"&&shotVisited&&(detail.asset.deleted?<p>请先恢复 Shot 再编辑。</p>:<ShotPanel libraryId={props.libraryId} assetId={assetId} onDirty={setDirty} onRelations={()=>chooseTab("关系")} onSaved={()=>{setRevision(r=>r+1);onChanged();}}/>)}<section><h3>关联项目</h3>{detail.projects.map(p=><div key={p.id} className="core-file-row"><button onClick={()=>navigate(()=>props.onOpenProject?.(p.id))}>{p.name}</button><button disabled={busy||detail.asset.deleted} onClick={()=>void run(()=>coreApi.project(props.libraryId,assetId,p.id,false))}>解除关联</button></div>)}<label>加入项目<select value={project} onChange={e=>setProject(e.target.value)}><option value="">不关联项目</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><button disabled={busy||!project||detail.asset.deleted} onClick={()=>void run(()=>coreApi.project(props.libraryId,assetId,project,true))}>关联所选项目</button></section></div>
  </>}
  {pending&&<div role="alertdialog" aria-label="未保存的资产草稿"><p>当前修改还未保存。关闭前可以继续编辑或复制草稿。</p><button onClick={()=>{const action=pending;setPending(null);setDirty(false);action();}}>放弃修改并继续</button><button onClick={()=>setPending(null)}>继续编辑</button></div>}
  {deleting&&<div role="alertdialog" aria-label="删除文本资产"><p>将此文本资产移入回收站？可在回收站恢复。</p><button disabled={busy} onClick={()=>void run(()=>intelligenceApi.trashTextAssets(props.libraryId,[assetId])).then(ok=>{if(ok)onClose();})}>确认移入回收站</button><button onClick={()=>setDeleting(false)}>取消删除</button></div>}

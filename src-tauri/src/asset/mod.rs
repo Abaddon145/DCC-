@@ -12,6 +12,7 @@ pub mod relations;
 pub mod repository;
 pub mod scanner;
 pub mod service;
+pub mod shot;
 #[cfg(test)]
 mod tests;
 

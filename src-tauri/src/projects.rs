@@ -150,12 +150,20 @@ fn unit_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectUnit> {
     })
 }
 
-fn list_units(connection: &Connection, project_id: &str) -> Result<Vec<ProjectUnit>, String> {
-    let mut statement = connection.prepare("SELECT u.id,u.project_id,u.parent_id,u.kind,u.name,u.description,u.start_frame,u.end_frame,u.resolution_width,u.resolution_height,u.frame_rate,u.sort_order,u.created_at,u.updated_at,
+const UNIT_SELECT:&str="SELECT u.id,u.project_id,u.parent_id,u.kind,u.name,u.description,u.start_frame,u.end_frame,u.resolution_width,u.resolution_height,u.frame_rate,u.sort_order,u.created_at,u.updated_at,
       CASE WHEN me.deleted_at IS NULL THEN u.video_media_entry_id ELSE NULL END,
       CASE WHEN me.deleted_at IS NULL THEN COALESCE((SELECT f.id FROM media_files f WHERE f.entry_id=me.id AND f.role='proxy' LIMIT 1),me.primary_file_id) ELSE NULL END,
       CASE WHEN me.deleted_at IS NULL THEN me.name ELSE NULL END
-      FROM project_units u LEFT JOIN media_entries me ON me.id=u.video_media_entry_id WHERE u.project_id=?1 ORDER BY CASE u.kind WHEN 'scene' THEN 0 ELSE 1 END,u.sort_order,u.name").map_err(|e| e.to_string())?;
+      FROM project_units u LEFT JOIN media_entries me ON me.id=u.video_media_entry_id";
+pub(crate) fn get_project_unit(connection: &Connection, id: &str) -> Result<ProjectUnit, String> {
+    connection
+        .query_row(&format!("{UNIT_SELECT} WHERE u.id=?1"), [id], unit_from_row)
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("场景或镜头不存在".into())
+}
+fn list_units(connection: &Connection, project_id: &str) -> Result<Vec<ProjectUnit>, String> {
+    let mut statement=connection.prepare(&format!("{UNIT_SELECT} WHERE u.project_id=?1 ORDER BY CASE u.kind WHEN 'scene' THEN 0 ELSE 1 END,u.sort_order,u.name")).map_err(|e|e.to_string())?;
     let values = statement
         .query_map([project_id], unit_from_row)
         .map_err(|e| e.to_string())?

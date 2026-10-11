@@ -42,6 +42,7 @@ mod tasks;
 mod translation;
 mod translation_service;
 mod upgrade_backup;
+mod workflow;
 
 use commands::*;
 use state::AppState;
@@ -269,6 +270,9 @@ pub fn run() {
                     asset::commands::get_asset_graph,
                     asset::commands::prepare_asset_analysis,
                     asset::commands::upsert_prompt_asset,
+                    asset::commands::upsert_shot_asset,
+                    asset::commands::get_shot_asset,
+                    asset::commands::list_project_shot_assets,
                     asset::commands::get_prompt_asset,
                     asset::commands::trash_text_assets,
                     asset::commands::get_asset_analysis,

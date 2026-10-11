@@ -963,6 +963,9 @@ fn prompt_trash_restore_purge_keeps_external_assets_and_shared_tags() {
     );
 }
 fn downgrade_registry_to_v21(db: &Connection) {
+    // v21 has no Shot synchronization trigger; don't leave a v23 trigger in this old-schema fixture.
+    db.execute_batch("DROP TRIGGER IF EXISTS shot_unit_sync;")
+        .unwrap();
     db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER asset_core_version_cleanup; CREATE TABLE registry_v21(id TEXT PRIMARY KEY,legacy_asset_id TEXT UNIQUE REFERENCES assets(id) ON DELETE CASCADE,media_entry_id TEXT UNIQUE REFERENCES media_entries(id) ON DELETE CASCADE,created_at TEXT NOT NULL,CHECK((legacy_asset_id IS NULL)<>(media_entry_id IS NULL))); INSERT INTO registry_v21(id,legacy_asset_id,media_entry_id,created_at) SELECT id,legacy_asset_id,media_entry_id,created_at FROM asset_core; DROP TABLE asset_core; ALTER TABLE registry_v21 RENAME TO asset_core;").unwrap();
     db.execute_batch(include_str!("schema.sql")).unwrap();
     db.execute_batch(
@@ -1089,6 +1092,177 @@ fn migration_is_idempotent_on_restored_v22_backup() {
     assert_eq!(
         db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
             .unwrap(),
+        1
+    );
+}
+
+fn shot_input(db: &Connection) -> super::intelligence_models::ShotInput {
+    let project = uuid::Uuid::new_v4().to_string();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES(?1,'短片','animation','active','now','now')",[&project]).unwrap();
+    let scene = crate::projects::upsert_project_unit(
+        db,
+        serde_json::from_value(
+            serde_json::json!({"projectId":project,"kind":"scene","name":"沙漠"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    serde_json::from_value(serde_json::json!({"projectId":project,"parentSceneId":scene.id,"act":"ACT1","shotNumber":"001","name":"远景","description":"创作描述","status":"todo"})).unwrap()
+}
+fn saved_shot_input(
+    s: &super::intelligence_models::ShotAsset,
+) -> super::intelligence_models::ShotInput {
+    serde_json::from_value(serde_json::json!({"assetId":s.asset.id,"expectedRevision":s.revision,"projectId":s.project_id,"projectUnitId":s.project_unit_id,"parentSceneId":s.unit.as_ref().and_then(|u|u.parent_id.clone()),"act":s.act,"shotNumber":s.shot_number,"name":s.asset.name,"description":s.asset.description,"status":s.status})).unwrap()
+}
+#[test]
+fn shot_registration_reuses_existing_unit_and_core_identity() {
+    let (_, mut db) = fixture();
+    let input = shot_input(&db);
+    let s = super::shot::upsert(&mut db, &input).unwrap();
+    let mut bind = saved_shot_input(&s);
+    bind.asset_id = None;
+    bind.expected_revision = None;
+    bind.name = "不应覆盖原镜头".into();
+    let again = super::shot::upsert(&mut db, &bind).unwrap();
+    assert_eq!(again.asset.id, s.asset.id);
+    assert_eq!(again.asset.name, "远景");
+    assert_eq!(again.revision, 1);
+    assert_eq!(
+        super::shot::list(&db, input.project_id.as_deref().unwrap(), 0, 200)
+            .unwrap()
+            .total,
+        1
+    );
+    let req = serde_json::from_value(
+        serde_json::json!({"assetType":"shot","projectId":input.project_id}),
+    )
+    .unwrap();
+    assert_eq!(
+        repository::search(&db, &req).unwrap().items[0].id,
+        s.asset.id
+    );
+    let mut invalid = bind.clone();
+    invalid.project_id = Some(uuid::Uuid::new_v4().to_string());
+    assert!(super::shot::upsert(&mut db, &invalid).is_err());
+    invalid = bind;
+    invalid.act = "a".repeat(81);
+    assert!(super::shot::upsert(&mut db, &invalid).is_err());
+}
+#[test]
+fn shot_creation_failure_rolls_back_unit_and_entity() {
+    let (_, mut db) = fixture();
+    let input = shot_input(&db);
+    db.execute_batch("CREATE TEMP TRIGGER fail_shot BEFORE INSERT ON shots BEGIN SELECT RAISE(ABORT,'故障注入'); END;").unwrap();
+    assert!(super::shot::upsert(&mut db, &input).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM project_units WHERE kind='shot'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM asset_entities WHERE kind='shot'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    db.execute_batch("DROP TRIGGER fail_shot").unwrap();
+    assert!(super::shot::upsert(&mut db, &input).is_ok());
+}
+#[test]
+fn shot_and_legacy_unit_edits_remain_consistent() {
+    let (_, mut db) = fixture();
+    let input = shot_input(&db);
+    let s = super::shot::upsert(&mut db, &input).unwrap();
+    let old = saved_shot_input(&s);
+    let u = s.unit.unwrap();
+    crate::projects::upsert_project_unit(&db,serde_json::from_value(serde_json::json!({"id":u.id,"projectId":u.project_id,"parentId":u.parent_id,"kind":"shot","name":"旧入口新名称","description":"旧入口新描述","startFrame":10,"endFrame":80,"frameRate":30})).unwrap()).unwrap();
+    let updated = super::shot::get(&db, &s.asset.id).unwrap();
+    assert_eq!(updated.asset.name, "旧入口新名称");
+    assert_eq!(updated.asset.description, "旧入口新描述");
+    assert_eq!(updated.revision, 2);
+    assert_eq!(updated.unit.as_ref().unwrap().end_frame, Some(80));
+    assert!(super::shot::upsert(&mut db, &old).is_err());
+    let mut edit = saved_shot_input(&updated);
+    edit.name = "Shot 编辑新名称".into();
+    edit.status = "review".into();
+    let saved = super::shot::upsert(&mut db, &edit).unwrap();
+    assert_eq!(saved.revision, 3);
+    assert_eq!(saved.unit.as_ref().unwrap().name, saved.asset.name);
+    assert_eq!(saved.unit.as_ref().unwrap().frame_rate, Some(30.0));
+    edit.expected_revision = Some(3);
+    edit.name = saved.asset.name.clone();
+    edit.description = format!(" {} ", saved.asset.description);
+    edit.status = "done".into();
+    let trimmed = super::shot::upsert(&mut db, &edit).unwrap();
+    assert_eq!(
+        trimmed.asset.description,
+        trimmed.unit.unwrap().description,
+        "bound text must stay authoritative even when legacy editor trims whitespace"
+    );
+    edit.expected_revision = Some(4);
+    edit.status = "invalid".into();
+    assert!(super::shot::upsert(&mut db, &edit).is_err());
+}
+#[test]
+fn shot_project_or_unit_delete_preserves_asset_network() {
+    let (_, mut db) = fixture();
+    let input = shot_input(&db);
+    let s = super::shot::upsert(&mut db, &input).unwrap();
+    let p = super::prompt::upsert(&mut db, &prompt_input()).unwrap();
+    relation(&db, &p.asset.id, &s.asset.id, "used_in");
+    crate::projects::delete_project_unit(&db, s.project_unit_id.as_deref().unwrap()).unwrap();
+    let detached = super::shot::get(&db, &s.asset.id).unwrap();
+    assert!(detached.unit.is_none());
+    assert!(detached.project_unit_id.is_none());
+    assert_eq!(detached.asset.name, "远景");
+    let mut edit = saved_shot_input(&detached);
+    edit.description = "独立镜头记录".into();
+    assert!(super::shot::upsert(&mut db, &edit).is_ok());
+    let project = input.project_id.unwrap();
+    crate::projects::archive_project(&db, &project, true).unwrap();
+    crate::projects::delete_project(&db, &project).unwrap();
+    let detached = super::shot::get(&db, &s.asset.id).unwrap();
+    assert!(detached.project_id.is_none());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM asset_relations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(super::prompt::get(&db, &p.asset.id).is_ok());
+}
+#[test]
+fn shot_trash_does_not_delete_project_unit_or_references() {
+    let (dir, mut db) = fixture();
+    let input = shot_input(&db);
+    let s = super::shot::upsert(&mut db, &input).unwrap();
+    let p = super::prompt::upsert(&mut db, &prompt_input()).unwrap();
+    relation(&db, &p.asset.id, &s.asset.id, "used_in");
+    let b = super::entities::trash(&mut db, &[s.asset.id.clone()]).unwrap();
+    assert!(super::shot::get(&db, &s.asset.id).unwrap().asset.deleted);
+    assert_eq!(
+        super::shot::list(&db, input.project_id.as_deref().unwrap(), 0, 200)
+            .unwrap()
+            .total,
+        0
+    );
+    crate::db::purge_trash_batch(&mut db, dir.path(), &b.batch_id).unwrap();
+    assert!(super::shot::get(&db, &s.asset.id).is_err());
+    assert!(super::prompt::get(&db, &p.asset.id).is_ok());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM project_units WHERE id=?1",
+            [s.project_unit_id.unwrap()],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
 }

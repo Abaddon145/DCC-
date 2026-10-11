@@ -130,3 +130,32 @@ pub struct PromptAsset {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShotInput {
+    pub asset_id: Option<String>,
+    pub expected_revision: Option<i64>,
+    pub project_id: Option<String>,
+    pub project_unit_id: Option<String>,
+    pub parent_scene_id: Option<String>,
+    pub act: String,
+    pub shot_number: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShotAsset {
+    pub asset: super::models::Asset,
+    pub revision: i64,
+    pub project_id: Option<String>,
+    pub project_unit_id: Option<String>,
+    pub act: String,
+    pub shot_number: String,
+    pub status: String,
+    pub unit: Option<crate::models::ProjectUnit>,
+    pub created_at: String,
+    pub updated_at: String,
+}

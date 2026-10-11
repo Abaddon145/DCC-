@@ -9,6 +9,8 @@ vi.mock("../lib/api", () => ({ mediaLibraryFileUrl: (id: string) => `http://dcc-
   unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(),
 } }));
 vi.mock("./DetailPanel", () => ({ DetailPanel: ({ asset }: { asset: AssetDetail }) => <aside className="detail-panel" aria-label="项目素材详情">{asset.name}</aside> }));
+vi.mock("../features/intelligence/api",()=>({intelligenceApi:{listShots:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:200})}}));
+vi.mock("../features/intelligence/shot/ShotPanel",()=>({ShotPanel:({unitId}:{unitId?:string})=><div>正在登记 {unitId}</div>}));
 
 const summary: ProjectSummary = {
   id: "project-1", name: "遗迹短片", description: "UE 镜头练习", projectType: "animation", status: "active",
@@ -194,4 +196,10 @@ describe("ProjectHub", () => {
     await pointerDrop(task.closest("article")!,screen.getByText("任务 41").closest("article")!);
     await waitFor(()=>expect(api.moveProjectTask).toHaveBeenCalledWith("task-40","todo",41));
   });
+});
+
+it("项目内可以为既有镜头登记 Shot Asset，不替代旧编辑入口",async()=>{
+ const shot={id:"unit-shot",projectId:summary.id,parentId:"scene",kind:"shot",name:"航拍",description:"",startFrame:1,endFrame:100,sortOrder:0} as ProjectUnit;
+ vi.mocked(api.listProjects).mockResolvedValue([summary]);vi.mocked(api.getProject).mockResolvedValue({...detail,units:[{...shot,id:"scene",kind:"scene",parentId:null,name:"沙漠"},shot]});
+ render(<ProjectHub libraryId="lib" contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));fireEvent.click(await screen.findByRole("button",{name:"场景 / 镜头"}));fireEvent.click(await screen.findByRole("button",{name:"登记为 Shot Asset"}));expect(await screen.findByText("正在登记 unit-shot")).toBeTruthy();expect(screen.getByText("1–100 帧")).toBeTruthy();
 });

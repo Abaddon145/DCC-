@@ -52,3 +52,18 @@ CREATE TABLE IF NOT EXISTS asset_entity_projects (
  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, PRIMARY KEY(entity_id,project_id)
 );
 CREATE INDEX IF NOT EXISTS idx_asset_entity_projects_project ON asset_entity_projects(project_id,entity_id);
+CREATE TABLE IF NOT EXISTS shots (
+ asset_id TEXT PRIMARY KEY REFERENCES asset_core(id) ON DELETE CASCADE,
+ project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+ project_unit_id TEXT UNIQUE REFERENCES project_units(id) ON DELETE SET NULL,
+ act TEXT NOT NULL CHECK(length(act)<=80), shot_number TEXT NOT NULL CHECK(length(shot_number)<=80),
+ status TEXT NOT NULL CHECK(status IN ('todo','in_progress','review','done')),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shots_project ON shots(project_id,created_at,asset_id);
+CREATE TRIGGER IF NOT EXISTS shot_unit_sync AFTER UPDATE OF name,description ON project_units
+WHEN NEW.name<>OLD.name OR NEW.description<>OLD.description
+BEGIN
+ UPDATE asset_entities SET name=NEW.name,description=NEW.description,revision=revision+1,updated_at=NEW.updated_at
+ WHERE id IN (SELECT c.entity_id FROM asset_core c JOIN shots s ON s.asset_id=c.id WHERE s.project_unit_id=NEW.id);
+END;

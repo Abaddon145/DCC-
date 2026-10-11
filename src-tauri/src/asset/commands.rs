@@ -10,6 +10,40 @@ fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or("素材库已切换，未读取或修改旧库".into())
 }
 #[tauri::command]
+pub fn upsert_shot_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::ShotInput,
+) -> Result<super::intelligence_models::ShotAsset, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::shot::upsert(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn get_shot_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+) -> Result<super::intelligence_models::ShotAsset, String> {
+    uuid(&asset_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::shot::get(db, &asset_id)
+    }))
+}
+#[tauri::command]
+pub fn list_project_shot_assets(
+    state: State<AppState>,
+    expected_library_id: String,
+    project_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Page<super::intelligence_models::ShotAsset>, String> {
+    uuid(&project_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::shot::list(db, &project_id, offset, limit)
+    }))
+}
+#[tauri::command]
 pub fn upsert_prompt_asset(
     state: State<AppState>,
     expected_library_id: String,
