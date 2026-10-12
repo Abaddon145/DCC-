@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS asset_ai_analysis (
   scene TEXT NOT NULL, style TEXT NOT NULL, camera TEXT NOT NULL, lighting TEXT NOT NULL, mood TEXT NOT NULL,
   model TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('text','visual')),
   input_fingerprint TEXT NOT NULL, format_version INTEGER NOT NULL,
-  created_at TEXT NOT NULL, actual_tokens INTEGER CHECK(actual_tokens>=0)
+  created_at TEXT NOT NULL, actual_tokens INTEGER CHECK(actual_tokens>=0),
+  input_snapshot TEXT NOT NULL DEFAULT '' CHECK(input_snapshot='' OR json_valid(input_snapshot))
 );
 CREATE INDEX IF NOT EXISTS idx_asset_analysis_cache ON asset_ai_analysis(asset_id,input_fingerprint,model,mode,format_version,created_at);
 CREATE INDEX IF NOT EXISTS idx_asset_analysis_latest ON asset_ai_analysis(asset_id,created_at);

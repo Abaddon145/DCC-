@@ -1267,6 +1267,140 @@ fn shot_trash_does_not_delete_project_unit_or_references() {
     );
 }
 
+#[test]
+fn shot_bound_project_cannot_be_unlinked_but_extra_projects_can() {
+    let (_, mut db) = fixture();
+    let input = shot_input(&db);
+    let shot = super::shot::upsert(&mut db, &input).unwrap();
+    let project = input.project_id.unwrap();
+    assert!(super::service::link_project(&mut db, &shot.asset.id, &project, false).is_err());
+    let page = repository::search(
+        &db,
+        &serde_json::from_value(serde_json::json!({"projectId":project})).unwrap(),
+    )
+    .unwrap();
+    assert!(page.items.iter().any(|a| a.id == shot.asset.id));
+    assert_eq!(
+        super::shot::get(&db, &shot.asset.id).unwrap().project_id,
+        Some(project)
+    );
+    let extra = shot_input(&db).project_id.unwrap();
+    super::service::link_project(&mut db, &shot.asset.id, &extra, true).unwrap();
+    super::service::link_project(&mut db, &shot.asset.id, &extra, false).unwrap();
+    assert!(repository::search(
+        &db,
+        &serde_json::from_value(serde_json::json!({"projectId":extra})).unwrap()
+    )
+    .unwrap()
+    .items
+    .is_empty());
+}
+
+#[test]
+fn analysis_saved_validity_tracks_text_sources_versions_and_old_snapshots_offline() {
+    let (dir, mut db) = fixture();
+    let asset = media_asset(&db, dir.path(), "image");
+    let preview = crate::ai::analyzer::prepare(
+        &db,
+        dir.path(),
+        None,
+        &asset,
+        super::intelligence_models::AnalysisMode::Visual,
+        &|| false,
+    )
+    .unwrap();
+    let saved = super::analysis::complete_confirmed(
+        &mut db,
+        dir.path(),
+        &super::intelligence_models::AnalysisRequest {
+            asset_id: asset.clone(),
+            preview_id: preview.id,
+            force: false,
+        },
+        &analysis_answer().to_string(),
+        Some(2),
+        &|| false,
+    )
+    .unwrap();
+    let validity = |db: &Connection| {
+        serde_json::to_value(
+            super::analysis::get_checked(db, dir.path(), &asset, Some(&saved.id), &|| false)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()["validity"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
+    assert_eq!(
+        validity(&db),
+        "current",
+        "saved analysis must report its actual validity"
+    );
+    let owner = repository::read_asset(&db, &asset, "zh-CN")
+        .unwrap()
+        .origin
+        .id;
+    db.execute(
+        "UPDATE media_entries SET name='新名称' WHERE id=?1",
+        [&owner],
+    )
+    .unwrap();
+    assert_eq!(validity(&db), "stale");
+    db.execute(
+        "UPDATE media_entries SET name='image' WHERE id=?1",
+        [&owner],
+    )
+    .unwrap();
+    super::service::set_tags(&mut db, &asset, "zh-CN", &["新标签".into()]).unwrap();
+    assert_eq!(validity(&db), "stale");
+    super::service::set_tags(&mut db, &asset, "zh-CN", &[]).unwrap();
+    assert_eq!(validity(&db), "current");
+    let file = repository::get(&db, dir.path(), &asset, "zh-CN")
+        .unwrap()
+        .files[0]
+        .clone();
+    let path = repository::file_path(&db, dir.path(), &file.source_ref).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 20, 30, 255]))
+        .save(&path)
+        .unwrap();
+    assert_eq!(
+        validity(&db),
+        "stale",
+        "replacement bytes cannot inherit current status"
+    );
+    assert_eq!(
+        super::analysis::by_id(&db, &asset, &saved.id)
+            .unwrap()
+            .unwrap()
+            .description,
+        saved.description
+    );
+    assert!(
+        super::analysis::get_checked(&db, dir.path(), &asset, Some(&saved.id), &|| true).is_err()
+    );
+    db.execute(
+        "UPDATE asset_ai_analysis SET format_version=99 WHERE id=?1",
+        [&saved.id],
+    )
+    .unwrap();
+    assert_eq!(validity(&db), "stale");
+    db.execute(
+        "UPDATE asset_ai_analysis SET format_version=1 WHERE id=?1",
+        [&saved.id],
+    )
+    .unwrap();
+    db.execute_batch("ALTER TABLE asset_ai_analysis DROP COLUMN input_snapshot")
+        .unwrap();
+    super::migrate(&db).unwrap();
+    assert_eq!(
+        validity(&db),
+        "unknown",
+        "older snapshots remain visible but are not claimed current"
+    );
+}
+
 fn media_asset(db: &Connection, base: &std::path::Path, kind: &str) -> String {
     let owner = uuid::Uuid::new_v4().to_string();
     let file = uuid::Uuid::new_v4().to_string();

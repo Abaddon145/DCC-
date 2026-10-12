@@ -317,6 +317,17 @@ pub fn link_project(
         return Err("目标项目不存在或已归档".into());
     }
     if origin.kind == "entity" {
+        if !link
+            && db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM shots WHERE asset_id=?1 AND project_id=?2)",
+                    rusqlite::params![core_id, project_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Shot 的所属项目由镜头记录管理，不能在通用关联中解除".into());
+        }
         if link {
             db.execute(
                 "INSERT OR IGNORE INTO asset_entity_projects(entity_id,project_id) VALUES(?1,?2)",

@@ -2,6 +2,55 @@ use super::{intelligence_models::*, service};
 use crate::ai::analyzer::PreparedAnalysis;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 pub const FORMAT_VERSION: i64 = 1;
+pub fn get_checked(
+    db: &Connection,
+    base: &std::path::Path,
+    asset_id: &str,
+    analysis_id: Option<&str>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<AssetAnalysis>, String> {
+    if stop() {
+        return Err("分析核验已停止".into());
+    }
+    let Some(mut saved) = (if let Some(id) = analysis_id {
+        by_id(db, asset_id, id)
+    } else {
+        latest(db, asset_id)
+    })?
+    else {
+        return Ok(None);
+    };
+    let snapshot: String = db
+        .query_row(
+            "SELECT input_snapshot FROM asset_ai_analysis WHERE id=?1",
+            [&saved.id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if snapshot.is_empty() {
+        saved.validity_message = "旧结果没有核验快照，请重新预览资料".into();
+    } else if saved.model != crate::translation_service::MODEL
+        || saved.format_version != FORMAT_VERSION
+    {
+        saved.validity = "stale".into();
+        saved.validity_message = "模型或分析格式版本已变化".into();
+    } else {
+        match crate::ai::analyzer::validate_saved_snapshot(db, base, asset_id, &snapshot, stop) {
+            Ok(()) => {
+                saved.validity = "current".into();
+                saved.validity_message = "与当前资料一致".into();
+            }
+            Err(reason) => {
+                saved.validity = "stale".into();
+                saved.validity_message = reason;
+            }
+        }
+    }
+    if stop() {
+        return Err("分析核验已停止".into());
+    }
+    Ok(Some(saved))
+}
 pub fn by_id(
     db: &Connection,
     asset_id: &str,
@@ -221,6 +270,8 @@ fn read(r: &Row<'_>) -> rusqlite::Result<AssetAnalysis> {
         format_version: r.get(12)?,
         created_at: r.get(13)?,
         actual_tokens: r.get(14)?,
+        validity: "unknown".into(),
+        validity_message: "尚未核验当前资料".into(),
     })
 }
 pub fn latest(db: &Connection, asset_id: &str) -> Result<Option<AssetAnalysis>, String> {
@@ -276,7 +327,7 @@ pub fn save(
         .map(|s| s.trim())
         .filter(|s| seen.insert(s.to_lowercase()))
         .collect();
-    db.execute("INSERT INTO asset_ai_analysis(id,asset_id,description,keywords,scene,style,camera,lighting,mood,model,mode,input_fingerprint,format_version,created_at,actual_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![id,input.preview.asset_id,answer.description,serde_json::to_string(&keywords).map_err(|e|e.to_string())?,answer.scene,answer.style,answer.camera,answer.lighting,answer.mood,crate::translation_service::MODEL,input.preview.mode.as_str(),input.preview.fingerprint,FORMAT_VERSION,chrono::Utc::now().to_rfc3339(),tokens]).map_err(|e|e.to_string())?;
+    db.execute("INSERT INTO asset_ai_analysis(id,asset_id,description,keywords,scene,style,camera,lighting,mood,model,mode,input_fingerprint,format_version,created_at,actual_tokens,input_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![id,input.preview.asset_id,answer.description,serde_json::to_string(&keywords).map_err(|e|e.to_string())?,answer.scene,answer.style,answer.camera,answer.lighting,answer.mood,crate::translation_service::MODEL,input.preview.mode.as_str(),input.preview.fingerprint,FORMAT_VERSION,chrono::Utc::now().to_rfc3339(),tokens,crate::ai::analyzer::saved_snapshot(input)?]).map_err(|e|e.to_string())?;
     db.query_row(
         &format!("SELECT {COLUMNS} FROM asset_ai_analysis WHERE id=?1"),
         [id],

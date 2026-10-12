@@ -29,3 +29,5 @@
 .analysis-result dl>div{display:grid;grid-template-columns:56px minmax(0,1fr);gap:12px;margin-bottom:12px}
 .analysis-result dt{color:var(--muted)}.analysis-result dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .analysis-keywords{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}.analysis-keywords label{display:flex;gap:6px;align-items:center}
+.analysis-validity{padding:10px 12px;border:1px solid var(--border-light);border-radius:var(--radius-md);color:var(--muted)}
+.analysis-validity.stale{border-color:var(--accent);color:var(--accent-bright);background:var(--accent-bg)}

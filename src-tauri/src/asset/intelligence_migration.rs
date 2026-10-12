@@ -15,6 +15,10 @@ pub fn migrate(db: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         tx.execute_batch(include_str!("intelligence_schema.sql"))
             .map_err(|e| e.to_string())?;
+        let has_snapshot:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('asset_ai_analysis') WHERE name='input_snapshot')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !has_snapshot {
+            tx.execute_batch("ALTER TABLE asset_ai_analysis ADD COLUMN input_snapshot TEXT NOT NULL DEFAULT '' CHECK(input_snapshot='' OR json_valid(input_snapshot));").map_err(|e|e.to_string())?;
+        }
         if upgrade {
             let triggers = {
                 let mut s=tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND instr(lower(sql),'asset_core')>0").map_err(|e|e.to_string())?;

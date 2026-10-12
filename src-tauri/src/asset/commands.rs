@@ -101,20 +101,29 @@ pub async fn prepare_asset_analysis(
     .map_err(|_| "分析资料准备中断，请重试".to_string())?
 }
 #[tauri::command]
-pub fn get_asset_analysis(
-    state: State<AppState>,
+pub async fn get_asset_analysis(
+    app: tauri::AppHandle,
     expected_library_id: String,
     asset_id: String,
     analysis_id: Option<String>,
 ) -> Result<Option<super::intelligence_models::AssetAnalysis>, String> {
     uuid(&asset_id)?;
-    current(state.with_library_if_id(&expected_library_id, |db, _| {
-        if let Some(id) = &analysis_id {
-            super::analysis::by_id(db, &asset_id, id)
-        } else {
-            super::analysis::latest(db, &asset_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base =
+            current(state.with_library_if_id(&expected_library_id, |_, base| Ok(base.to_owned())))?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let stop =
+            || state.active_library_id().ok().as_deref() != Some(expected_library_id.as_str());
+        let result =
+            super::analysis::get_checked(&db, &base, &asset_id, analysis_id.as_deref(), &stop)?;
+        if stop() {
+            return Err("素材库已切换，未返回旧库分析".into());
         }
-    }))
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "分析核验中断，请重试".to_string())?
 }
 #[tauri::command]
 pub fn apply_asset_analysis_tags(

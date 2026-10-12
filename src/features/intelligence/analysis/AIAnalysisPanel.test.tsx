@@ -10,6 +10,18 @@ const preview={id:"preview",assetId:"asset",model:"deepseek-flash",mode:"visual"
 const saved={id:"analysis",assetId:"asset",description:"雨夜城市",keywords:["雨夜","电影感"],scene:"城市",style:"写实",camera:"广角",lighting:"霓虹",mood:"安静",model:"deepseek-flash",mode:"visual",inputFingerprint:"hash",formatVersion:1,actualTokens:64,createdAt:"now"};
 const task={id:"task",libraryId:"lib",status:"running",payload:{kind:"aiAnalyze",request:{assetId:"asset",previewId:"preview",force:false}},message:"",result:null};
 const props={libraryId:"lib",assetId:"asset",locale:"zh-CN",onChanged:vi.fn()};
+it("过期分析明确标记并保留历史，不自动联网",async()=>{
+ calls.getAnalysis.mockResolvedValue({...saved,validity:"stale",validityMessage:"原件内容已改变"});
+ render(<AIAnalysisPanel {...props}/>);expect(await screen.findByText(/已过期.*原件内容已改变/)).toBeTruthy();expect(screen.getByText("雨夜城市")).toBeTruthy();expect(calls.prepareAnalysis).not.toHaveBeenCalled();expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("重新预览发现同模式指纹不同后即时提示过期",async()=>{
+ calls.getAnalysis.mockResolvedValue({...saved,validity:"current",validityMessage:""});calls.prepareAnalysis.mockResolvedValue({...preview,fingerprint:"changed"});
+ render(<AIAnalysisPanel {...props}/>);await screen.findByText("雨夜城市");fireEvent.click(screen.getByRole("button",{name:"预览分析资料"}));expect(await screen.findByText(/已过期.*本次资料/)).toBeTruthy();expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("追加标签后立即核验历史结果，不继续显示当前有效",async()=>{
+ calls.getAnalysis.mockResolvedValueOnce({...saved,validity:"current",validityMessage:"与当前资料一致"}).mockResolvedValue({...saved,validity:"stale",validityMessage:"标签已变化"});
+ render(<AIAnalysisPanel {...props}/>);await screen.findByText("雨夜城市");fireEvent.click(screen.getByRole("checkbox",{name:"电影感"}));fireEvent.click(screen.getByRole("button",{name:"追加所选标签"}));expect(await screen.findByText(/已过期.*标签已变化/)).toBeTruthy();expect(calls.getAnalysis).toHaveBeenLastCalledWith("lib","asset","analysis");expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
 beforeEach(()=>{vi.clearAllMocks();calls.prepareAnalysis.mockResolvedValue(preview);calls.getAnalysis.mockResolvedValue(null);vi.mocked(api.startLibraryTask).mockResolvedValue(task as never);vi.mocked(api.getLibraryTask).mockResolvedValue(task as never)});
 afterEach(cleanup);
 it("预览和明确确认后才提交，重复点击只提交一次",async()=>{

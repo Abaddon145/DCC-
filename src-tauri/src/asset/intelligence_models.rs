@@ -107,6 +107,8 @@ pub struct AssetAnalysis {
     pub format_version: i64,
     pub created_at: String,
     pub actual_tokens: Option<u64>,
+    pub validity: String,
+    pub validity_message: String,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

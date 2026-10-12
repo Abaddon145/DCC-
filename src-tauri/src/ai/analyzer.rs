@@ -55,6 +55,51 @@ pub struct PreparedAnalysis {
 fn hash(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedSnapshot {
+    summary: String,
+    sources: Vec<SourceCheck>,
+}
+pub fn saved_snapshot(input: &PreparedAnalysis) -> Result<String, String> {
+    serde_json::to_string(&SavedSnapshot {
+        summary: input.preview.summary.clone(),
+        sources: input.sources.clone(),
+    })
+    .map_err(|_| "无法保存分析核验资料".into())
+}
+pub fn validate_saved_snapshot(
+    db: &Connection,
+    base: &Path,
+    asset_id: &str,
+    raw: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    if stop() {
+        return Err("分析核验已停止".into());
+    }
+    if raw.len() > 256 * 1024 {
+        return Err("分析核验资料超出限制".into());
+    }
+    let snapshot: SavedSnapshot =
+        serde_json::from_str(raw).map_err(|_| "分析核验资料损坏，请重新预览".to_string())?;
+    if snapshot.sources.len() > 2 {
+        return Err("分析核验资料无效".into());
+    }
+    if summary(db, asset_id)? != snapshot.summary {
+        return Err("名称、说明或标签已变化".into());
+    }
+    for expected in snapshot.sources {
+        let actual = source_check(db, base, &expected.source, stop)?;
+        if actual.size != expected.size || actual.hash != expected.hash {
+            return Err("原件内容已改变".into());
+        }
+    }
+    if summary(db, asset_id)? != snapshot.summary {
+        return Err("核验期间资料已变化".into());
+    }
+    Ok(())
+}
 fn library_fingerprint(base: &Path) -> Result<String, String> {
     Ok(hash(
         base.canonicalize()
