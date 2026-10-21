@@ -10,7 +10,7 @@
 | --- | --- |
 | 实际工作区 | `C:/Users/14582/Documents/ChatGPT/软件开发` |
 | 当前分支 | `codex/yingliu-learning-integration` |
-| 当前 HEAD | `5ab8928`，`docs(integration): adapt learning plan and review proposed v1 contract` |
+| 首次盘点 HEAD | `5ab8928`，`docs(integration): adapt learning plan and review proposed v1 contract`；后续准备提交 `9c74e97`、`acd1833`，详细计划从 acd1833 核对 |
 | 最新产品成果 | v0.23.0，产品基线 `48078e56e0b304dc313a03c9aba4ef010847dacb`；当前 HEAD 在其上增加基线测试和准备文档 |
 | 新增基线提交 | `fcddd01`，双隔离库备份恢复验收与基线报告 |
 | 初始状态 | 本次准备检查时工作区干净，未回退旧 PR 或历史版本 |
@@ -110,4 +110,6 @@
 - M6 先 dry-run，再按用户选定目标库逐批迁入；确认重跑不重复、库切换不串、空间不足可恢复、用户已改内容不被撤回删除。
 - 新增学习/归档数据目录与表后，同步补整库备份、切库迁移、回收、损坏包及中断恢复检查；旧版降级只能用升级前备份。
 
-本节只提供目标仓库的事实与审阅建议，不表示产品存储迁移或新设计已获用户最终批准。等待协调窗口汇总两端报告并提供审阅后的正式任务。
+本节只提供目标仓库的事实与审阅建议，不表示产品存储迁移已完成。后续协调消息及最新设计已记录用户接受第6.3节：document_json为唯一默认来源、原Markdown/Vault保留且不做双向自动写回，此项不再重复确认。最新设计本端读取SHA256为 `558B07B7B6F00138F03E53A427F1EE402746DC075AAAB1B2E6D371E1423A11B6`。
+
+源清单现已提供，本端只读核对 `merge-readiness-yingliu.md`（SHA256 `7C4ECEB13DFFAC9D91E26761CF0E94F7858D05BC132A8FAFCBB6403BEA243AD8`）：源HEAD为c02c63d，分析修复当时尚未提交；旧笔记按vault_id+path识别，没有独立持久noteId，需建立来源profile映射；mpv/Whisper工具不完整。详细M0—M7计划已编写于 `docs/superpowers/plans/2026-10-21-stackdcc-yingliu-merge.md`。仍等待任务计划审阅，不开始产品集成或真实数据迁移。
