@@ -1,0 +1,155 @@
+{
+  "sourceCommit": "c86650831aecb55ef7bec288df9ae7fb27c8d178",
+  "sourceHead": "0eef17b9bddcbb51677d220fa0589a01e7755c93",
+  "readOnly": true,
+  "files": [
+    {
+      "path": "src-tauri/src/learning/native_player.rs",
+      "sha256": "030c71776d52b5ae928e17e0da3502ec545f1ec718fc48b156d10c954eb96a7a"
+    },
+    {
+      "path": "src-tauri/src/learning/native_window.rs",
+      "sha256": "6a0cb3860eb50c2627a249e5d242717d7bde2c64f1e45739ff9489eee4a3e2c8"
+    },
+    {
+      "path": "src-tauri/src/learning/progress.rs",
+      "sha256": "a35ee56068f3716a334c9a673ec15e5da980fa1880daa303678707ae0e15629c"
+    },
+    {
+      "path": "src-tauri/src/learning/player.rs",
+      "sha256": "211086de9d87848b82aa250dea82922de68776c2d15cb9a36270fe173c6037ac"
+    },
+    {
+      "path": "src-tauri/src/learning/models.rs",
+      "sha256": "bb52fa975f08d99d3013ab7875fea03f63c933c7074d77c18498273d8886daca"
+    },
+    {
+      "path": "src-tauri/src/learning/repository.rs",
+      "sha256": "5e5ca41c51a961e1f13217b5a7bfb926fb5c748bf3c7dcf54ab03ee0bac751ac"
+    },
+    {
+      "path": "src-tauri/src/learning/capture.rs",
+      "sha256": "9506481c31d02b2590c484ba281a8ef8c62ad47f0792cd4ce1cd65ba33c0415b"
+    },
+    {
+      "path": "src-tauri/src/learning/cache.rs",
+      "sha256": "ff426edc92c9fc42fac96af59a96024b3d3672ea740215178558af12e015b579"
+    },
+    {
+      "path": "src-tauri/src/learning/commands.rs",
+      "sha256": "abba1ec9b5e5b62e8a59bb128260b1c79d5134dad06cbce14a506843ba754135"
+    },
+    {
+      "path": "src-tauri/src/learning/service.rs",
+      "sha256": "9d44fdb6952923830361f42ed0803c33d85be8a0b3f8ccfd794ac46512eb90c0"
+    },
+    {
+      "path": "src-tauri/src/learning/db.rs",
+      "sha256": "acb6df316602402c1ab331bc3e44dbf8e64da841e136827e3eebdac245b3b054"
+    },
+    {
+      "path": "src-tauri/src/native.rs",
+      "sha256": "3e8272369ba8661adbfb2fdc9567fdc949a73f09f897b77a958af7dc0cd35806"
+    },
+    {
+      "path": "src-tauri/src/ai/analysis.rs",
+      "sha256": "0fcce54ce522ccddcf41106710f8f7ec84cb1d7cb647540a51c27a8931968afd"
+    },
+    {
+      "path": "src-tauri/src/ai/models.rs",
+      "sha256": "0365f6eeabc62b5efe82cbb98920463ab9cb1f52d546efc833da600bfe839cda"
+    },
+    {
+      "path": "src-tauri/src/ai/references.rs",
+      "sha256": "52cb457a3274b3f35ca37051e9233a4269617fa52b8a6f0b69ef649dbfadcb17"
+    },
+    {
+      "path": "src-tauri/src/ai/repository.rs",
+      "sha256": "c4463022af84cc685e3153d921c7ccf3ce0fcb04c92dc81fa1aa3bc43cfd77db"
+    },
+    {
+      "path": "src-tauri/src/ai/summary.rs",
+      "sha256": "181807e034dd2a7dea94dc8e743752338a9e1742115d82975e79b98cb2d3d907"
+    },
+    {
+      "path": "src-tauri/src/ai/jobs.rs",
+      "sha256": "13e9a8bfa03f1aef366d095cc237897565916204395d121b0b7d7290469f6e4e"
+    },
+    {
+      "path": "src-tauri/src/ai/section_reference_tests.rs",
+      "sha256": "8abcdc6e5336f3a1889a6c34e3ca39f572fbac9f59a019a9ad3b5f1c4992a700"
+    },
+    {
+      "path": "src-tauri/src/ai/template_tests.rs",
+      "sha256": "82b7ca925b470f4eebced53fd7ef1e7404d4642a69002eb0c6525bb222e18cb1"
+    },
+    {
+      "path": "src-tauri/src/ai/materials.rs",
+      "sha256": "249ef4651938bbb10ad565f883466537b3e6641b3abda00d452ba419506b3030"
+    },
+    {
+      "path": "src-tauri/src/ai/subtitles.rs",
+      "sha256": "9dad70773caaf087061657d60acd37f22ce3bf82846240762751003576b1271e"
+    },
+    {
+      "path": "src-tauri/src/ai/transcription.rs",
+      "sha256": "8dd438fb06d4ac59d514b3266ae0bc6018c3205aeccb727b2aa452f61bcff5b3"
+    },
+    {
+      "path": "src-tauri/src/ai/whisper_models.rs",
+      "sha256": "08a2c514bab50e754f38fb8bfbe696a8fb680eb95a187f274b366bad2ae667d6"
+    },
+    {
+      "path": "src-tauri/src/ai/qa.rs",
+      "sha256": "eafd3d54b6b6e961f950aec70531f7e5e2a3b92d3bf6d09e4e4b21c468094883"
+    },
+    {
+      "path": "src-tauri/src/ai/service.rs",
+      "sha256": "3247535f17708d035b2fa27f7f9f3f0cb7bd0c572949b84d669998d48cbf1eb2"
+    },
+    {
+      "path": "src/features/learning/LearningPlayer.tsx",
+      "sha256": "321df7b023a30aa4eeb8dfc73fecbf223f33e489c669ab7fd63983ac86d7d485"
+    },
+    {
+      "path": "src/features/learning/NativeLearningSurface.tsx",
+      "sha256": "8e6daf07ab7201857f2420abca299094fd90634b46e9ca5860c145cb7435b3c6"
+    },
+    {
+      "path": "src/features/learning/nativeBindings.ts",
+      "sha256": "0941c320299f620dd34c011f64d7fe323a0c8c83f67034f006695df9ba301c08"
+    },
+    {
+      "path": "src/features/learning/playerInteraction.ts",
+      "sha256": "f0f376637860a76390dc85c05738d8d10792a111e85423b7775f424b0106670c"
+    },
+    {
+      "path": "src/features/learning/playbackHandle.ts",
+      "sha256": "b908f65039cc0c66e5104d969533eb712fda3586cd92bca6ac67bbc1999dcfea"
+    },
+    {
+      "path": "src/features/learning/VideoNotes.tsx",
+      "sha256": "fd0eaa63e4261792239c603985f689398f32c84ea2511b04be7200c2c208b9f3"
+    },
+    {
+      "path": "src/features/ai/VideoSummary.tsx",
+      "sha256": "a7069412ebd2d3da3ed1005b42a0a4f2820662dc538234a8319771b5d3c84706"
+    },
+    {
+      "path": "src/features/ai/SectionValidation.tsx",
+      "sha256": "5c8c623b689fb130b34dcfc7d9bced6239caa18c94f9aeb7ef1ca50af8bbcdea"
+    },
+    {
+      "path": "src/features/ai/Transcript.tsx",
+      "sha256": "9de9a3dda4bc4f5664d74ed5082136d61dd2ec382d84462e28ed04d557866e88"
+    },
+    {
+      "path": "src/features/ai/VideoAsk.tsx",
+      "sha256": "98bd000372940374398f3aaf238b3cba55a928bf3e4897679e5838115b80de2f"
+    },
+    {
+      "path": "src/types/ai.ts",
+      "sha256": "794224dec9630ae5c0b282b00ade434e6ac6a59cef9fe4d0c9a33c148ab27cf0"
+    }
+  ]
+}

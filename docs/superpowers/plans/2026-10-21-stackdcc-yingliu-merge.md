@@ -12,6 +12,7 @@
 
 ## Global Constraints
 
+- 用户指定子代理按难度选模型：简单核对用Luna，普通实现用Sol，复杂分析/独立审查用GPT-6.1 Sol高推理；禁止使用GPT-6 Astra。当前保持顺序执行，不为简单检查额外分派。
 - “以栈藏为唯一主应用，逐步迁入映流的原生播放器、课程字幕、学习进度、视频分析和时间码摘录能力。”
 - “栈藏结构化正文成为合并后唯一默认编辑与保存来源。”
 - “首版保留 Markdown 导入导出与原 Vault，不做 Obsidian 双向自动写回。”
@@ -40,9 +41,9 @@
 
 - 目标产品基线 `48078e56e0b304dc313a03c9aba4ef010847dacb`（0.23.0/schema 22）；计划起点当前 `acd1833`，分支 `codex/yingliu-learning-integration`。其上仅有基线测试/准备文档，不回退至历史 PR #14/v0.21。
 - 本端依据：[readiness](../../integration/merge-readiness-dcc.md)、[基线](../../evidence/learning-upgrade/baseline.md)。同日已执行前端 315、Rust 331 通过/2 忽略及生产构建；这些不是移植后通过数。
-- 源清单 `C:/Users/14582/Documents/ChatGPT/视频下载软件/docs/integration/merge-readiness-yingliu.md`，本轮 SHA256 `7C4ECEB13DFFAC9D91E26761CF0E94F7858D05BC132A8FAFCBB6403BEA243AD8`。源 HEAD 实测 `c02c63d`，完整产品起点 `67ba053`；分析最小修复尚未提交。源清单提供的能力、261/8 测试等是源端报告，不是 DCC 已复测结果。
+- 源清单 `C:/Users/14582/Documents/ChatGPT/视频下载软件/docs/integration/merge-readiness-yingliu.md`，冻结SHA256 `9D7DB79ABEB8F4C6E6A8D226597FE3BE21FDE16793BC2C5CC08A7C281A7C14A3`。源HEAD实测 `0eef17b9bddcbb51677d220fa0589a01e7755c93`，已提交分析修复 `c86650831aecb55ef7bec288df9ae7fb27c8d178`，完整产品起点 `67ba053`。源报告101前端、266 Rust通过/8忽略及4组浏览器模拟检查，不是DCC已复测结果。
 - 源当前仍有 F11 小写错误，A–B/三态侧栏/完整字幕摘录等未完成；不把历史 8 键测试当完整键位验收。
-- 源工作区缺 mpv/Whisper 完整工具，原工作树资源可用性需源端提供；源 mpv manifest 固定版本 `20261015-git-492bae0768`、7z SHA256 `f9becefe40e2a29d2ce5f3ab231ff094f9cf3e4038ff014cfe4a0c09ad90e79e`。在目标实际解压/校验和许可清单完成前，不能宣布可制作完整安装包。
+- 源主工作区缺mpv/Whisper；旧关联工作区18个exe/DLL及mpv/Whisper归档hash已核验，实际启动版本检查通过。源mpv归档SHA256 `f9becefe40e2a29d2ce5f3ab231ff094f9cf3e4038ff014cfe4a0c09ad90e79e`。尚未复制或集成到DCC，原生播放、DPI及完整安装包仍未验收；保留现有DCC LGPL FFmpeg，具体路径/许可/兼容证据见来源清单。
 - 源 Vault 身份由路径/卷/文件标识派生，笔记主键为 vault_id+path，**没有可直接复用的持久 noteId**。M6 创建确认的 source-profile UUID，保留原键和摘要映射。
 
 ### Task 1 / M0：冻结可移植输入与执行起点
@@ -50,6 +51,8 @@
 **Files:** 更新 `docs/integration/merge-readiness-dcc.md`；新增 `docs/integration/yingliu-source-map.md`、`docs/evidence/merge/m0.md`，样本放忽略的 `release-artifacts/yingliu-merge/m0/`。
 
 **Interfaces:** `yingliu-source-map.md` 固定源 SHA、逐文件源→目标、修复提交、许可证/工具 hash、样本 schemaVersion、转换版本；这是审阅清单，不是产品跨应用协议。
+
+**已完成的准备子集：** [来源清单](../../integration/yingliu-source-map.md)固定37个源文件hash；[M0证据](../../evidence/merge/m0.md)记录25项隔离检查及同日有效基线复用。执行 `node docs/evidence/merge/verify-m0.mjs` 可重跑。合成样本不是正式迁入格式，未执行产品任务；下方完整门槛仍待计划审阅及对应实现验证。
 
 - [ ] 读取本计划/最新设计、两端 readiness，核对目标 HEAD/干净状态及源已提交修复；源端未提交差异只登记，禁止当作可移植提交。记录实际 SHA 后再改依赖它的目标文件。
 - [ ] 核对 Task 2—7 的源/目标 interface；原生部分只选 `learning/native_player.rs`、`native_window.rs`、前端播放/绑定/事件算法及必要 `native.rs`。剥离 LearningService、源数据库/全局App/命令注册依赖，不整文件盲拷。
@@ -138,7 +141,7 @@ Course字段：id/mediaId/title/positionMs:u64/durationMs:Option<u64>/rate:f64/c
 - [ ] 实现schema24及串行库检查命令；使用现有 `with_library_if_id` / mutable 版本，错库显式错误，不回退默认库。
 - [ ] Run 定向+Rust全量+`npm run build`，Expected全绿，备份恢复保留课程/系列/UUID。Commit `feat(learning): bind library courses and series to existing media`。
 
-**M1门槛：** 上述已有服务适配/恢复检查通过；源端最小分析修复提交号和复现fixture固定后方可接入M3。此门槛不要求先完成远程AI调用或旧库迁入。
+**M1门槛：** 上述已有服务适配/恢复检查通过。源端最小分析修复提交号和fixture已在M0固定；接入M3仍须目标适配子计划与测试。此门槛不要求先完成远程AI调用或旧库迁入。
 
 ## M2：原生播放与学习数据（执行级任务）
 
@@ -195,7 +198,7 @@ Task5一并提供 `save_learning_progress(lease:&PlaybackLease,seq:u64,progress:
 
 **Files:** 拟新增 `learning/{analysis,analysis_store,analysis_tests}.rs`、`learning/schema-v26.sql`；改 `tasks.rs`、`translation_service.rs`、`TaskCenter.tsx`；新学习分析页签。不得覆写asset_ai_analysis或搬源ai App/队列。
 
-**依赖/Interfaces:** 等源端提交分析修复/fixture后，在 `yingliu-source-map.md` 固定结果schema、sectionValidation、模板/提示版本和转录/画面ID格式，再补 `docs/superpowers/plans/2026-10-21-dcc-course-analysis.md` 的精确列/typed DTO和可运行样例。新 `TaskRequest::CourseAnalysis{courseId,previewId,stage}` 使用同一TaskRegistry；`prepare_course_analysis` 返回明确材料范围/费用预留摘要；`start`只接受确认的previewId，不从迁入历史携带批准。
+**依赖/Interfaces:** 源分析修复c866508及fixture已固定；据其结果schema、sectionValidation、模板/提示版本和转录/画面ID格式，仍须补 `docs/superpowers/plans/2026-10-21-dcc-course-analysis.md` 的目标精确列/typed DTO、预算适配和可运行样例。新 `TaskRequest::CourseAnalysis{courseId,previewId,stage}` 使用同一TaskRegistry；`prepare_course_analysis` 返回明确材料范围/费用预留摘要；`start`只接受确认的previewId，不从迁入历史携带批准。
 
 - [ ] 先测试真调用链局部失败fixture、3成功+1失败仅重发第4段、格式/单位错误、取消/切库、过期输入和月度额度耗尽（mock HTTP，不真付费）。Run `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib learning_analysis -- --test-threads=1`，Expected新任务缺失FAIL，再实现后PASS。
 - [ ] 转录先已有字幕，Whisper需工具/模型版本和下载hash通过；模型用户选择安装不默认塞包。选帧/转录/分段/汇总阶段缓存按文件指纹+字幕/帧来源+模型+模板+提示版本隔离。
@@ -203,7 +206,7 @@ Task5一并提供 `save_learning_progress(lease:&PlaybackLease,seq:u64,progress:
 - [ ] 课程stage的字幕/帧/响应大小在子计划按源fixture单独定限；不全局放宽v0.23资产分析的4帧输入和翻译输出限制，也不静默截断课程全文。超过单请求能力时按完整来源段分批并展示范围。
 - [ ] TaskCenter查询活动/失败/需操作，而非仅最近历史；百分比有真实总量才显示，合法内容保留并显示部分完成和定位。Run全回归/构建+模拟服务，Expected 0外部付费请求、无网络自动恢复。Commit `feat(learning): run staged course analysis through shared tasks and budgets`。
 
-M3 门槛：先补精确子计划/固定源修复提交；原用户回执缺失需如实报告，不能把合成修复称为已验证原个案。
+M3 门槛：源修复提交已固定，仍须精确目标子计划；原用户回执缺失需如实报告，不能把合成修复称为已验证原个案。
 
 ## M4：唯一知识库及三态侧栏
 
@@ -298,7 +301,7 @@ Expected：退出码0；实际测试数随新增更新，不能固定旧数掩�
 
 - 规格覆盖：设计§1—3→Task2—7/11；§4.1→5—7；§4.2→8；§4.3/6.3→9—10/12；§5→11；§6.1/6.2/6.4/6.5→2—3/8/12—13；§7—9→1/14。Review Focus五类均有具体用例归属。
 - 已确认不再询问：唯一主应用、document_json默认权威、保留原文/Vault与显式Markdown导入导出、不做双向Obsidian自动写回。
-- 真正阻断：源分析修复的已提交SHA/可复用结果样本尚未固定（阻M3）；mpv实际工具/许可打包选择和完整Windows资源必须核验（阻M2实机/打包）；版本化源快照/导出manifest/稳定source-profile及样本仍须双方按源实况冻结（阻M6）。这些可通过源清单补齐，不需要用户再次选择存储方向。
-- 推荐首个实施任务：计划审阅后从Task1冻结输入开始；首个产品改动是Task2“外部视频只读登记和统一文件解析”，先写安全/不删除原件测试，再加增量schema23。未完成Task2—4不先搬播放器UI。
+- 当前依赖：M3源修复/样本已固定，待目标typed结果、任务预算适配子计划；M2工具来源/hash已核验，待目标资源接入、真实Windows播放/DPI及打包验证；M6版本化源快照/导出manifest/稳定source-profile及sidecar样本仍须按源实况冻结。不需要用户再次选择存储方向。
+- 推荐首个实施任务：Task1只读准备已记录；计划审阅后，首个产品改动是Task2“外部视频只读登记和统一文件解析”，先写安全/不删除原件测试，再加增量schema23。未完成Task2—4不先搬播放器UI。
 - 执行方式沿用当前会话顺序；本计划到此仅供协调窗口汇总审阅，没有开始产品集成或真实数据迁移。
 - 本轮自审/静态验证：14个任务编号连续、M0—M7覆盖、命令无省略占位、未改产品代码；源代码/接口按实际文件核对。源清单与设计未来修订须在Task1重新固定，不将本计划中的拟新增类型误认为已有实现。

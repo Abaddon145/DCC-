@@ -112,4 +112,4 @@
 
 本节只提供目标仓库的事实与审阅建议，不表示产品存储迁移已完成。后续协调消息及最新设计已记录用户接受第6.3节：document_json为唯一默认来源、原Markdown/Vault保留且不做双向自动写回，此项不再重复确认。最新设计本端读取SHA256为 `558B07B7B6F00138F03E53A427F1EE402746DC075AAAB1B2E6D371E1423A11B6`。
 
-源清单现已提供，本端只读核对 `merge-readiness-yingliu.md`（SHA256 `7C4ECEB13DFFAC9D91E26761CF0E94F7858D05BC132A8FAFCBB6403BEA243AD8`）：源HEAD为c02c63d，分析修复当时尚未提交；旧笔记按vault_id+path识别，没有独立持久noteId，需建立来源profile映射；mpv/Whisper工具不完整。详细M0—M7计划已编写于 `docs/superpowers/plans/2026-10-21-stackdcc-yingliu-merge.md`。仍等待任务计划审阅，不开始产品集成或真实数据迁移。
+M0 更新：本端只读核对 `merge-readiness-yingliu.md`（SHA256 `9D7DB79ABEB8F4C6E6A8D226597FE3BE21FDE16793BC2C5CC08A7C281A7C14A3`），源HEAD为0eef17b，包含已提交分析修复c866508，不再将缺失修复提交列为阻断。旧笔记仍按vault_id+path识别，需建立来源profile映射。mpv/Whisper在旧关联工作区的18个exe/DLL已核验，尚未接入DCC；25项隔离检查支持保留DCC现有LGPL FFmpeg。详见 [来源清单](yingliu-source-map.md) 和 [M0证据](../evidence/merge/m0.md)。M0—M7计划仍待审阅，不开始产品集成或真实数据迁移。
