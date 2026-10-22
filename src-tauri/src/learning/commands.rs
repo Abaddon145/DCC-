@@ -1,6 +1,85 @@
+use super::native_player::{self, NativeViewport, PlaybackAction, PlaybackSnapshot};
 use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
+#[tauri::command]
+pub async fn start_learning_playback(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+) -> Result<PlaybackSnapshot, String> {
+    #[cfg(windows)]
+    return tauri::async_runtime::spawn_blocking(move || {
+        native_player::start_playback(&app, &expected_library_id, &course_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    Err("当前平台不支持原生学习播放".into())
+}
+#[tauri::command]
+pub async fn control_learning_playback(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    session_id: String,
+    action: PlaybackAction,
+) -> Result<PlaybackSnapshot, String> {
+    #[cfg(windows)]
+    return tauri::async_runtime::spawn_blocking(move || {
+        native_player::control(&app, &expected_library_id, &session_id, action)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    Err("当前平台不支持原生学习播放".into())
+}
+#[tauri::command]
+pub async fn set_learning_viewport(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    session_id: String,
+    viewport: NativeViewport,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    return tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        native_player::set_viewport(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &session_id,
+            viewport,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    Err("当前平台不支持原生学习播放".into())
+}
+#[tauri::command]
+pub async fn stop_learning_playback(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        native_player::stop_learning_session(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &session_id,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub fn get_learning_playback(
+    state: State<AppState>,
+    expected_library_id: String,
+    session_id: String,
+) -> Result<PlaybackSnapshot, String> {
+    native_player::snapshot(&state, &expected_library_id, &session_id)
+}
 fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or_else(|| "素材库已切换，未读取或修改旧库".into())
 }

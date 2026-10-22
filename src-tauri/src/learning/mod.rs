@@ -10,4 +10,11 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
 pub mod commands;
 pub mod files;
 pub mod models;
+#[cfg(windows)]
+mod native_ipc;
+pub mod native_player;
+#[cfg(all(windows, debug_assertions))]
+pub mod native_qa;
+#[cfg(windows)]
+pub mod native_window;
 pub mod store;

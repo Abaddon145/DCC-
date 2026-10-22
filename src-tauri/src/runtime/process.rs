@@ -1,5 +1,48 @@
 //! All downloader child processes are owned by a kill-on-close Windows job.
 use std::{path::Path, time::Duration};
+#[cfg(windows)]
+pub struct OwnedProcess {
+    process: std::os::windows::io::OwnedHandle,
+    job: std::os::windows::io::OwnedHandle,
+}
+#[cfg(windows)]
+impl OwnedProcess {
+    pub fn id(&self) -> u32 {
+        use std::os::windows::io::AsRawHandle;
+        unsafe { windows_sys::Win32::System::Threading::GetProcessId(self.process.as_raw_handle()) }
+    }
+    pub fn terminate(&self) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        if unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job.as_raw_handle(), 1)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                self.process.as_raw_handle(),
+                5000,
+            )
+        };
+        Ok(())
+    }
+    pub fn exited(&self) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                self.process.as_raw_handle(),
+                0,
+            ) == windows_sys::Win32::Foundation::WAIT_OBJECT_0
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
 pub fn quote_argument(value: &str) -> String {
     let mut quoted = String::from("\"");
     let mut slashes = 0;
@@ -18,16 +61,12 @@ pub fn quote_argument(value: &str) -> String {
 }
 
 #[cfg(windows)]
-pub fn capture(
+pub fn spawn_owned(
     exe: &Path,
     args: &[String],
-    timeout: Duration,
-    stop: &dyn Fn() -> bool,
-    line: &mut dyn FnMut(&str),
-) -> Result<String, String> {
+) -> Result<(OwnedProcess, std::fs::File, std::fs::File), String> {
     use std::{
         fs::File,
-        io::Read,
         os::windows::{
             ffi::OsStrExt,
             io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -164,6 +203,25 @@ pub fn capture(
         DeleteProcThreadAttributeList(attrs);
         (result?, job, stdout, stderr)
     };
+    Ok((OwnedProcess { process, job }, stdout, stderr))
+}
+
+#[cfg(windows)]
+pub fn capture(
+    exe: &Path,
+    args: &[String],
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+    line: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    use std::{fs::File, io::Read, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::System::{
+        JobObjects::TerminateJobObject,
+        Threading::{GetExitCodeProcess, WaitForSingleObject},
+    };
+    let (owned, stdout, stderr) = spawn_owned(exe, args)?;
+    let process = &owned.process;
+    let job = &owned.job;
     // Drain both pipes continuously, with bounded retained data and no unbounded lines.
     let (sender, receiver) = std::sync::mpsc::sync_channel::<(bool, String)>(128);
     let read_lines =
@@ -269,6 +327,29 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn learning_native_process_drop_reaps_owned_tree() {
+        use std::io::{BufRead, BufReader};
+        use windows_sys::Win32::{Foundation::*, System::Threading::*};
+        let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+        let args=["-NoProfile".into(),"-Command".into(),"$child=Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; Write-Output $child.Id; Start-Sleep -Seconds 30".into()];
+        let (owned, stdout, _stderr) = spawn_owned(exe, &args).unwrap();
+        let parent = owned.id();
+        assert!(parent > 0);
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        let child = line.trim().parse::<u32>().unwrap();
+        drop(owned);
+        unsafe {
+            for pid in [parent, child] {
+                let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if !h.is_null() {
+                    assert_eq!(WaitForSingleObject(h, 5000), WAIT_OBJECT_0);
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
     #[test]
     fn download_progress_is_streamed_without_retained_history() {
         let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");

@@ -19,6 +19,7 @@ export function TaskCenter({notify}:{notify:(message:string,error?:boolean)=>voi
     void refresh();const timer=window.setInterval(()=>void refresh(),1500);
     void api.queueModelThumbnailTasks().catch(error=>notify(`读取模型缩略图任务失败：${String(error)}`,true));
     const add=(dispose:()=>void)=>{if(active)disposes.push(dispose);else dispose()};
+    void listen<string>("learning-close-failed",event=>{if(active)notify(event.payload,true)}).then(add);
     void listen<LibraryTask>("library-task-updated",event=>{void refresh();if(!["queued","running"].includes(event.payload.status)){window.dispatchEvent(new CustomEvent("library-task-completed",{detail:event.payload}));if(event.payload.payload.kind==="mediaImport"||event.payload.payload.kind==="restore")void api.queueModelThumbnailTasks().catch(()=>undefined);}}).then(add);
     void listen("library-task-exit-requested",()=>{setOpen(true);if(window.confirm("仍有任务正在执行。停止可取消的任务，并在数据维护安全完成后退出？已完成结果会保留。"))void (async()=>{
       try{const current=await api.listLibraryTasks();for(const task of current.filter(value=>value.status==="queued"||(value.status==="running"&&value.cancellable)))await api.cancelLibraryTask(task.id);

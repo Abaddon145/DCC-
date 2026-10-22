@@ -12,6 +12,7 @@ pub struct ToolStatus {
 mod tests {
     #[test]
     fn download_space_and_tool_integrity_checks() {
+        assert!(super::verify_digest("mpv", "tampered").is_err());
         assert!(super::check_available_space(200, 100).is_ok());
         assert!(super::check_available_space(99, 100)
             .unwrap_err()
@@ -41,7 +42,7 @@ pub fn locate(resource: Option<&Path>, name: &str) -> Option<PathBuf> {
 pub fn require(resource: Option<&Path>, name: &str) -> Result<PathBuf, String> {
     let path =
         locate(resource, name).ok_or_else(|| format!("工具缺失：{name}，请修复安装下载组件"))?;
-    if matches!(name, "yt-dlp" | "deno") {
+    if matches!(name, "yt-dlp" | "deno" | "mpv") {
         use sha2::{Digest, Sha256};
         use std::io::Read;
         let mut file = std::fs::File::open(&path).map_err(|_| "工具无法读取")?;
@@ -60,8 +61,19 @@ pub fn require(resource: Option<&Path>, name: &str) -> Result<PathBuf, String> {
 }
 fn verify_digest(name: &str, digest: &str) -> Result<(), String> {
     let expected = match name {
-        "yt-dlp" => "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
-        "deno" => "e020f3e232bd16e33768dee528e5983349c962952051ced0a5d58ad42f5d9b33",
+        "yt-dlp" => "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a".to_owned(),
+        "deno" => "e020f3e232bd16e33768dee528e5983349c962952051ced0a5d58ad42f5d9b33".to_owned(),
+        "mpv" => {
+            let manifest: serde_json::Value =
+                serde_json::from_str(include_str!("../../resources/learning-components.json"))
+                    .map_err(|_| "内核校验清单损坏")?;
+            manifest["files"]
+                .as_array()
+                .and_then(|files| files.iter().find(|f| f["path"] == "media-tools/mpv.exe"))
+                .and_then(|file| file["sha256"].as_str())
+                .ok_or("内核校验清单缺少mpv摘要")?
+                .to_owned()
+        }
         _ => return Ok(()),
     };
     if digest == expected {

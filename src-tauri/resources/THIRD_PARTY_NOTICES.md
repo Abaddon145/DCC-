@@ -1,5 +1,10 @@
 # 第三方组件与许可证
 
+## 学习播放器（开发接入中，未发布）
+
+- mpv Windows x64 `20261015-git-492bae0768`，独立子进程，固定可执行SHA-256及原归档摘要见 `learning-components.json`；该构建按GPLv2+对待，不标为LGPL-only。版权、GPLv2及LGPLv2.1文本位于 `media-tools/licenses/MPV-*`，字体配置位于 `media-tools/mpv/fonts.conf`。
+- 上游源码定位：https://github.com/mpv-player/mpv/tree/492bae0768 。最终发布前仍须核对该固定Windows构建及静态依赖的完整对应源码/分发材料；本地校验成功不代表已完成分发义务审核。不会替换栈藏现有LGPL FFmpeg/FFprobe，不复制映流整个安装包。
+
 栈藏 DCC 素材库 v0.23.0 随安装包或前端产物使用以下第三方组件：
 
 ## 下载工具（Phase 1）

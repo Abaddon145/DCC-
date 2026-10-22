@@ -506,9 +506,17 @@ pub fn get(
     let mut files = vec![];
     for row in rows {
         let mut file = row.map_err(|e| e.to_string())?;
-        file.available = file_path(db, base, &file.source_ref)
-            .map(|p| p.is_file())
-            .unwrap_or(false);
+        file.available = if file.source_ref.kind == "mediaFile" {
+            crate::media_access::LocalMediaGrants::local()
+                .and_then(|grants| {
+                    crate::media_access::prepare_media_file(db, base, &file.source_ref.id, &grants)
+                })
+                .is_ok_and(|prepared| prepared.available())
+        } else {
+            file_path(db, base, &file.source_ref)
+                .map(|p| p.is_file())
+                .unwrap_or(false)
+        };
         if file.source_ref.kind == "mediaFile" {
             let (entry, logical): (String, String) = db
                 .query_row(

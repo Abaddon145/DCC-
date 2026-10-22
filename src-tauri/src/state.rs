@@ -103,6 +103,7 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub learning_runtime: crate::learning::native_player::NativeRuntime,
     pub external_videos: Mutex<crate::media_access::ExternalVideoRegistry>,
     pub knowledge_editing: AtomicBool,
     pub tasks: crate::tasks::TaskRegistry,
@@ -133,6 +134,7 @@ struct PendingMoveUndo {
 
 impl AppState {
     pub fn recover_interrupted_restore(&self) -> Result<(), String> {
+        let _playback = crate::learning::native_player::quiesce_for_library_change(self)?;
         self.with_active_mut(|active| {
             if self.tasks.busy() {
                 return Err("请先等待当前任务结束".into());
@@ -286,6 +288,7 @@ impl AppState {
             );
         }
         Ok(Self {
+            learning_runtime: Default::default(),
             external_videos: Mutex::default(),
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
             knowledge_editing: AtomicBool::new(false),
@@ -741,6 +744,26 @@ impl AppState {
     ) -> Result<LibraryLocationState, String> {
         let target = absolute_clean_path(&request.path)?;
         validate_not_root(&target)?;
+        // Reject an invalid/cancelled selection before stopping a usable session.
+        // The checks below are repeated under the final active lock for races.
+        {
+            let active = self.active.lock().map_err(|_| "素材库锁已损坏")?;
+            self.tasks
+                .ensure_library_change_allowed(&active.marker.library_id, migration_task)?;
+            let current = absolute_clean_path(&path_text(&active.base_dir))?;
+            if target == current {
+                return Err("所选目录已经是当前素材库".into());
+            }
+            if target.starts_with(&current) || current.starts_with(&target) {
+                return Err("素材库目录之间不能互相嵌套".into());
+            }
+            match request.mode.as_str() {
+                "create" | "migrate" => require_empty_directory(&target)?,
+                "open" => validate_library(&target)?,
+                _ => return Err("未知的素材库切换方式".into()),
+            }
+        }
+        let _playback = crate::learning::native_player::quiesce_for_library_change(self)?;
         let mut active = self
             .active
             .lock()
@@ -1303,6 +1326,7 @@ pub(crate) fn test_state(path: &Path) -> AppState {
     )
     .unwrap();
     AppState {
+        learning_runtime: Default::default(),
         external_videos: Mutex::default(),
         knowledge_editing: AtomicBool::new(false),
         tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),

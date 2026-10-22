@@ -46,7 +46,7 @@
     "shortDescription": "本地 DCC 与 Unreal Engine 素材管理器",
     "longDescription": "管理 DCC 素材元数据、预览图和百度网盘分享链接。",
     "category": "Productivity",
-    "resources": ["resources/media-tools/**/*", "resources/THIRD_PARTY_NOTICES.md", "resources/THREE-LICENSE.txt", "resources/TIPTAP-LICENSE.txt", "resources/MARKED-LICENSE.md", "resources/MIND-ELIXIR-LICENSE.txt"],
+    "resources": ["resources/media-tools/**/*", "resources/learning-components.json", "resources/THIRD_PARTY_NOTICES.md", "resources/THREE-LICENSE.txt", "resources/TIPTAP-LICENSE.txt", "resources/MARKED-LICENSE.md", "resources/MIND-ELIXIR-LICENSE.txt"],
     "copyright": "Copyright © 2026",
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper" },

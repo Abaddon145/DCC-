@@ -50,6 +50,15 @@ use commands::*;
 use state::AppState;
 use tauri::Manager;
 
+#[cfg(all(windows, debug_assertions))]
+pub fn run_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::run(root)
+}
+#[cfg(all(windows, debug_assertions))]
+pub fn verify_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::verify(root)
+}
+
 pub fn run_browser_capture_host() -> Result<(), String> {
     browser_capture::native_host()
 }
@@ -76,6 +85,8 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "open_external_url"
             | "set_knowledge_editing"
             | "finish_knowledge_close"
+            | "stop_learning_playback"
+            | "set_learning_viewport"
             | "get_upgrade_backup_status"
     ) || (backup
         && command != "list_reference_boards"
@@ -226,7 +237,15 @@ pub fn run() {
                     );
                     return;
                 }
-                window.app_handle().exit(0);
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                }
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(error) = learning::native_player::exit_application(&app, false) {
+                        let _ = tauri::Emitter::emit(&app, "learning-close-failed", error);
+                    }
+                });
             }
         })
         .invoke_handler(|invoke| {
@@ -267,6 +286,11 @@ pub fn run() {
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
                     commands::preview_external_video,
+                    learning::commands::start_learning_playback,
+                    learning::commands::control_learning_playback,
+                    learning::commands::get_learning_playback,
+                    learning::commands::set_learning_viewport,
+                    learning::commands::stop_learning_playback,
                     learning::commands::ensure_learning_course,
                     learning::commands::get_learning_course,
                     learning::commands::list_learning_courses,

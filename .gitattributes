@@ -1,0 +1,2 @@
+src-tauri/resources/media-tools/mpv/fonts.conf -text
+src-tauri/resources/media-tools/licenses/MPV-*.txt -text

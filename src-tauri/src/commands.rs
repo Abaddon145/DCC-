@@ -1829,21 +1829,27 @@ pub fn export_backup(state: State<AppState>, path: String) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn restore_backup(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
-    }
-    if app.get_webview_window("reference-board").is_some()
-        && state.reference_window_board_id()?.is_some()
-    {
-        return Err("请先收回悬浮参考板，再恢复素材库".into());
-    }
-    state.with_active_mut(|active| {
+pub async fn restore_backup(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
         if state.tasks.busy() {
             return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
         }
-        backup::restore_library(active, &PathBuf::from(path))
+        if app.get_webview_window("reference-board").is_some()
+            && state.reference_window_board_id()?.is_some()
+        {
+            return Err("请先收回悬浮参考板，再恢复素材库".into());
+        }
+        let _playback = crate::learning::native_player::quiesce_for_library_change(&state)?;
+        state.with_active_mut(|active| {
+            if state.tasks.busy() {
+                return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
+            }
+            backup::restore_library(active, &PathBuf::from(path))
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1852,20 +1858,24 @@ pub fn get_library_locations(state: State<AppState>) -> Result<LibraryLocationSt
 }
 
 #[tauri::command]
-pub fn change_library(
+pub async fn change_library(
     app: AppHandle,
-    state: State<AppState>,
     request: StorageChangeRequest,
 ) -> Result<LibraryLocationState, String> {
-    if state.tasks.busy() {
-        return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
-    }
-    if app.get_webview_window("reference-board").is_some()
-        && state.reference_window_board_id()?.is_some()
-    {
-        return Err("请先收回悬浮参考板，再切换素材库".into());
-    }
-    state.change_library(request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.tasks.busy() {
+            return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
+        }
+        if app.get_webview_window("reference-board").is_some()
+            && state.reference_window_board_id()?.is_some()
+        {
+            return Err("请先收回悬浮参考板，再切换素材库".into());
+        }
+        state.change_library(request)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

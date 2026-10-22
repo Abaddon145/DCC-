@@ -779,12 +779,12 @@ pub fn list_library_tasks(state: tauri::State<AppState>) -> Result<Vec<LibraryTa
     state.tasks.list(&id)
 }
 #[tauri::command]
-pub fn exit_when_tasks_idle(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("仍有任务执行，请先等待或安全停止".into());
-    }
-    app.exit(0);
-    Ok(())
+pub async fn exit_when_tasks_idle(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::learning::native_player::exit_application(&app, false)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn get_library_task(state: tauri::State<AppState>, id: String) -> Result<LibraryTask, String> {
@@ -1481,6 +1481,8 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                         Ok(serde_json::json!({"outputPath":path}))
                     }
                     TaskRequest::Restore { path } => {
+                        let _playback =
+                            crate::learning::native_player::quiesce_for_library_change(&state)?;
                         state.with_active_mut(|active| {
                             crate::backup::restore_library(active, Path::new(&path))
                         })?;

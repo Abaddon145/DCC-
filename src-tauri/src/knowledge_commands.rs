@@ -497,15 +497,12 @@ pub fn set_knowledge_editing(state: State<AppState>, editing: bool) {
         .store(editing, std::sync::atomic::Ordering::SeqCst);
 }
 #[tauri::command]
-pub fn finish_knowledge_close(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("请先等待正在执行的任务完成".into());
-    }
-    state
-        .knowledge_editing
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    app.exit(0);
-    Ok(())
+pub async fn finish_knowledge_close(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::learning::native_player::exit_application(&app, true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

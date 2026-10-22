@@ -86,6 +86,61 @@ pub struct CheckedMediaFile {
     path: PathBuf,
     _lease: Option<File>,
 }
+#[derive(PartialEq)]
+pub struct PreparedMediaFile {
+    path: PathBuf,
+    expected: Option<Fingerprint>,
+    epoch: Option<String>,
+    checksum: String,
+}
+impl PreparedMediaFile {
+    pub fn open_for_playback(&self, stop: &dyn Fn() -> bool) -> Result<CheckedMediaFile, String> {
+        let (checked, current) = checked_source(&self.path, stop)?;
+        if self
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected != &current)
+            || (!self.checksum.is_empty() && self.checksum != current.sha256)
+        {
+            return Err("SOURCE_CHANGED：原件已变化".into());
+        }
+        Ok(checked)
+    }
+    fn open_for_read(&self) -> Result<CheckedMediaFile, String> {
+        if self.expected.is_some() {
+            self.open_for_playback(&|| false)
+        } else {
+            Ok(CheckedMediaFile::managed(self.path.clone()))
+        }
+    }
+    pub fn matches_current(
+        &self,
+        db: &Connection,
+        base: &Path,
+        id: &str,
+        grants: &LocalMediaGrants,
+    ) -> bool {
+        prepare_media_file(db, base, id, grants).is_ok_and(|current| &current == self)
+    }
+    /// Display hint only, never a read capability. Actual consumers open a checked lease.
+    pub fn available(&self) -> bool {
+        if reject_links(&self.path).is_err() {
+            return false;
+        }
+        let Ok(meta) = fs::metadata(&self.path) else {
+            return false;
+        };
+        meta.is_file()
+            && self.expected.as_ref().is_none_or(|f| {
+                meta.len() == f.size
+                    && meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .is_some_and(|d| d.as_nanos() == f.modified)
+            })
+    }
+}
 impl AsRef<Path> for CheckedMediaFile {
     fn as_ref(&self) -> &Path {
         &self.path
@@ -367,7 +422,15 @@ pub fn resolve_media_file(
     id: &str,
     grants: &LocalMediaGrants,
 ) -> Result<CheckedMediaFile, String> {
-    let relative:String=db.query_row("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.id=?1 AND e.deleted_at IS NULL",[id],|r|r.get(0)).optional().map_err(|e|e.to_string())?.ok_or("媒体文件不存在或已回收")?;
+    prepare_media_file(db, base, id, grants)?.open_for_read()
+}
+pub fn prepare_media_file(
+    db: &Connection,
+    base: &Path,
+    id: &str,
+    grants: &LocalMediaGrants,
+) -> Result<PreparedMediaFile, String> {
+    let (relative,checksum):(String,String)=db.query_row("SELECT f.rel_path,f.checksum FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.id=?1 AND e.deleted_at IS NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or("媒体文件不存在或已回收")?;
     let external:Option<(String,String,i64,String,String)>=db.query_row("SELECT canonical_path,sha256,revision,file_identity,access_epoch FROM media_external_files WHERE file_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(|e|e.to_string())?;
     let base = base.canonicalize().map_err(|e| e.to_string())?;
     if let Some((path, hash, _revision, identity, epoch)) = external {
@@ -393,11 +456,12 @@ pub fn resolve_media_file(
         {
             return Err("需重新确认外部视频访问".into());
         }
-        let (checked, current) = checked_source(Path::new(&path), &|| false)?;
-        if grant.source != current {
-            return Err("SOURCE_CHANGED：外部原件已被替换".into());
-        }
-        return Ok(checked);
+        return Ok(PreparedMediaFile {
+            path: grant.source.path.clone(),
+            expected: Some(grant.source),
+            epoch: Some(epoch),
+            checksum,
+        });
     }
     if relative.starts_with("external-references/") {
         return Err("外部文件未登记".into());
@@ -408,7 +472,12 @@ pub fn resolve_media_file(
     if !path.starts_with(&base) || !path.is_file() {
         return Err("文件不在当前素材库内".into());
     }
-    Ok(CheckedMediaFile::managed(path))
+    Ok(PreparedMediaFile {
+        path,
+        expected: None,
+        epoch: None,
+        checksum,
+    })
 }
 pub fn relocate_external_video(
     state: &AppState,
@@ -785,6 +854,40 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fs::read(source).unwrap(), bytes);
+    }
+    #[test]
+    fn learning_native_prepared_read_is_revocable_and_opens_outside_database_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = video(dir.path());
+        let state = crate::state::test_state(&dir.path().join("library"));
+        let library = state.active_library_id().unwrap();
+        let preview = preview_external_video(&state, &library, &source, &|| false).unwrap();
+        let entry = commit_external_video(&state, &library, &preview.preview_id).unwrap();
+        let grants = LocalMediaGrants::new(&state.config_directory());
+        let (file, prepared) = state
+            .with_library(|db, base| {
+                let file: String = db
+                    .query_row(
+                        "SELECT primary_file_id FROM media_entries WHERE id=?1",
+                        [&entry],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                Ok((file.clone(), prepare_media_file(db, base, &file, &grants)?))
+            })
+            .unwrap();
+        assert!(state.active.try_lock().is_ok());
+        assert!(prepared.open_for_playback(&|| true).is_err());
+        let checked = prepared.open_for_playback(&|| false).unwrap();
+        assert!(checked.is_file());
+        state
+            .with_library(|db, base| {
+                assert!(prepared.matches_current(db, base, &file, &grants));
+                invalidate_external_grants(db)?;
+                assert!(!prepared.matches_current(db, base, &file, &grants));
+                Ok(())
+            })
+            .unwrap();
     }
     #[test]
     fn external_preview_rejects_disguised_playlist() {
