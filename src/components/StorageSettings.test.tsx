@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { StorageSettings } from "./StorageSettings";
+import { StorageSettings, ExternalOriginalsNotice } from "./StorageSettings";
 import { api } from "../lib/api";
 
 vi.mock("../lib/api", () => ({ api: {
@@ -8,6 +8,7 @@ vi.mock("../lib/api", () => ({ api: {
     current: { path: "C:\\Library", name: "测试库", libraryId: "12345678-abcd", available: true, isCurrent: true, retainedCopy: false, sizeBytes: 1024, lastOpenedAt: null },
     recent: [], startupWarning: null
   }),
+  getExternalBackupSummary: vi.fn().mockResolvedValue({count:2,bytes:2048}),
   getTranslationSettings: vi.fn().mockResolvedValue({ provider: "baidu", configured: false, fabAutoTranslate: true, contentLanguage: "zh-CN" }),
   saveTranslationCredentials: vi.fn().mockResolvedValue(undefined),
   testTranslationService: vi.fn().mockResolvedValue({ success: true, message: "连接成功" }),
@@ -16,6 +17,11 @@ vi.mock("../lib/api", () => ({ api: {
 } }));
 
 describe("StorageSettings translation credentials", () => {
+  it("discloses external originals excluded from library backups",async()=>{
+    render(<ExternalOriginalsNotice libraryId="library-a"/>);
+    expect(await screen.findByText(/外部原件未归档：2 个/)).toBeVisible();
+    expect(screen.getByText(/备份仅包含登记信息，不含这些视频原件/)).toBeVisible();
+  });
   it("enables first-time save-and-test after both credentials are entered", async () => {
     const notify = vi.fn();
     render(<StorageSettings onClose={vi.fn()} onLibraryChanged={vi.fn()} notify={notify} />);

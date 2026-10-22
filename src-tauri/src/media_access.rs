@@ -107,6 +107,15 @@ impl CheckedMediaFile {
         Self { path, _lease: None }
     }
 }
+// Rotate a library-owned nonce; never delete external originals or trust restored grants.
+pub fn invalidate_external_grants(db: &Connection) -> Result<(), String> {
+    db.execute(
+        "UPDATE media_external_files SET access_epoch=?1",
+        [uuid::Uuid::new_v4().to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
 pub fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
         if crate::asset::scanner::is_link(ancestor) {
@@ -723,6 +732,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fs::read(source).unwrap(), original);
+    }
+    #[test]
+    fn learning_data_backup_invalidates_external_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = video(dir.path());
+        let bytes = fs::read(&source).unwrap();
+        let state = crate::state::test_state(&dir.path().join("library"));
+        let library = state.active_library_id().unwrap();
+        let preview = preview_external_video(&state, &library, &source, &|| false).unwrap();
+        let entry = commit_external_video(&state, &library, &preview.preview_id).unwrap();
+        let archive = dir.path().join("backup.dccassetlib");
+        let file = state
+            .with_library(|db, base| {
+                let file: String = db
+                    .query_row(
+                        "SELECT primary_file_id FROM media_entries WHERE id=?1",
+                        [&entry],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(resolve_media_file(
+                    db,
+                    base,
+                    &file,
+                    &LocalMediaGrants::new(&state.config_directory())
+                )
+                .is_ok());
+                let summary = crate::backup::external_media_backup_summary(db)?;
+                assert_eq!(summary.count, 1);
+                assert_eq!(summary.bytes, bytes.len() as u64);
+                crate::backup::export_library(db, base, &archive)?;
+                Ok(file)
+            })
+            .unwrap();
+        state
+            .with_active_mut(|active| crate::backup::restore_library(active, &archive))
+            .unwrap();
+        state
+            .with_library(|db, base| {
+                assert!(
+                    resolve_media_file(
+                        db,
+                        base,
+                        &file,
+                        &LocalMediaGrants::new(&state.config_directory())
+                    )
+                    .is_err(),
+                    "restore must not reuse machine approval from before the backup"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fs::read(source).unwrap(), bytes);
     }
     #[test]
     fn external_preview_rejects_disguised_playlist() {

@@ -1107,6 +1107,10 @@ fn migrate_library(
             &stage.join("note-attachments"),
         )?;
         copy_tree_verified(
+            &active.base_dir.join("learning-data"),
+            &stage.join("learning-data"),
+        )?;
+        copy_tree_verified(
             &active.base_dir.join(".dcc/cache/thumbnails"),
             &stage.join(".dcc/cache/thumbnails"),
         )?;
@@ -1137,12 +1141,15 @@ fn migrate_library(
 }
 
 fn copy_tree_verified(source: &Path, destination: &Path) -> Result<(), String> {
+    crate::media_access::reject_links(source)?;
+    crate::media_access::reject_links(destination)?;
     if !source.exists() {
         fs::create_dir_all(destination).map_err(|e| e.to_string())?;
         return Ok(());
     }
     for entry in WalkDir::new(source) {
         let entry = entry.map_err(|e| e.to_string())?;
+        crate::media_access::reject_links(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(source)

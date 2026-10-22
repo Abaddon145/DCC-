@@ -267,6 +267,7 @@ pub fn run() {
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
                     commands::preview_external_video,
+                    commands::get_external_backup_summary,
                     commands::commit_external_video,
                     commands::relocate_external_video,
                     asset::commands::search_core_assets,

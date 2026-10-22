@@ -5,6 +5,18 @@ use crate::{
 use std::path::Path;
 
 #[tauri::command]
+pub fn get_external_backup_summary(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<crate::backup::ExternalBackupSummary, String> {
+    state
+        .with_library_if_id(&expected_library_id, |db, _| {
+            crate::backup::external_media_backup_summary(db)
+        })?
+        .ok_or_else(|| "素材库已切换".into())
+}
+
+#[tauri::command]
 pub async fn preview_external_video(
     app: AppHandle,
     expected_library_id: String,

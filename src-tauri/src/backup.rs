@@ -18,6 +18,8 @@ struct Manifest {
     schema_version: u32,
     created_at: String,
     entries: Vec<ManifestEntry>,
+    #[serde(default)]
+    external_originals: ExternalBackupSummary,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +27,25 @@ struct ManifestEntry {
     path: String,
     size: u64,
     sha256: String,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalBackupSummary {
+    pub count: u64,
+    pub bytes: u64,
+}
+pub fn external_media_backup_summary(db: &Connection) -> Result<ExternalBackupSummary, String> {
+    db.query_row(
+        "SELECT count(*),COALESCE(sum(size_bytes),0) FROM media_external_files",
+        [],
+        |r| {
+            Ok(ExternalBackupSummary {
+                count: r.get(0)?,
+                bytes: r.get(1)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn export_library(
@@ -65,17 +86,28 @@ pub fn export_library_with_progress(
         "media-library",
         "media",
         "note-attachments",
+        "learning-data",
         ".dcc/cache/thumbnails",
     ] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
         }
-        for entry in WalkDir::new(&directory)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
+        for entry in WalkDir::new(&directory) {
+            let entry = entry.map_err(|e| e.to_string())?;
+            crate::media_access::reject_links(entry.path())?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if managed_dir == "learning-data" {
+                let relative = entry
+                    .path()
+                    .strip_prefix(base_dir)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                crate::learning::files::learning_file(base_dir, &relative)?;
+            }
             let relative = entry
                 .path()
                 .strip_prefix(base_dir)
@@ -96,6 +128,7 @@ pub fn export_library_with_progress(
         });
     }
     let manifest = Manifest {
+        external_originals: external_media_backup_summary(connection)?,
         format: "dcc-asset-library".into(),
         schema_version: 1,
         created_at: Utc::now().to_rfc3339(),
@@ -133,13 +166,14 @@ pub fn export_library_with_progress(
 }
 
 pub const RESTORE_MARKER: &str = ".restore-pending.json";
-const RESTORE_TARGETS: [&str; 7] = [
+const RESTORE_TARGETS: [&str; 8] = [
     "library.db",
     "images",
     "reference-boards",
     "media-library",
     "media",
     "note-attachments",
+    "learning-data",
     ".dcc/cache/thumbnails",
 ];
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -209,7 +243,9 @@ pub fn recover_interrupted_restore(
         return Err("原库数据库缺失，已保留中断记录".into());
     }
     before_migration(&active.base_dir);
-    active.connection = Some(db::open_database(&active.db_path)?);
+    let restored = db::open_database(&active.db_path)?;
+    crate::media_access::invalidate_external_grants(&restored)?;
+    active.connection = Some(restored);
     fs::remove_file(marker).map_err(|_| "原库已恢复，但中断标记未能清除")?;
     Ok(())
 }
@@ -231,6 +267,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     fs::copy(stage.path().join("library.db"), &prepared_db)
         .map_err(|e| format!("备份数据库缺失：{e}"))?;
     let check = db::open_database(&prepared_db)?;
+    crate::media_access::invalidate_external_grants(&check)?;
     let integrity: String = check
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -249,6 +286,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         "media-library",
         "media",
         "note-attachments",
+        "learning-data",
         ".dcc/cache/thumbnails",
     ];
     for name in directories {
@@ -440,6 +478,12 @@ fn allowed_backup_path(path: &Path, directory: bool) -> bool {
     let Some(parts) = parts else {
         return false;
     };
+    if parts
+        .iter()
+        .any(|part| part.contains(':') || part.chars().any(char::is_control))
+    {
+        return false;
+    }
     let Some(first) = parts.first() else {
         return false;
     };
@@ -448,7 +492,12 @@ fn allowed_backup_path(path: &Path, directory: bool) -> bool {
     }
     if matches!(
         *first,
-        "images" | "reference-boards" | "media-library" | "media" | "note-attachments"
+        "images"
+            | "reference-boards"
+            | "media-library"
+            | "media"
+            | "note-attachments"
+            | "learning-data"
     ) {
         return true;
     }
@@ -474,6 +523,7 @@ fn remove_dir_if_exists(path: &Path) -> Result<(), String> {
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     for entry in WalkDir::new(source) {
         let entry = entry.map_err(|e| e.to_string())?;
+        crate::media_access::reject_links(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(source)
@@ -493,6 +543,59 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learning_data_backup_rejects_unsafe_learning_paths() {
+        assert!(!super::allowed_backup_path(
+            std::path::Path::new("learning-data/archives/note.md:stream"),
+            false
+        ));
+        assert!(!super::allowed_backup_path(
+            std::path::Path::new("learning-data/../secret"),
+            false
+        ));
+    }
+    #[test]
+    fn learning_data_backup_restore_keeps_archives_not_external_originals() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_state = crate::state::test_state(&source.path().join("source"));
+        let target_state = crate::state::test_state(&target.path().join("target"));
+        let archive = source.path().join("learning.dccassetlib");
+        let raw = b"\xef\xbb\xbf# Heading\r\n![[missing.png]]\r\n";
+        source_state
+            .with_library(|db, base| {
+                for (relative, bytes) in [
+                    ("learning-data/archives/note.md", raw.as_slice()),
+                    (
+                        "learning-data/subtitles/captions.srt",
+                        b"1\n00:00:00,100 --> 00:00:00,900\nChinese\n".as_slice(),
+                    ),
+                    ("learning-data/excerpts/frame.png", b"snapshot".as_slice()),
+                    (".dcc/runtime/learning/temp.wav", b"not archived".as_slice()),
+                ] {
+                    let file = base.join(relative);
+                    fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    fs::write(file, bytes).unwrap();
+                }
+                super::export_library(db, base, &archive)
+            })
+            .unwrap();
+        target_state
+            .with_active_mut(|active| super::restore_library(active, &archive))
+            .unwrap();
+        target_state
+            .with_library(|_, base| {
+                assert_eq!(
+                    fs::read(base.join("learning-data/archives/note.md")).unwrap(),
+                    raw
+                );
+                assert!(base.join("learning-data/subtitles/captions.srt").is_file());
+                assert!(base.join("learning-data/excerpts/frame.png").is_file());
+                assert!(!base.join(".dcc/runtime/learning/temp.wav").exists());
+                Ok(())
+            })
+            .unwrap();
+    }
     #[test]
     fn learning_baseline_two_libraries_preserve_scoped_identities_and_media_hash() {
         use crate::{asset, knowledge, knowledge_files, media_library, projects, reference_boards};
