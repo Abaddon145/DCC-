@@ -18,8 +18,10 @@ mod knowledge;
 mod knowledge_ai;
 mod knowledge_commands;
 mod knowledge_files;
+mod learning;
 mod link_checker;
 mod media;
+mod media_access;
 mod media_engine;
 mod media_library;
 mod model_access;
@@ -264,6 +266,9 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    commands::preview_external_video,
+                    commands::commit_external_video,
+                    commands::relocate_external_video,
                     asset::commands::search_core_assets,
                     asset::commands::create_asset_relation,
                     asset::commands::delete_asset_relation,

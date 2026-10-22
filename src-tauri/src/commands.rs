@@ -5,6 +5,63 @@ use crate::{
 use std::path::Path;
 
 #[tauri::command]
+pub async fn preview_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    path: String,
+) -> Result<crate::media_access::ExternalVideoPreview, String> {
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::media_access::preview_external_video_with_resources(
+            &state,
+            &expected_library_id,
+            Path::new(&path),
+            &|| false,
+            Some(&resources),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn commit_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    preview_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::media_access::commit_external_video(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &preview_id,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn relocate_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    file_id: String,
+    preview_id: String,
+    expected_source_revision: i64,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::media_access::relocate_external_video(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &file_id,
+            &preview_id,
+            expected_source_revision,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn get_selection_labels(
     state: State<AppState>,
     ids: Vec<String>,

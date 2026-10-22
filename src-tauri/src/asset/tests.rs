@@ -234,7 +234,7 @@ fn database_open_installs_compatible_asset_registry() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "22");
+    assert_eq!(version, "23");
 }
 
 #[test]
@@ -479,6 +479,7 @@ fn purge_blocks_external_version_and_allows_both_owners_in_same_batch() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = old_fixture();
     super::migrate(&db).unwrap();
+    crate::learning::migrate(&db).unwrap();
     let legacy = repository::register_origin(
         &db,
         &CoreOrigin {
@@ -1307,6 +1308,7 @@ fn versions_attach_only_active_originals_and_deletion_preserves_files() {
     let dir = tempfile::tempdir().unwrap();
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    crate::learning::migrate(&db).unwrap();
     let m = repository::register_origin(
         &db,
         &CoreOrigin {

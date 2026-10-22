@@ -130,6 +130,8 @@ pub struct MediaFolder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaFile {
+    pub storage_mode: String,
+    pub source_revision: Option<i64>,
     pub id: String,
     pub entry_id: String,
     pub role: String,

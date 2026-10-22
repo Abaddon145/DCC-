@@ -397,7 +397,7 @@ export interface LinkCheckProgress { checked: number; total: number; valid: numb
 export interface LinkCheckReport { totalAssets: number; uniqueLinks: number; checkedAssets: number; valid: number; invalid: number; error: number; skipped: number; cancelled: boolean; stoppedReason: string | null }
 
 export interface MediaFolder { id: string; kind: MediaKind; parentId: string | null; name: string; sortOrder: number; entryCount: number }
-export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null }
+export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null; storageMode?: "managed" | "external"; sourceRevision?: number | null }
 export interface MediaEntry { id: string; kind: MediaKind; folderId: string | null; name: string; description: string; author: string; sourceUrl: string; license: string; favorite: boolean; processingStatus: string; processingMessage: string; format: string; fileSize: number; tags: string[]; thumbnailFileId: string | null; primaryFileId: string; createdAt: string; updatedAt: string }
 export interface MediaEntryDetail extends MediaEntry { files: MediaFile[]; assetIds: string[]; projectIds: string[] }
 export interface ModelThumbnailJob { id: string; logicalPath: string; originalName: string }

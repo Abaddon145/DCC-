@@ -1,6 +1,6 @@
 # 栈藏迁入映流学习能力 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户已选择当前会话顺序实施；本计划待审阅，本轮仅编写计划，不授权立即集成、真实数据迁移、安装或发布。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. 用户已于2026-10-22确认当前计划并授权当前会话顺序产品实施；真实用户数据迁移、凭据解密、覆盖安装、合并与发布仍需另行授权。
 
 **Goal:** 在栈藏内完成教程播放、课程分析、知识编辑、时间码摘录与项目回看，同时保留 v0.23 的素材、媒体、资产智能及所有用户数据。
 
@@ -249,7 +249,7 @@ M3 门槛：源修复提交已固定，仍须精确目标子计划；原用户�
 
 **Files:** 拟新增 `learning/import/{mod,models,preview,apply,recovery}.rs`、`learning/schema-v29.sql`、`src/features/learning/ImportLearningDialog.tsx`及tests。只在正式执行阶段创建。
 
-**依赖：** 等源端确认只读快照/导出manifest schema、逐表字段/内容、source-profile生成规则与样本hash，补 `docs/superpowers/plans/2026-10-21-dcc-learning-migration.md` 后实施。源端readiness已给表名，不等于经过版本化验证的导入格式；不猜测可用正文来自知识FTS缓存。
+**依赖更新（2026-10-22）：** 源提交94ee1e8已提供 `yingliu-migration-input-v1.md`、版本1/schema8机器样例及完整SHA清单，本端6项hash全部匹配。M6不再等待格式提供；须据此补目标 `docs/superpowers/plans/2026-10-21-dcc-learning-migration.md` 的验证器、source-profile映射及中断恢复实施细节。样例synthetic=true及sampleRootHint不是用户路径读取授权；不把知识FTS缓存当当前正文。
 
 **已确定Interfaces/invariants:** `preview_learning_import(sourceSelection,targetLibraryId)->ImportPlan` 不写目标；`apply_learning_import(planId,operationId)->TaskId` 进入现有TaskRegistry，新任务LearningImport。`learning_import_batches` / `learning_import_items` / `learning_origin_map` 存(sourceProfileId,kind,sourceKey)唯一、源摘要、目标ID/修订和状态。源旧vault_id+path映射到新UUID，移动文件需要显式重定位；不凭同名/mtime冒继身份。
 
@@ -303,5 +303,5 @@ Expected：退出码0；实际测试数随新增更新，不能固定旧数掩�
 - 已确认不再询问：唯一主应用、document_json默认权威、保留原文/Vault与显式Markdown导入导出、不做双向Obsidian自动写回。
 - 当前依赖：M3源修复/样本已固定，待目标typed结果、任务预算适配子计划；M2工具来源/hash已核验，待目标资源接入、真实Windows播放/DPI及打包验证；M6版本化源快照/导出manifest/稳定source-profile及sidecar样本仍须按源实况冻结。不需要用户再次选择存储方向。
 - 推荐首个实施任务：Task1只读准备已记录；计划审阅后，首个产品改动是Task2“外部视频只读登记和统一文件解析”，先写安全/不删除原件测试，再加增量schema23。未完成Task2—4不先搬播放器UI。
-- 执行方式沿用当前会话顺序；本计划到此仅供协调窗口汇总审阅，没有开始产品集成或真实数据迁移。
+- 执行方式沿用当前会话顺序；2026-10-22已批准产品实现，真实用户库迁移仍未授权。进度及裁定记录于本计划专属ledger。
 - 本轮自审/静态验证：14个任务编号连续、M0—M7覆盖、命令无省略占位、未改产品代码；源代码/接口按实际文件核对。源清单与设计未来修订须在Task1重新固定，不将本计划中的拟新增类型误认为已有实现。

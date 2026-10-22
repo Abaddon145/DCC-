@@ -45,6 +45,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::reliability::migrate_workflows(&connection)?;
     crate::downloader::service::migrate(&connection)?;
     crate::asset::migrate(&connection)?;
+    crate::learning::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -2109,7 +2110,7 @@ pub fn purge_trash_batch(
         .map_err(|e| e.to_string())?;
     drop(media_statement);
     let independent_media_paths = {
-        let mut statement=connection.prepare("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.delete_batch_id=?1").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.delete_batch_id=?1 AND NOT EXISTS(SELECT 1 FROM media_external_files x WHERE x.file_id=f.id)").map_err(|e|e.to_string())?;
         let values = statement
             .query_map([batch_id], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
@@ -2834,7 +2835,7 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
     let mut missing_original = 0;
     let mut missing_dependency = 0;
     {
-        let mut statement=connection.prepare("SELECT role,rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.deleted_at IS NULL AND f.role IN ('main','dependency')").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT f.role,f.id FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.deleted_at IS NULL AND f.role IN ('main','dependency')").map_err(|e|e.to_string())?;
         let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -2842,7 +2843,12 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
             .map_err(|e| e.to_string())?;
         for row in rows {
             let (role, path) = row.map_err(|e| e.to_string())?;
-            if !base_dir.join(path).is_file() {
+            if crate::media_access::LocalMediaGrants::local()
+                .and_then(|grants| {
+                    crate::media_access::resolve_media_file(connection, base_dir, &path, &grants)
+                })
+                .is_err()
+            {
                 if role == "main" {
                     missing_original += 1
                 } else {
@@ -3344,7 +3350,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "22");
+        assert_eq!(version, "23");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

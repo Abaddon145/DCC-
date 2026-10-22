@@ -365,6 +365,13 @@ pub(crate) fn reindex(connection: &Connection, id: &str) -> Result<(), String> {
 }
 fn file_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     Ok(MediaFile {
+        storage_mode: if row.get::<_, bool>(11)? {
+            "external"
+        } else {
+            "managed"
+        }
+        .into(),
+        source_revision: row.get(12)?,
         id: row.get(0)?,
         entry_id: row.get(1)?,
         role: row.get(2)?,
@@ -512,7 +519,7 @@ pub fn get(connection: &Connection, id: &str) -> Result<MediaEntryDetail, String
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or("媒体条目不存在")?;
-    let mut stmt=connection.prepare("SELECT id,entry_id,role,logical_path,original_name,mime_type,file_size,checksum,width,height,duration_ms FROM media_files WHERE entry_id=?1 ORDER BY sort_order,id").map_err(|e|e.to_string())?;
+    let mut stmt=connection.prepare("SELECT id,entry_id,role,logical_path,original_name,mime_type,file_size,checksum,width,height,duration_ms,EXISTS(SELECT 1 FROM media_external_files x WHERE x.file_id=media_files.id),(SELECT revision FROM media_external_files x WHERE x.file_id=media_files.id) FROM media_files WHERE entry_id=?1 ORDER BY sort_order,id").map_err(|e|e.to_string())?;
     let files = stmt
         .query_map([id], file_row)
         .map_err(|e| e.to_string())?
@@ -1300,8 +1307,21 @@ pub fn protocol_response(
     file_id: &str,
     range: Option<&str>,
 ) -> Result<tauri::http::Response<Vec<u8>>, String> {
-    let (rel,mime):(String,String)=connection.query_row("SELECT f.rel_path,f.mime_type FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.id=?1 AND e.deleted_at IS NULL",[file_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or("媒体文件不存在")?;
-    let path = media::safe_relative(base_dir, &rel)?;
+    let mime: String = connection
+        .query_row(
+            "SELECT mime_type FROM media_files WHERE id=?1",
+            [file_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("媒体文件不存在")?;
+    let path = crate::media_access::resolve_media_file(
+        connection,
+        base_dir,
+        file_id,
+        &crate::media_access::LocalMediaGrants::local()?,
+    )?;
     media::file_response(&path, &mime, range)
 }
 pub fn bundle_response(
@@ -1316,7 +1336,7 @@ pub fn bundle_response(
         .replace('\\', "/");
     let (rel, mime): (String, String) = connection
         .query_row(
-            "SELECT f.rel_path,f.mime_type FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.entry_id=?1 AND f.logical_path=?2 AND e.deleted_at IS NULL",
+            "SELECT f.rel_path,f.mime_type FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE f.entry_id=?1 AND f.logical_path=?2 AND e.kind='model' AND e.deleted_at IS NULL",
             params![entry_id, logical],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

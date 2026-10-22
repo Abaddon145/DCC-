@@ -103,6 +103,7 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub external_videos: Mutex<crate::media_access::ExternalVideoRegistry>,
     pub knowledge_editing: AtomicBool,
     pub tasks: crate::tasks::TaskRegistry,
     pub translation_service: crate::translation_service::TranslationService,
@@ -285,6 +286,7 @@ impl AppState {
             );
         }
         Ok(Self {
+            external_videos: Mutex::default(),
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
             knowledge_editing: AtomicBool::new(false),
             translation_service: crate::translation_service::TranslationService::open(
@@ -1294,6 +1296,7 @@ pub(crate) fn test_state(path: &Path) -> AppState {
     )
     .unwrap();
     AppState {
+        external_videos: Mutex::default(),
         knowledge_editing: AtomicBool::new(false),
         tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
         translation_service: crate::translation_service::TranslationService::for_test(

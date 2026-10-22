@@ -1,6 +1,6 @@
 use super::models::*;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
 pub fn register_origin(db: &Connection, origin: &CoreOrigin) -> Result<String, String> {
@@ -104,7 +104,37 @@ pub fn register_files(db: &Connection, core_id: &str) -> Result<(), String> {
 }
 
 // Resolve only database-owned files, never a path supplied by the frontend.
-pub fn file_path(db: &Connection, base: &Path, source: &SourceFileRef) -> Result<PathBuf, String> {
+pub fn file_path(
+    db: &Connection,
+    base: &Path,
+    source: &SourceFileRef,
+) -> Result<crate::media_access::CheckedMediaFile, String> {
+    if source.kind == "mediaFile" {
+        let expected = match source.role.as_str() {
+            "original" => "main",
+            "dependency" => "dependency",
+            "proxy" => "proxy",
+            "thumbnail" => "thumbnail",
+            "waveform" => "waveform",
+            _ => return Err("文件用途无效".into()),
+        };
+        let valid: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_files WHERE id=?1 AND role=?2)",
+                params![source.id, expected],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !valid {
+            return Err("文件用途与登记不符".into());
+        }
+        return crate::media_access::resolve_media_file(
+            db,
+            base,
+            &source.id,
+            &crate::media_access::LocalMediaGrants::local()?,
+        );
+    }
     let sql = match (source.kind.as_str(), source.role.as_str()) {
         ("image", "original") => "SELECT original_rel_path FROM images WHERE id=?1",
         ("image", "thumbnail") => "SELECT thumbnail_rel_path FROM images WHERE id=?1",
@@ -137,7 +167,7 @@ pub fn file_path(db: &Connection, base: &Path, source: &SourceFileRef) -> Result
     if !path.starts_with(&library) || !path.is_file() {
         return Err("文件不在当前素材库内".into());
     }
-    Ok(path)
+    Ok(crate::media_access::CheckedMediaFile::managed(path))
 }
 
 pub fn protect_file_removal(
