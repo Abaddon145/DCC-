@@ -760,7 +760,7 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "23"
+            "24"
         );
         assert_eq!(
             restored

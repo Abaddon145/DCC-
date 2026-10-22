@@ -1,0 +1,102 @@
+use super::{models::*, store};
+use crate::{models::Page, state::AppState};
+use tauri::State;
+fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
+    result?.ok_or_else(|| "素材库已切换，未读取或修改旧库".into())
+}
+#[tauri::command]
+pub fn ensure_learning_course(
+    state: State<AppState>,
+    expected_library_id: String,
+    media_id: String,
+) -> Result<Course, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::ensure_course(db, &media_id)
+    }))
+}
+#[tauri::command]
+pub fn get_learning_course(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+) -> Result<Course, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| store::course(db, &id)))
+}
+#[tauri::command]
+pub fn list_learning_courses(
+    state: State<AppState>,
+    expected_library_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<Course>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::list_courses(db, offset, limit)
+    }))
+}
+#[tauri::command]
+pub fn list_learning_series(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<Vec<Series>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| store::list_series(db)))
+}
+#[tauri::command]
+pub fn upsert_learning_series(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: SeriesInput,
+) -> Result<Series, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        store::upsert_series(
+            db,
+            input.id.as_deref(),
+            &input.name,
+            &input.description,
+            input.expected_revision,
+        )
+    }))
+}
+#[tauri::command]
+pub fn set_learning_series_members(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    expected_revision: i64,
+    course_ids: Vec<String>,
+) -> Result<Series, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        store::set_series_members(db, &id, expected_revision, &course_ids)
+    }))
+}
+#[tauri::command]
+pub fn delete_learning_series(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    expected_revision: i64,
+) -> Result<(), String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::delete_series(db, &id, expected_revision)
+    }))
+}
+
+#[cfg(test)]
+mod learning_store_commands_tests {
+    use super::*;
+    #[test]
+    fn learning_store_scope_never_falls_back_to_current_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(dir.path());
+        let foreign = uuid::Uuid::new_v4().to_string();
+        let result = current(state.with_library_mut_if_id(&foreign, |db, _| {
+            store::upsert_series(db, None, "foreign", "", None)
+        }));
+        assert!(result.unwrap_err().contains("素材库已切换"));
+        assert_eq!(
+            state
+                .with_library(|db, _| Ok(store::list_series(db)?.len()))
+                .unwrap(),
+            0
+        );
+    }
+}
