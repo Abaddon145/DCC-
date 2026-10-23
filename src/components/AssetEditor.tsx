@@ -80,7 +80,9 @@ export function AssetEditor({ asset, categories, contentLanguage, expectedLibrar
   const willTranslate = completeBilingual && (!isFabUrl(form.sourceUrl) || autoTranslate);
   const fingerprint = JSON.stringify({ form, assetId: asset?.id, sizeText, pendingMediaPaths, expectedLibraryId, autoTranslate, completeBilingual });
   const latestFingerprint = useRef(fingerprint); latestFingerprint.current = fingerprint;
-  useEffect(() => { costGate.invalidate(); setCost(null); }, [fingerprint, costGate]);
+  // A save can start before this passive effect runs; clear only an older preview.
+  // The request's captured fingerprint already rejects stale asynchronous replies.
+  useEffect(() => { setCost(current => current && current.fingerprint !== fingerprint ? null : current); }, [fingerprint]);
   const cancelCost = () => { costGate.invalidate(); setCost(null); };
   const estimateCost = async (payload: AssetInput, retryId?: string) => {
     const ticket = costGate.begin(), bound = latestFingerprint.current;

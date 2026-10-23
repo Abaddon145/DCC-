@@ -16,6 +16,11 @@ const settings: TranslationSettings = {
 };
 describe("TranslationServiceOptions", () => {
   beforeEach(() => vi.resetAllMocks());
+  it("shows course usage separately without counting it as translation", () => {
+    render(<TranslationServiceOptions settings={{ ...settings, usage: { ...settings.usage!, creativeTokens: 50, courseTokens: 100 } }} reload={vi.fn()} notify={vi.fn()} />);
+    const usage = screen.getByText(/DeepSeek 250 Token/);
+    expect(usage).toHaveTextContent("创作 50 Token · 课程分析 100 Token · 翻译 100 Token");
+  });
   it("saves and clears an entered key before testing the selected provider", async () => {
     vi.mocked(api.saveDeepseekCredentials).mockResolvedValue();
     vi.mocked(api.testTranslationService).mockResolvedValue({ success: true, message: "连接成功" });

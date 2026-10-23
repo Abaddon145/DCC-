@@ -44,15 +44,15 @@
 - [x] 写行为失败测试：合法项11000ms保留，唯一cue-b错误500ms校正到40000ms并报告；两段非连续引用的25000ms不能校正成中间时间；未知来源略过且全部无有效结果失败；结构/类型/单位/文本超限失败；模型不能注入诊断。
 - [x] Run `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib learning_analysis -- --test-threads=1`；stub行为断言失败，再实现同一纯解析interface并通过；追加全部重点无效测试再次RED→GREEN。
 - [x] 校验器不联网/不写库。源fixture为synthetic=true、observedRemoteResponse=false，不称为原用户个案已验证。
-- [ ] 独立提交离线适配器；全Rust回归、fmt、秘密扫描与diff检查。
+- [x] 独立提交087aae5；全Rust370通过/2既有忽略、生产构建0、fmt/diff0、秘密扫描396文件/0。
 
 ### 8.2 共用预算用途
 
 **Files:** translation_service.rs、前端TranslationUsage类型及用量显示。
 
-- [ ] mock HTTP验证旧创作/翻译计数不变、课程计入总闸口及course_usage、缺usage/取消保留预留、已用尽不发请求、失败不自动发第二次；观察RED再实现。
-- [ ] 增加`course_json_with_usage(body,limit,cancel,image_count)`，内部复用reserve/settle事务和目标凭据；扩展用途typed enum替代内部bool，旧调用适配后行为不变。网络响应有界读取，拒绝过大响应不释放未知费用。
-- [ ] Run全量回归/生产构建；确认0外部付费请求并独立提交。
+- [x] mock HTTP验证旧创作/翻译计数不变、课程计入总闸口及course_usage、缺usage/取消保留预留、已用尽不发请求、失败不自动发第二次；RED4→GREEN4。
+- [x] 增加`course_json_with_usage(body,limit,cancel,image_count)`，内部复用reserve/settle事务和目标凭据；扩展用途typed enum替代内部bool，旧调用适配后行为不变。网络响应有界读取，拒绝过大响应不释放未知费用。
+- [ ] Run全量回归/生产构建；确认0外部付费请求并独立提交。已验证Rust374+2既有忽略、前端344、构建0，待本地提交。
 
 ### 8.3 材料预览与缓存
 

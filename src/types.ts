@@ -413,7 +413,7 @@ export interface BrowserCaptureState { libraryId:string; name:string; submitted:
 
 export type TranslationProvider = "baidu" | "deepseek";
 export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
-export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
+export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; courseTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
 export interface TranslationEstimate { characters: number; estimatedTokens: number }
 export interface FormTranslationCostInput { localizations: Record<string, LocalizedAssetText>; id?: string; sourceUrl: string; completeBilingual: boolean; autoTranslate?: boolean }
 export interface TranslationCostRequest { ids?: string[]; form?: FormTranslationCostInput }

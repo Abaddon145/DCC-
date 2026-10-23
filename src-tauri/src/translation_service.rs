@@ -18,6 +18,28 @@ const MAX_OUTPUT: u64 = 4096;
 const MAX_RESPONSE_SPLITS: usize = 4;
 
 pub(crate) fn analysis_budget(body: &serde_json::Value, image_count: usize) -> Result<u64, String> {
+    image_budget(body, image_count, 4)
+}
+
+pub(crate) fn course_budget(body: &serde_json::Value, image_count: usize) -> Result<u64, String> {
+    if !(1..=16384).contains(&body["max_tokens"].as_u64().unwrap_or(0)) {
+        return Err("课程输出限额无效".into());
+    }
+    let reserved = image_budget(body, image_count, 6)?;
+    if reserved
+        .saturating_sub(512 + body["max_tokens"].as_u64().unwrap() + image_count as u64 * 2048)
+        > 120_000
+    {
+        return Err("课程请求文字超过限制，请按完整来源分段".into());
+    }
+    Ok(reserved)
+}
+
+fn image_budget(
+    body: &serde_json::Value,
+    image_count: usize,
+    max_images: usize,
+) -> Result<u64, String> {
     let mut urls = vec![];
     if let Some(messages) = body["messages"].as_array() {
         for message in messages {
@@ -30,7 +52,7 @@ pub(crate) fn analysis_budget(body: &serde_json::Value, image_count: usize) -> R
             }
         }
     }
-    if image_count > 4
+    if image_count > max_images
         || urls.len() != image_count
         || urls
             .iter()
@@ -93,6 +115,8 @@ pub struct TranslationUsage {
     pub deepseek_tokens: u64,
     #[serde(default)]
     pub creative_tokens: u64,
+    #[serde(default)]
+    pub course_tokens: u64,
     pub baidu_characters: u64,
     pub cache_entries: u64,
     pub cache_hits: u64,
@@ -159,6 +183,22 @@ struct Blocked {
     error: Failure,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum UsagePurpose {
+    Translation,
+    Creative,
+    Course,
+}
+impl UsagePurpose {
+    fn table(self) -> Option<&'static str> {
+        match self {
+            Self::Translation => None,
+            Self::Creative => Some("creative_usage"),
+            Self::Course => Some("course_usage"),
+        }
+    }
+}
+
 pub struct TranslationService {
     db: Mutex<Connection>,
     blocked: Mutex<HashMap<String, Blocked>>,
@@ -168,6 +208,30 @@ pub struct TranslationService {
     mock_configured: Option<bool>,
 }
 impl TranslationService {
+    async fn course_exchange(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        key: &str,
+        url: &str,
+        image_count: usize,
+    ) -> Result<CreativeReply, String> {
+        if limit == 0 {
+            return Err("课程月度上限无效".into());
+        }
+        let reserved = course_budget(body, image_count)?;
+        self.creative_exchange_reserved(
+            body,
+            limit,
+            cancel,
+            key,
+            url,
+            reserved,
+            UsagePurpose::Course,
+        )
+        .await
+    }
     #[cfg(test)]
     pub(crate) async fn creative_analysis_fixture(
         &self,
@@ -184,6 +248,7 @@ impl TranslationService {
             "local-analysis-fixture",
             url,
             analysis_budget(body, image_count)?,
+            UsagePurpose::Creative,
         )
         .await
     }
@@ -193,6 +258,7 @@ impl TranslationService {
             .map_err(|e| e.to_string())?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS usage(month TEXT NOT NULL,provider TEXT NOT NULL,used INTEGER NOT NULL DEFAULT 0,hits INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(month,provider));").map_err(|e| e.to_string())?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS creative_usage(month TEXT PRIMARY KEY,used INTEGER NOT NULL DEFAULT 0);").map_err(|e| e.to_string())?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS course_usage(month TEXT PRIMARY KEY,used INTEGER NOT NULL DEFAULT 0);").map_err(|e| e.to_string())?;
         Ok(Self {
             db: Mutex::new(db),
             blocked: Mutex::new(HashMap::new()),
@@ -361,6 +427,15 @@ impl TranslationService {
                 .map_err(|e| e.to_string())?
                 .unwrap_or(0),
             baidu_characters: used("baidu")?,
+            course_tokens: db
+                .query_row(
+                    "SELECT used FROM course_usage WHERE month=?1",
+                    [&month],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0),
             cache_entries: db
                 .query_row("SELECT count(*) FROM cache", [], |r| r.get(0))
                 .map_err(|e| e.to_string())?,
@@ -382,7 +457,7 @@ impl TranslationService {
         Ok(())
     }
     fn reserve(&self, provider: &str, amount: u64, limit: u64, month: &str) -> Result<(), Failure> {
-        self.reserve_for(provider, amount, limit, month, false)
+        self.reserve_for(provider, amount, limit, month, UsagePurpose::Translation)
     }
     fn reserve_for(
         &self,
@@ -390,7 +465,7 @@ impl TranslationService {
         amount: u64,
         limit: u64,
         month: &str,
-        creative: bool,
+        purpose: UsagePurpose,
     ) -> Result<(), Failure> {
         let mut db = self
             .db
@@ -412,13 +487,13 @@ impl TranslationService {
         // Reserve before sending. If a request times out or the app exits, retain
         // the reservation because the remote service may still have billed it.
         tx.execute("INSERT INTO usage(month,provider,used) VALUES(?1,?2,?3) ON CONFLICT(month,provider) DO UPDATE SET used=used+excluded.used",params![month,provider,amount]).map_err(db_failure)?;
-        if creative {
-            tx.execute("INSERT INTO creative_usage(month,used) VALUES(?1,?2) ON CONFLICT(month) DO UPDATE SET used=used+excluded.used",params![month,amount]).map_err(db_failure)?;
+        if let Some(table) = purpose.table() {
+            tx.execute(&format!("INSERT INTO {table}(month,used) VALUES(?1,?2) ON CONFLICT(month) DO UPDATE SET used=used+excluded.used"),params![month,amount]).map_err(db_failure)?;
         }
         tx.commit().map_err(db_failure)
     }
     fn settle(&self, provider: &str, reserved: u64, used: u64, month: &str) -> Result<(), String> {
-        self.settle_for(provider, reserved, used, month, false)
+        self.settle_for(provider, reserved, used, month, UsagePurpose::Translation)
     }
     fn settle_for(
         &self,
@@ -426,7 +501,7 @@ impl TranslationService {
         reserved: u64,
         used: u64,
         month: &str,
-        creative: bool,
+        purpose: UsagePurpose,
     ) -> Result<(), String> {
         let mut connection = self.db.lock().map_err(|_| "翻译缓存锁已损坏")?;
         let tx = connection.transaction().map_err(|e| e.to_string())?;
@@ -435,9 +510,9 @@ impl TranslationService {
             params![month, provider, reserved, used],
         )
         .map_err(|e| e.to_string())?;
-        if creative {
+        if let Some(table) = purpose.table() {
             tx.execute(
-                "UPDATE creative_usage SET used=max(0,used-?2)+?3 WHERE month=?1",
+                &format!("UPDATE {table} SET used=max(0,used-?2)+?3 WHERE month=?1"),
                 params![month, reserved, used],
             )
             .map_err(|e| e.to_string())?;
@@ -493,7 +568,27 @@ impl TranslationService {
     ) -> Result<CreativeReply, String> {
         let reserved = analysis_budget(body, image_count)?;
         let key = deepseek_key()?;
-        self.creative_exchange_reserved(body, limit, cancel, &key, DEEPSEEK_URL, reserved)
+        self.creative_exchange_reserved(
+            body,
+            limit,
+            cancel,
+            &key,
+            DEEPSEEK_URL,
+            reserved,
+            UsagePurpose::Creative,
+        )
+        .await
+    }
+    pub(crate) async fn course_json_with_usage(
+        &self,
+        body: &serde_json::Value,
+        limit: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        image_count: usize,
+    ) -> Result<CreativeReply, String> {
+        course_budget(body, image_count)?;
+        let key = deepseek_key()?;
+        self.course_exchange(body, limit, cancel, &key, DEEPSEEK_URL, image_count)
             .await
     }
     // URL and key are private implementation inputs. The command surface never accepts them.
@@ -519,8 +614,16 @@ impl TranslationService {
     ) -> Result<CreativeReply, String> {
         let reserved =
             body.to_string().len() as u64 + 512 + body["max_tokens"].as_u64().unwrap_or(8192);
-        self.creative_exchange_reserved(body, limit, cancel, key, url, reserved)
-            .await
+        self.creative_exchange_reserved(
+            body,
+            limit,
+            cancel,
+            key,
+            url,
+            reserved,
+            UsagePurpose::Creative,
+        )
+        .await
     }
     async fn creative_exchange_reserved(
         &self,
@@ -530,9 +633,15 @@ impl TranslationService {
         key: &str,
         url: &str,
         reserved: u64,
+        purpose: UsagePurpose,
     ) -> Result<CreativeReply, String> {
         use std::sync::atomic::Ordering;
         let builder = Client::builder();
+        let builder = if purpose == UsagePurpose::Course {
+            builder.redirect(reqwest::redirect::Policy::none())
+        } else {
+            builder
+        };
         // Local test servers must not pass through Windows system proxies.
         #[cfg(test)]
         let builder = builder.no_proxy();
@@ -541,14 +650,19 @@ impl TranslationService {
             .build()
             .map_err(|_| "初始化 AI 请求失败")?;
         let month = month();
-        for attempt in 0..2 {
+        let attempts = if purpose == UsagePurpose::Course {
+            1
+        } else {
+            2
+        };
+        for attempt in 0..attempts {
             if cancel.load(Ordering::SeqCst) {
                 return Err("已取消生成".into());
             }
-            self.reserve_for("deepseek", reserved, limit, &month, true)
+            self.reserve_for("deepseek", reserved, limit, &month, purpose)
                 .map_err(|e| e.message)?;
             let request = async {
-                let response = client
+                let mut response = client
                     .post(url)
                     .bearer_auth(key)
                     .json(body)
@@ -557,12 +671,30 @@ impl TranslationService {
                     .map_err(|_| "AI 连接失败或超时")?;
                 let status = response.status().as_u16();
                 let value = if (200..300).contains(&status) {
-                    Some(
+                    Some(if purpose == UsagePurpose::Course {
+                        let mut bytes = Vec::new();
+                        if response
+                            .content_length()
+                            .is_some_and(|len| len > 2 * 1024 * 1024)
+                        {
+                            return Err("课程响应超过限制；已保留请求预留".into());
+                        }
+                        while let Some(chunk) =
+                            response.chunk().await.map_err(|_| "课程响应读取失败")?
+                        {
+                            if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                                return Err("课程响应超过限制；已保留请求预留".into());
+                            }
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .map_err(|_| "AI 响应格式无效")?
+                    } else {
                         response
                             .json::<serde_json::Value>()
                             .await
-                            .map_err(|_| "AI 响应格式无效")?,
-                    )
+                            .map_err(|_| "AI 响应格式无效")?
+                    })
                 } else {
                     None
                 };
@@ -583,7 +715,7 @@ impl TranslationService {
                         .pointer("/usage/total_tokens")
                         .and_then(|v| v.as_u64());
                     if let Some(used) = used {
-                        self.settle_for("deepseek", reserved, used, &month, true)?;
+                        self.settle_for("deepseek", reserved, used, &month, purpose)?;
                     }
                     if value
                         .pointer("/choices/0/finish_reason")
@@ -605,8 +737,12 @@ impl TranslationService {
                     });
                 }
                 Ok((status, None)) => {
-                    self.settle_for("deepseek", reserved, 0, &month, true)?;
-                    if attempt == 0 && (status == 429 || status >= 500) {
+                    if purpose != UsagePurpose::Course
+                        || matches!(status, 400 | 401 | 402 | 403 | 404 | 422 | 429)
+                    {
+                        self.settle_for("deepseek", reserved, 0, &month, purpose)?;
+                    }
+                    if attempt + 1 < attempts && (status == 429 || status >= 500) {
                         tokio::time::sleep(Duration::from_millis(750)).await;
                         continue;
                     }
@@ -620,7 +756,7 @@ impl TranslationService {
                     .into());
                 }
                 Err(error) => {
-                    if attempt == 1 {
+                    if attempt + 1 == attempts {
                         return Err(error);
                     }
                 }
@@ -1169,7 +1305,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let service = TranslationService::for_test(&temp.path().join("cache.sqlite"), true);
         service
-            .reserve_for("deepseek", 999, 1000, &month(), true)
+            .reserve_for("deepseek", 999, 1000, &month(), UsagePurpose::Creative)
             .unwrap();
         let policy = TranslationPreferences {
             deepseek_monthly_limit: 1,
@@ -1689,13 +1825,13 @@ mod tests {
         let month = month();
         service.reserve("deepseek", 60, 100, &month).unwrap();
         assert!(service
-            .reserve_for("deepseek", 50, 100, &month, true)
+            .reserve_for("deepseek", 50, 100, &month, UsagePurpose::Creative)
             .is_err());
         service
-            .reserve_for("deepseek", 40, 100, &month, true)
+            .reserve_for("deepseek", 40, 100, &month, UsagePurpose::Creative)
             .unwrap();
         service
-            .settle_for("deepseek", 40, 15, &month, true)
+            .settle_for("deepseek", 40, 15, &month, UsagePurpose::Creative)
             .unwrap();
         drop(service);
         let service = TranslationService::open(&path).unwrap();
@@ -1703,6 +1839,124 @@ mod tests {
         assert_eq!(usage.deepseek_tokens, 75);
         assert_eq!(usage.creative_tokens, 15);
         assert!(service.reserve("deepseek", 26, 100, &month).is_err());
+    }
+    #[test]
+    fn learning_analysis_budget_keeps_old_usage_and_course_subtotal_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let service = TranslationService::open(&path).unwrap();
+        service.reserve("deepseek", 60, 10000, &month()).unwrap();
+        service
+            .reserve_for("deepseek", 15, 10000, &month(), UsagePurpose::Creative)
+            .unwrap();
+        let (url, server) = fake_creative(
+            vec![(
+                200,
+                serde_json::json!({"usage":{"total_tokens":81},"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}),
+            )],
+            None,
+        );
+        let reply = tauri::async_runtime::block_on(service.course_exchange(
+            &serde_json::json!({"max_tokens":20}),
+            10000,
+            &std::sync::atomic::AtomicBool::new(false),
+            "local-test-fixture",
+            &url,
+            0,
+        ))
+        .expect("course request succeeds");
+        assert_eq!(reply.content.unwrap(), "{}");
+        assert_eq!(server.join().unwrap(), 1);
+        drop(service);
+        let usage = serde_json::to_value(TranslationService::open(&path).unwrap().usage().unwrap())
+            .unwrap();
+        assert_eq!(usage["deepseekTokens"], 156);
+        assert_eq!(usage["creativeTokens"], 15);
+        assert_eq!(usage["courseTokens"], 81);
+    }
+    #[test]
+    fn learning_analysis_budget_ambiguous_failure_keeps_reservation_without_retry() {
+        for response in [
+            (503, serde_json::json!({})),
+            (
+                200,
+                serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}),
+            ),
+            (200, serde_json::json!({"padding":"x".repeat(2*1024*1024)})),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+            let (url, server) = fake_creative(vec![response, (401, serde_json::json!({}))], None);
+            let body = serde_json::json!({"max_tokens":20});
+            let reply = tauri::async_runtime::block_on(service.course_exchange(
+                &body,
+                10000,
+                &std::sync::atomic::AtomicBool::new(false),
+                "local-test-fixture",
+                &url,
+                0,
+            ));
+            let usage = serde_json::to_value(service.usage().unwrap()).unwrap();
+            assert_eq!(
+                usage["deepseekTokens"],
+                body.to_string().len() as u64 + 512 + 20
+            );
+            assert_eq!(usage["courseTokens"], usage["deepseekTokens"]);
+            assert_eq!(usage["creativeTokens"], 0);
+            if let Ok(reply) = reply {
+                assert_eq!(reply.used, None);
+            }
+            assert_eq!(
+                server.join().unwrap(),
+                1,
+                "course never automatically sends a second request"
+            );
+        }
+    }
+    #[test]
+    fn learning_analysis_budget_limit_and_precancel_make_no_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        service.reserve("deepseek", 100, 100, &month()).unwrap();
+        for (limit, cancelled, expected) in [(100, false, "上限"), (10000, true, "取消")] {
+            let error = tauri::async_runtime::block_on(service.course_exchange(
+                &serde_json::json!({"max_tokens":20}),
+                limit,
+                &std::sync::atomic::AtomicBool::new(cancelled),
+                "local-test-fixture",
+                "http://127.0.0.1:1",
+                0,
+            ))
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(service.usage().unwrap().deepseek_tokens, 100);
+        }
+    }
+    #[test]
+    fn learning_analysis_budget_six_frames_are_course_only_and_cancellation_keeps_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = TranslationService::open(&dir.path().join("cache.sqlite")).unwrap();
+        let body = serde_json::json!({"max_tokens":20,"messages":[{"role":"user","content":(0..6).map(|_|serde_json::json!({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AA=="}})).collect::<Vec<_>>()}]});
+        assert!(
+            analysis_budget(&body, 6).is_err(),
+            "asset limit must remain four"
+        );
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (url, server) = fake_creative(vec![(200, serde_json::json!({}))], Some(cancel.clone()));
+        let error = tauri::async_runtime::block_on(service.course_exchange(
+            &body,
+            100000,
+            &cancel,
+            "local-test-fixture",
+            &url,
+            6,
+        ))
+        .unwrap_err();
+        assert!(error.contains("取消"), "{error}");
+        assert_eq!(server.join().unwrap(), 1);
+        let usage = serde_json::to_value(service.usage().unwrap()).unwrap();
+        assert!(usage["courseTokens"].as_u64().unwrap() > 12000);
+        assert_eq!(usage["deepseekTokens"], usage["courseTokens"]);
     }
     #[test]
     fn creative_exchange_retries_service_errors_once_and_settles_usage() {
