@@ -40,7 +40,7 @@
 
 同日扩展调试宿主：原进程退出及只读退出验证完成后，独立新进程使用同一隔离LOCALAPPDATA和库重新初始化并实际启动mpv。进入前拒绝链接，复核配置activeLibrary只能是该测试目录的local/DCCAssetLibrary，拒绝把非空QA目录配置指向其他库。Release没有这些调试入口。
 
-首次暂停seek测量失败（读到前一帧，误差1225ms）；添加有界2秒的时间采样后确认mpv命令确认早于落帧，不改变生产控制逻辑或50ms验收范围。保留初始位置、最终落点和耗时。task7-restart-native.log首轮采样误差0/0/1ms，最慢22ms；最终task7-restart-final.log重新运行退出0，native=true/postExitVerified=true，125/1350/7999ms三个暂停目标均误差0ms，最慢21ms。不是跳过失败目标或用前端预测值作实测。
+首次暂停seek测量失败（读到前一帧，误差1225ms）；添加有界2秒的时间采样后确认mpv命令确认早于落帧，不改变生产控制逻辑或50ms验收范围。保留初始位置、最终落点和耗时。task7-restart-native.log首轮采样误差0/0/1ms，最慢22ms；最终task7-restart-final.log重新运行退出0，native=true/postExitVerified=true，125/1350/7999ms三个暂停目标的实际位置为125/1360/7999ms，误差0/10/0ms，最慢21ms。不是跳过失败目标或用前端预测值作实测。
 
 最后新进程实际恢复2720ms，误差0ms，恢复进程的mpv PID退出后也由独立脚本确认回收。此前另一轮为2760ms、误差0ms。两次源件不同正常播放时长不影响各自保存/恢复精度。
 
