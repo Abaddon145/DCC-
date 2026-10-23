@@ -9,7 +9,9 @@ import { listen } from "@tauri-apps/api/event";
 import { Inbox, ArchiveRestore, AudioLines, BriefcaseBusiness, Box, ChevronDown, ChevronRight, Clock3, DatabaseBackup, Download, Film, FolderTree, Grid3X3, Heart, Image, Library, ListChecks, PanelLeftOpen, Plus, Search, Settings, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from "lucide-react";
 import { api } from "./lib/api";
 import { GlobalNoteSearch } from "./components/GlobalNoteSearch";
-import { flushKnowledgeEdits } from "./lib/noteSaveGuard";
+import { flushWorkspaceEdits } from "./lib/noteSaveGuard";
+import {LearningWorkspace} from "./features/learning/LearningWorkspace";
+import {learningApi} from "./features/learning/api";
 const KnowledgeWorkspace = lazy(() => import("./components/KnowledgeWorkspace"));
 import type { AssetCard, AssetDetail, AssetInput, BatchAssetUpdate, BatchTranslationReport, ContentLanguage, DeleteRequest, HealthSummary, ImportProgress, LibraryDragPayload, LibraryMeta, LinkCheckProgress, MediaKind, MoveCategoryRequest, MoveResult, ParsedShareText, PersonalizationState, SearchRequest, SmartCollection, SmartCollectionInput, SmartCollectionRule, ViewMode } from "./types";
 import { CategoryTree, categoryDropZone, categoryMoveRequest } from "./components/CategoryTree";
@@ -31,7 +33,7 @@ import { TagManager } from "./components/TagManager";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { SmartCollections } from "./components/SmartCollections";
 import { TrashPanel } from "./components/TrashPanel";
-import { ProjectHub } from "./components/ProjectHub";
+import { ProjectHub,type ProjectLearningContext } from "./components/ProjectHub";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { MediaLibraryView } from "./components/MediaLibraryView";
 import { ResizableContextPane } from "./components/ResizableContextPane";
@@ -71,6 +73,11 @@ export default function App() {
   const [detail, setDetail] = useState<AssetDetail | null>(null);
   const [coreScope,setCoreScope]=useState<"normal"|"all">("normal");
   const [coreMediaId,setCoreMediaId]=useState<string|null>(null);
+  const [learningTarget,setLearningTarget]=useState<{libraryId:string;courseId:string;mediaId:string;projectId?:string;projectContext?:ProjectLearningContext}|null>(null);
+  const [projectReturnMediaId,setProjectReturnMediaId]=useState<string|null>(null);
+  const [projectReturnContext,setProjectReturnContext]=useState<ProjectLearningContext|undefined>();
+  const learningGate=useRequestGate();
+  const navigationBusy=useRef(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [editor, setEditor] = useState<"new" | "edit" | null>(null);
   const [showImport, setShowImport] = useState(false);
@@ -90,7 +97,13 @@ export default function App() {
   const [knowledgeInitialId,setKnowledgeInitialId]=useState<string|null>(null);
   const [navigation,setNavigation]=useWorkspaceState("navigation",{view:"library" as ViewMode},libraryEpoch);
   const view=navigation.view;
-  const setView=(value:ViewMode)=>{ void flushKnowledgeEdits().then(()=>setNavigation({view:value})).catch(error=>notify(String(error),true)); };
+  const setView=async(value:ViewMode,onCommit?:()=>void)=>{
+    if(navigationBusy.current)return false;
+    navigationBusy.current=true;
+    try{await flushWorkspaceEdits();learningGate.invalidate();setLearningTarget(null);onCommit?.();setNavigation({view:value});return true;}
+    catch(error){notify(String(error),true);return false;}
+    finally{navigationBusy.current=false;}
+  };
   const [contextReady,setContextReady]=useState(false);
   const assetContextLocation=useRef<string|null>(null);
   const desiredScroll=useRef(0);
@@ -156,6 +169,21 @@ export default function App() {
     setToasts(previous => [...(kind ? previous.filter(item => item.kind !== kind) : previous), { id, message, error, kind, actionLabel: action?.label, action: action?.run }]);
     window.setTimeout(() => setToasts(previous => previous.filter(item => item.id !== id)), kind ? 8000 : 3500);
   }, []);
+  const openLearning=async(mediaId:string,projectId?:string,projectContext?:ProjectLearningContext)=>{
+    if(!activeLibraryId){notify("素材库尚未就绪，请稍后重试",true);return;}
+    const ticket=learningGate.begin();
+    try{
+      await flushWorkspaceEdits();
+      const course=await learningApi.ensureCourse(activeLibraryId,mediaId);
+      if(learningGate.isCurrent(ticket))setLearningTarget({libraryId:activeLibraryId,courseId:course.id,mediaId,projectId,projectContext});
+    }catch(error){if(learningGate.isCurrent(ticket))notify(String(error),true);}
+  };
+  const returnFromLearning=()=>{
+    if(!learningTarget)return;
+    if(learningTarget.projectId){setKnowledgeProjectId(learningTarget.projectId);setProjectReturnMediaId(learningTarget.mediaId);setProjectReturnContext(learningTarget.projectContext);}else setCoreMediaId(learningTarget.mediaId);
+    setLearningTarget(null);
+  };
+  useEffect(()=>{learningGate.invalidate();setLearningTarget(null);setProjectReturnMediaId(null);},[libraryEpoch,learningGate]);
 
   const updateLibraryUi = useCallback((updater: (current: PersonalizationState["library"]) => PersonalizationState["library"]) => {
     setPersonalization(previous => {
@@ -255,7 +283,7 @@ export default function App() {
   useEffect(()=>{if(!contextReady||!isAssetWorkspace(view)||!assetContextLocation.current)return;const id=assetContextLocation.current;const timer=window.setTimeout(()=>void api.saveWorkspaceContext(id,view,{request:{...request,offset:0},scroll:scrollRef.current?.scrollTop||0}).catch(()=>undefined),500);return()=>window.clearTimeout(timer)},[request,contextReady,view]);
   useEffect(()=>{const node=scrollRef.current;if(!node||!contextReady||!isAssetWorkspace(view))return;let timer:number|undefined;const persist=()=>{const id=assetContextLocation.current;if(id)void api.saveWorkspaceContext(id,view,{request:{...request,offset:0},scroll:node.scrollTop}).catch(()=>undefined)};const changed=()=>{window.clearTimeout(timer);timer=window.setTimeout(persist,500)};node.addEventListener("scroll",changed);return()=>{window.clearTimeout(timer);persist();node.removeEventListener("scroll",changed)}},[view,contextReady,request]);
   useEffect(()=>{if(historyTraversal.current){historyTraversal.current=false;return}setHistory(previous=>{if(previous[historyIndex]===view)return previous;const next=[...previous.slice(0,historyIndex+1),view].slice(-50);setHistoryIndex(next.length-1);return next})},[view]);
-  const traverseHistory=(delta:number)=>{const index=historyIndex+delta;if(index<0||index>=history.length)return;historyTraversal.current=true;setHistoryIndex(index);setView(history[index])};
+  const traverseHistory=(delta:number)=>{const index=historyIndex+delta;if(index<0||index>=history.length)return;void setView(history[index],()=>{historyTraversal.current=true;setHistoryIndex(index);});};
   useEffect(()=>{const changed=(event:Event)=>{const kind=(event as CustomEvent<import("./types").LibraryTask>).detail?.payload.kind;if(kind==="restore"||kind==="migration"){void libraryChanged();return}void refreshAll();setProjectRefreshKey(value=>value+1)};window.addEventListener("library-task-completed",changed);return()=>window.removeEventListener("library-task-completed",changed)},[refreshMeta,refreshSmartCollections,runSearch,request]);
   useEffect(() => {
     if (!personalization.library.rememberSearch && !personalization.library.rememberLastContext) return;
@@ -267,18 +295,17 @@ export default function App() {
   }, [request, view, personalization.library]);
 
   const patchRequest = (patch: Partial<SearchRequest>) => { setActiveSmartId(null); setRequest(prev => ({ ...prev, ...patch, ...(Object.hasOwn(patch, "tags") ? { tagIds: [] } : {}), smartCollectionId: null, offset: 0 })); };
-  const changeView = (next: ViewMode) => {
+  const changeView = (next: ViewMode) => setView(next,()=>{
     detailGate.invalidate();
     if(next!=="projects")setKnowledgeProjectId(null);
     const group = ["projects", "knowledge", "reference"].includes(next) ? "creation" : ["tagManager", "health", "trash"].includes(next) ? "manage" : "content";
     updateLibraryUi(current => current.collapsedModuleGroups.includes(group) ? { ...current, collapsedModuleGroups: current.collapsedModuleGroups.filter(value => value !== group) } : current);
-    setView(next);
     setActiveSmartId(null); setSourceSmartId(null);
     setSelectionMode(false); setSelectedIds(new Set());
     if (["browserCapture","imageLibrary","modelLibrary","audioLibrary","videoLibrary","projects","knowledge","reference","tagManager","trash"].includes(next)) { setSelectedId(null); setDetail(null); return; }
     patchRequest({ favoriteOnly: next === "favorites", recentOnly: next === "recent", healthIssue: next === "health" ? request.healthIssue || null : null, sort: next === "recent" ? "recent" : request.query ? "relevance" : personalization.library.defaultSort });
     if (next === "health") refreshHealth();
-  };
+  });
   const loadMore = useCallback(() => {
     if (searchFailed || loading || items.length >= total) return;
     runSearch({ ...request, offset: items.length }, true);
@@ -761,7 +788,7 @@ export default function App() {
     const item = values[id]; if (!item) return null; const Icon = item.icon;
     const hasContextPane = ["library", "imageLibrary", "modelLibrary", "audioLibrary", "videoLibrary"].includes(id);
     return <button key={id} className={`${view === item.target && !(id === "library" && activeSmartId) ? "active" : ""} ${nested ? "nested" : ""}`} onClick={() => {
-      if (hasContextPane && view === item.target && !activeSmartId) setContextPaneCollapsed(id, !personalization.library.collapsedContextPanes.includes(id));
+      if (hasContextPane && view === item.target && !activeSmartId && !learningTarget) setContextPaneCollapsed(id, !personalization.library.collapsedContextPanes.includes(id));
       else changeView(item.target);
     }} title={hasContextPane && view === item.target ? "再次点击可展开或收起导航" : undefined}><Icon size={17} />{item.label}</button>;
   };
@@ -779,8 +806,9 @@ export default function App() {
     </aside>
 
     <main className={`main-content ${selectedId ? "with-detail" : ""} ${view === "reference" ? "reference-mode" : ""}`}><WorkspaceBoundary key={view}>
+      {learningTarget?<LearningWorkspace key={`${learningTarget.libraryId}:${learningTarget.courseId}`} libraryId={learningTarget.libraryId} courseId={learningTarget.courseId} projectId={learningTarget.projectId} onBack={returnFromLearning} notify={notify}/>:<>
       <AssetScope hidden={!isAssetWorkspace(view)} scope={coreScope} onChange={scope=>{setCoreScope(scope);closeAssetDetail();setSelectionMode(false);setSelectedIds(new Set());}} browser={<AssetBrowser key={libraryEpoch} libraryId={activeLibraryId||""} locale={contentLanguage} notify={notify} onOpenOrigin={(origin,type)=>{setCoreScope("normal");if(origin.kind==="legacy"){changeView("library");void selectAsset(origin.id);}else if(origin.kind==="media"){setCoreMediaId(origin.id);void changeView(type==="image"?"imageLibrary":type==="model"?"modelLibrary":type==="audio"?"audioLibrary":"videoLibrary");}}} onOpenNote={enabledIds.has("knowledge")?id=>{setKnowledgeInitialId(id);changeView("knowledge");}:undefined} onOpenProject={enabledIds.has("projects")?id=>{setKnowledgeProjectId(id);changeView("projects");}:undefined}/>}>
-      {view === "downloader" ? <DownloadWorkspace key={libraryEpoch} notify={notify} onSettings={()=>{setSettingsTab("download");setShowSettings(true);}} onOpenLibrary={audio=>void changeView(audio?"audioLibrary":"videoLibrary")}/> : view === "browserCapture" ? <BrowserCaptureInbox key={libraryEpoch} notify={notify} canAddProject={enabledIds.has("projects")} canAddBoard={enabledIds.has("reference")} onOpenNote={enabledIds.has("knowledge")?id=>{setKnowledgeInitialId(id);changeView("knowledge");}:undefined}/> : view === "knowledge" ? <Suspense fallback={<LoadFeedback label="正在加载知识库…" skeleton/>}><KnowledgeWorkspace key={libraryEpoch} initialNoteId={knowledgeInitialId} onOpenProject={enabledIds.has("projects")?id=>{setKnowledgeProjectId(id);changeView("projects");}:undefined} notify={notify}/></Suspense> : view === "aiAssistant" ? <AiAssistant key={libraryEpoch} settingsOpen={showSettings} launch={aiLaunch} language={contentLanguage} notify={notify} onChanged={() => { void refreshAll(); setProjectRefreshKey(v => v + 1); }} onSettings={() => setShowSettings(true)} /> : mediaKind ? <MediaLibraryView key={`${libraryEpoch}-${mediaKind}`} shortcuts={personalization.global.shortcuts} onAi={enabledIds.has("aiAssistant") ? ids => openAi({ kind: "organize", mediaIds: ids }) : undefined} initialEntryId={coreMediaId} onInitialEntryOpened={()=>setCoreMediaId(null)} kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub libraryId={activeLibraryId||""} initialProjectId={knowledgeProjectId} key={libraryEpoch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "plan", projectId: id }) : undefined} contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} onEditAsset={id=>{changeView("library");void api.getAsset(id,contentLanguage).then(asset=>{setSelectedId(id);setDetail(asset);setEditor("edit")}).catch(error=>notify(String(error),true))}} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} onOpenNote={id=>{setKnowledgeInitialId(id);changeView("knowledge");}} /> : <div className="asset-workspace-layout">
+      {view === "downloader" ? <DownloadWorkspace key={libraryEpoch} notify={notify} onSettings={()=>{setSettingsTab("download");setShowSettings(true);}} onOpenLibrary={audio=>void changeView(audio?"audioLibrary":"videoLibrary")}/> : view === "browserCapture" ? <BrowserCaptureInbox key={libraryEpoch} notify={notify} canAddProject={enabledIds.has("projects")} canAddBoard={enabledIds.has("reference")} onOpenNote={enabledIds.has("knowledge")?id=>{setKnowledgeInitialId(id);changeView("knowledge");}:undefined}/> : view === "knowledge" ? <Suspense fallback={<LoadFeedback label="正在加载知识库…" skeleton/>}><KnowledgeWorkspace key={libraryEpoch} initialNoteId={knowledgeInitialId} onOpenProject={enabledIds.has("projects")?id=>{setKnowledgeProjectId(id);changeView("projects");}:undefined} notify={notify}/></Suspense> : view === "aiAssistant" ? <AiAssistant key={libraryEpoch} settingsOpen={showSettings} launch={aiLaunch} language={contentLanguage} notify={notify} onChanged={() => { void refreshAll(); setProjectRefreshKey(v => v + 1); }} onSettings={() => setShowSettings(true)} /> : mediaKind ? <MediaLibraryView onLearn={(id)=>void openLearning(id)} key={`${libraryEpoch}-${mediaKind}`} shortcuts={personalization.global.shortcuts} onAi={enabledIds.has("aiAssistant") ? ids => openAi({ kind: "organize", mediaIds: ids }) : undefined} initialEntryId={coreMediaId} onInitialEntryOpened={()=>setCoreMediaId(null)} kind={mediaKind} onNotify={notify} paneWidth={personalization.library.contextPaneWidths[view] || defaultLibraryPreferences.contextPaneWidths[view] || 220} paneCollapsed={personalization.library.collapsedContextPanes.includes(view)} onPaneWidthChange={width => setContextPaneWidth(view, width)} onPaneCollapsedChange={collapsed => setContextPaneCollapsed(view, collapsed)} /> : view === "projects" ? <ProjectHub initialContext={projectReturnContext} onLearn={(id,projectId,context)=>void openLearning(id,projectId,context)} initialMediaId={projectReturnMediaId} onInitialMediaOpened={()=>setProjectReturnMediaId(null)} libraryId={activeLibraryId||""} initialProjectId={knowledgeProjectId} key={libraryEpoch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "plan", projectId: id }) : undefined} contentLanguage={contentLanguage} notify={notify} refreshKey={projectRefreshKey} onOpenReference={boardId => { setReferenceInitialBoardId(boardId); setView("reference"); }} onEditAsset={id=>{changeView("library");void api.getAsset(id,contentLanguage).then(asset=>{setSelectedId(id);setDetail(asset);setEditor("edit")}).catch(error=>notify(String(error),true))}} /> : view === "reference" ? <ReferenceBoardHub detachedBoardId={detachedBoardId} onDetached={setDetachedBoardId} notify={notify} initialBoardId={referenceInitialBoardId} /> : view === "tagManager" ? <TagManager notify={notify} onChanged={refreshAll} /> : view === "trash" ? <TrashPanel notify={notify} onChanged={refreshAll} onOpenNote={id=>{setKnowledgeInitialId(id);changeView("knowledge");}} /> : <div className="asset-workspace-layout">
       <ResizableContextPane ariaLabel="素材分类" className="asset-context-pane" width={personalization.library.contextPaneWidths.library || 248} defaultWidth={248} collapsed={personalization.library.collapsedContextPanes.includes("library")} onResizeEnd={width => setContextPaneWidth("library", width)} onCollapsedChange={collapsed => setContextPaneCollapsed("library", collapsed)}>
         <div className="asset-context-heading"><strong>素材导航</strong><span>{meta.totalAssets.toLocaleString("zh-CN")} 项</span></div>
         <div className="asset-context-shortcuts">{enabledIds.has("favorites") && <button className={view === "favorites" ? "active" : ""} onClick={() => changeView("favorites")}><Heart size={15} />我的收藏</button>}{enabledIds.has("recent") && <button className={view === "recent" ? "active" : ""} onClick={() => changeView("recent")}><Clock3 size={15} />最近查看</button>}</div>
@@ -797,6 +825,7 @@ export default function App() {
       <div className="grid-scroll" ref={scrollRef}><AssetGrid blocked={searchFailed} items={items} total={total} loading={loading} selectedId={selectedId} onSelect={selectAsset} onFavorite={toggleFavorite} onContextMenu={openAssetContextMenu} onLoadMore={loadMore} scrollRef={scrollRef} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelect={toggleSelection} onPointerDragStart={beginLibraryPointerDrag} preferences={personalization.library} query={request.query} /></div>
       </section></div>}
       </AssetScope>
+      </>}
     </WorkspaceBoundary></main>
 
     {coreScope === "normal" && !mediaKind && view !== "downloader" && view !== "browserCapture" && view !== "knowledge" && view !== "aiAssistant" && view !== "projects" && view !== "reference" && view !== "tagManager" && view !== "trash" && <>{selectedId && <button className="inspector-backdrop" aria-label="关闭素材详情" onClick={closeAssetDetail} />}<DetailPanel onTranslate={id => void translateSelected([id])} translating={translatingBatch} onAi={enabledIds.has("aiAssistant") ? id => openAi({ kind: "organize", assetIds: [id] }) : undefined} asset={detail} contentLanguage={contentLanguage} loading={detailLoading} onClose={closeAssetDetail} onEdit={() => setEditor("edit")} onDelete={deleteAsset} onFavorite={() => detail && toggleFavorite(detail)} onOpen={async () => { if (!detail) return; try { await api.openShare(detail.id); setDetail(await api.getAsset(detail.id, contentLanguage)); } catch (error) { notify(String(error), true); } }} onSourceOpen={async () => { if (!detail?.sourceUrl) return; try { await api.openExternal(detail.sourceUrl); } catch (error) { notify(String(error), true); } }} onOpenExternal={async url => { try { await api.openExternal(url); } catch (error) { notify(String(error), true); } }} onCopy={async () => { if (!detail) return; try { await api.copyCode(detail.id); notify("提取码已复制"); } catch (error) { notify(String(error), true); } }} onCheckLink={() => void checkDetailLink()} checkingLink={checkingDetailLink} onAddReference={imageIds => setReferencePicker({ imageIds, title: detail?.name || "素材预览图" })} onAddProject={id => setProjectPicker([id])} onCollectMedia={collectAssetMedia} /></>}

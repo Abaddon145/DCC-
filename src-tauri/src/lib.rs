@@ -58,6 +58,10 @@ pub fn run_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
 pub fn verify_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
     learning::native_qa::verify(root)
 }
+#[cfg(all(windows, debug_assertions))]
+pub fn run_learning_workspace_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::run_workspace(root)
+}
 
 pub fn run_browser_capture_host() -> Result<(), String> {
     browser_capture::native_host()
@@ -133,6 +137,16 @@ pub fn run() {
         let _ = entry.delete_credential();
     }
     let state = AppState::initialize().unwrap_or_else(|error| panic!("无法启动素材库：{error}"));
+    application_builder(state, None)
+        .run(context)
+        .expect("运行 Tauri 应用失败");
+}
+
+fn application_builder(
+    state: AppState,
+    qa_root: Option<std::path::PathBuf>,
+) -> tauri::Builder<tauri::Wry> {
+    let isolated_qa = qa_root.is_some();
     tauri::Builder::default()
         .register_uri_scheme_protocol("dcc-media", |context, request| {
             let path = request.uri().path().trim_matches('/');
@@ -180,7 +194,21 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(all(windows, debug_assertions))]
+            if let Some(root) = qa_root {
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .data_directory(root.join("webview"))
+                .title("栈藏 · 隔离学习工作区验收")
+                .inner_size(1000.0, 700.0)
+                .min_inner_size(980.0, 680.0)
+                .build()?;
+                return Ok(());
+            }
             if let Err(error) = downloader::auth::clean_stale() {
                 eprintln!("下载Cookie临时文件清理失败：{error}");
             }
@@ -248,7 +276,17 @@ pub fn run() {
                 });
             }
         })
-        .invoke_handler(|invoke| {
+        .invoke_handler(move |invoke| {
+            #[cfg(all(windows, debug_assertions))]
+            if isolated_qa
+                && !learning::native_qa::workspace_command_allowed(invoke.message.command())
+            {
+                invoke
+                    .resolver
+                    .reject("隔离验收禁止访问凭据、联网、安装或用户文件操作");
+                return true;
+            }
+            let _ = isolated_qa;
             let webview = invoke.message.webview();
             let interrupted = webview
                 .state::<AppState>()
@@ -589,8 +627,6 @@ pub fn run() {
                 ]);
             handler(invoke)
         })
-        .run(context)
-        .expect("运行 Tauri 应用失败");
 }
 
 #[cfg(test)]

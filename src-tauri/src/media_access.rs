@@ -72,6 +72,13 @@ impl LocalMediaGrants {
         let path = self.path(&grant.root, &grant.file_id)?;
         fs::create_dir_all(path.parent().ok_or("批准目录无效")?).map_err(|e| e.to_string())?;
         reject_links(&path)?;
+        // tempfile's Windows atomic rename requires an extended absolute destination for long paths.
+        let path = path
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .join(path.file_name().unwrap());
         let mut temp =
             tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(|e| e.to_string())?;
         temp.write_all(&serde_json::to_vec(grant).map_err(|e| e.to_string())?)
@@ -603,6 +610,33 @@ mod tests {
             std::fs::metadata(source).unwrap().modified().unwrap(),
             modified
         );
+    }
+    #[test]
+    fn external_grant_atomic_publish_supports_long_config_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("long-config-segment".repeat(7));
+        fs::create_dir_all(&config).unwrap();
+        let grants = LocalMediaGrants::new(&config);
+        let file = uuid::Uuid::new_v4().to_string();
+        let grant = Grant {
+            library: "library".into(),
+            root: dir.path().to_path_buf(),
+            file_id: file.clone(),
+            epoch: "epoch".into(),
+            source: Fingerprint {
+                path: dir.path().join("video.mp4"),
+                size: 1,
+                modified: 1,
+                identity: "volume:file".into(),
+                sha256: "hash".into(),
+            },
+        };
+        grants.save(&grant).unwrap();
+        let restored: Grant =
+            serde_json::from_slice(&fs::read(grants.path(dir.path(), &file).unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(restored.file_id, file);
+        assert_eq!(restored.epoch, "epoch");
     }
     #[test]
     fn managed_resolution_is_unchanged() {

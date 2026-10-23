@@ -344,7 +344,12 @@ fn boot_engine(app: &tauri::AppHandle, session: &Arc<PlaybackSession>) -> Result
     if session.closed.load(Ordering::Acquire) {
         return Err("播放准备已取消".into());
     }
-    let window = super::native_window::NativeWindow::create(app)?;
+    let window = super::native_window::NativeWindow::create(
+        app,
+        &session.lease.library_id,
+        &session.lease.session_id,
+        &session.lease.course_id,
+    )?;
     let pipe = format!(r"\\.\pipe\stackdcc-{}", uuid::Uuid::new_v4());
     let mut args = [
         "--no-config",
@@ -370,6 +375,7 @@ fn boot_engine(app: &tauri::AppHandle, session: &Arc<PlaybackSession>) -> Result
         "--gpu-context=d3d11",
         "--terminal=no",
         "--input-media-keys=no",
+        "--input-doubleclick-time=300",
     ]
     .map(str::to_owned)
     .to_vec();

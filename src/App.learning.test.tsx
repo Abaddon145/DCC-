@@ -1,0 +1,40 @@
+import {fireEvent,render,screen,waitFor} from "@testing-library/react";
+import {beforeEach,it,expect,vi} from "vitest";
+import App from "./App";
+import {api} from "./lib/api";
+import {learningApi} from "./features/learning/api";
+import {defaultGlobalPreferences,defaultLibraryPreferences} from "./lib/personalization";
+vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn().mockResolvedValue(()=>{})}));
+vi.mock("./lib/api",async original=>{const module=await original<typeof import("./lib/api")>();return {...module,api:{...module.api,getWorkspaceContext:vi.fn().mockResolvedValue({libraryId:"lib",enabled:false,value:null}),saveWorkspaceContext:vi.fn().mockResolvedValue(true),getPersonalization:vi.fn(),getTranslationSettings:vi.fn().mockResolvedValue({contentLanguage:"zh-CN"}),getMeta:vi.fn().mockResolvedValue({categories:[],filters:{tags:[],dccTools:[],versions:[],formats:[],licenses:[]},totalAssets:0}),listSmartCollections:vi.fn().mockResolvedValue([]),search:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:80})}};});
+vi.mock("./features/learning/api",()=>({learningApi:{ensureCourse:vi.fn(),getCourse:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),controlPlayback:vi.fn(),stopPlayback:vi.fn()}}));
+vi.mock("./components/TaskCenter",()=>({TaskCenter:()=>null}));
+vi.mock("./components/AssetGrid",()=>({AssetGrid:()=>null}));
+vi.mock("./components/ReliabilitySettings",()=>({AutomaticBackupService:()=>null}));
+vi.mock("./components/MediaLibraryView",()=>({MediaLibraryView:({onLearn,initialEntryId}:{onLearn?:(id:string)=>void;initialEntryId?:string})=><section><button onClick={()=>onLearn?.("media")}>学习此视频</button>{initialEntryId&&<span>视频详情 {initialEntryId}</span>}</section>}));
+vi.mock("./components/ProjectHub",()=>({ProjectHub:({onLearn,initialMediaId,initialProjectId}:{onLearn?:(id:string,projectId:string,context:{tab:string;scroll:number})=>void;initialMediaId?:string;initialProjectId?:string})=><section><button onClick={()=>onLearn?.("media","project",{tab:"units",scroll:123})}>学习项目视频</button>{initialMediaId&&<span>项目视频详情 {initialMediaId} · {initialProjectId}</span>}</section>}));
+beforeEach(()=>{
+  vi.clearAllMocks();vi.stubGlobal("ResizeObserver",class{observe(){}unobserve(){}disconnect(){}});
+  vi.mocked(api.getPersonalization).mockResolvedValue({global:defaultGlobalPreferences,library:{...defaultLibraryPreferences,startupModule:"videoLibrary",rememberWorkspace:false}});
+  const course={id:"course",mediaId:"media",title:"制作教程",positionMs:0,durationMs:60000,rate:1,completed:false,progressRevision:1};
+  const snapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:0,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[],audioId:null,subtitleId:null,fullscreen:false,error:null,saveError:null};
+  vi.mocked(learningApi.ensureCourse).mockResolvedValue(course);vi.mocked(learningApi.getCourse).mockResolvedValue(course);vi.mocked(learningApi.startPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.getPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.controlPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.stopPlayback).mockResolvedValue(undefined);
+});
+it("opens the existing video identity and returns to that exact detail",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));
+  await screen.findByRole("region",{name:"学习播放器"});
+  expect(learningApi.ensureCourse).toHaveBeenCalledWith("lib","media");
+  fireEvent.click(screen.getByRole("button",{name:"返回视频详情"}));
+  expect(await screen.findByText("视频详情 media")).toBeInTheDocument();
+  expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
+});
+it("navigation waits for progress save, failure keeps learning and history unchanged",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));await screen.findByRole("button",{name:"播放"});
+  vi.mocked(learningApi.stopPlayback).mockRejectedValueOnce(new Error("进度未保存"));
+  fireEvent.click(screen.getByRole("button",{name:"创作项目"}));
+  await waitFor(()=>expect(learningApi.stopPlayback).toHaveBeenCalled());
+  expect(screen.getByRole("region",{name:"学习播放器"})).toBeInTheDocument();expect(screen.queryByRole("button",{name:"学习项目视频"})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"创作项目"}));
+  fireEvent.click(await screen.findByRole("button",{name:"学习项目视频"}));await screen.findByRole("button",{name:"返回项目"});
+  fireEvent.click(screen.getByRole("button",{name:"返回项目"}));
+  expect(await screen.findByText("项目视频详情 media · project")).toBeInTheDocument();
+});

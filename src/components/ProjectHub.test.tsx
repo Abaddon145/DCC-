@@ -6,9 +6,9 @@ import { ProjectHub } from "./ProjectHub";
 import {intelligenceApi} from "../features/intelligence/api";
 import type {ShotAsset} from "../features/intelligence/types";
 
-vi.mock("../lib/api", () => ({ mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`, api: {
+vi.mock("../lib/api", () => ({ mediaLibraryBundleUrl:(id:string,path:string)=>`http://dcc-media.localhost/library/bundle/${id}/${path}`,mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`, api: {
   listProjectAssets: vi.fn(), listProjectTasks: vi.fn(), updateProjectAssets: vi.fn(), getProjectUnitImpact: vi.fn(), listProjects: vi.fn(), getProject: vi.fn(), moveProjectTask: vi.fn(), listReferenceBoards: vi.fn(),
-  unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(),
+  unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(), getMediaEntry:vi.fn(),
 } }));
 vi.mock("./DetailPanel", () => ({ DetailPanel: ({ asset }: { asset: AssetDetail }) => <aside className="detail-panel" aria-label="项目素材详情">{asset.name}</aside> }));
 vi.mock("../features/intelligence/api",()=>({intelligenceApi:{listShots:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:200})}}));
@@ -45,6 +45,15 @@ async function pointerDrop(source:HTMLElement,target:HTMLElement){
 }
 
 describe("ProjectHub", () => {
+  it("reopens the exact project video and originating tab even without remembered workspace",async()=>{
+    const video={...image,id:"video",kind:"video" as const,name:"课程",format:"mp4",projectIds:[summary.id],assetIds:[],files:[{id:"file-1",entryId:"video",role:"main" as const,logicalPath:"originals/video.mp4",originalName:"video.mp4",mimeType:"video/mp4",fileSize:512,checksum:"sha",width:320,height:180,durationMs:60000}]};
+    vi.mocked(api.getProject).mockResolvedValue({...detail,media:[video]});vi.mocked(api.getMediaEntry).mockResolvedValue(video);
+    const onLearn=vi.fn();
+    render(<ProjectHub libraryId="lib" initialProjectId={summary.id} initialMediaId="video" initialContext={{tab:"media",scroll:123}} onLearn={onLearn} contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));
+    expect(screen.getByRole("button",{name:"关联媒体 1"})).toHaveClass("active");
+    expect(onLearn).toHaveBeenCalledWith("video",summary.id,{tab:"media",scroll:123});
+  });
   beforeEach(() => {
     vi.mocked(api.listProjects).mockResolvedValue([summary]);
     vi.mocked(api.getProject).mockResolvedValue(detail);

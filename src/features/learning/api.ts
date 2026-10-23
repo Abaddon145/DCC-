@@ -1,6 +1,6 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
-import type {Course,Series,SeriesInput,ExternalVideoPreview} from "./types";
+import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport} from "./types";
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
@@ -14,4 +14,9 @@ export const learningApi={
   upsertSeries:(expectedLibraryId:string,input:SeriesInput)=>invoke<Series>("upsert_learning_series",{expectedLibraryId,input}),
   setSeriesMembers:(expectedLibraryId:string,id:string,expectedRevision:number,courseIds:string[])=>invoke<Series>("set_learning_series_members",{expectedLibraryId,id,expectedRevision,courseIds}),
   deleteSeries:(expectedLibraryId:string,id:string,expectedRevision:number)=>invoke<void>("delete_learning_series",{expectedLibraryId,id,expectedRevision}),
+  startPlayback:(expectedLibraryId:string,courseId:string)=>invoke<PlaybackSnapshot>("start_learning_playback",{expectedLibraryId,courseId}),
+  getPlayback:(expectedLibraryId:string,sessionId:string)=>invoke<PlaybackSnapshot>("get_learning_playback",{expectedLibraryId,sessionId}),
+  controlPlayback:(expectedLibraryId:string,sessionId:string,action:PlaybackAction)=>invoke<PlaybackSnapshot>("control_learning_playback",{expectedLibraryId,sessionId,action}),
+  setViewport:(expectedLibraryId:string,sessionId:string,viewport:NativeViewport)=>invoke<void>("set_learning_viewport",{expectedLibraryId,sessionId,viewport}),
+  stopPlayback:(expectedLibraryId:string,sessionId:string)=>invoke<void>("stop_learning_playback",{expectedLibraryId,sessionId}),
 };

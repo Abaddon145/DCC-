@@ -4,6 +4,137 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use tauri::Manager;
 
+pub(crate) fn workspace_command_allowed(command: &str) -> bool {
+    matches!(
+        command,
+        "get_workspace_context"
+            | "save_workspace_context"
+            | "get_personalization_settings"
+            | "save_library_preferences"
+            | "get_library_meta"
+            | "list_smart_collections"
+            | "search_assets"
+            | "list_library_tasks"
+            | "get_task_warning"
+            | "get_automatic_backup_policy"
+            | "get_upgrade_backup_status"
+            | "get_interrupted_restore"
+            | "search_media_entries"
+            | "get_media_entry"
+            | "list_media_folders"
+            | "list_projects"
+            | "get_project"
+            | "list_reference_boards"
+            | "get_learning_course"
+            | "ensure_learning_course"
+            | "list_learning_courses"
+            | "start_learning_playback"
+            | "get_learning_playback"
+            | "control_learning_playback"
+            | "set_learning_viewport"
+            | "stop_learning_playback"
+            | "get_reference_board"
+            | "open_reference_window"
+            | "attach_reference_window"
+            | "is_reference_window_open"
+    )
+}
+
+pub fn run_workspace(root: PathBuf) -> Result<(), String> {
+    let allowed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../release-artifacts/yingliu-merge")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let canonical = root.canonicalize().map_err(|e| e.to_string())?;
+    if !root.is_absolute()
+        || !canonical.starts_with(&allowed)
+        || canonical == allowed
+        || std::fs::read_dir(&root)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err("QA只允许空的工作区证据子目录".into());
+    }
+    crate::media_access::reject_links(&root)?;
+    std::env::set_var("LOCALAPPDATA", root.join("local"));
+    let state = AppState::initialize()?;
+    let library = state.active_library_id()?;
+    let source = root.join("workspace-synthetic.mp4");
+    crate::runtime::process::capture(
+        &crate::runtime::tools::require(None, "ffmpeg")?,
+        &[
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=60",
+            "-c:v",
+            "mpeg4",
+            "-n",
+            source.to_str().ok_or("QA路径无效")?,
+        ]
+        .map(str::to_owned),
+        std::time::Duration::from_secs(30),
+        &|| false,
+        &mut |_| {},
+    )?;
+    let preview = crate::media_access::preview_external_video_with_resources(
+        &state,
+        &library,
+        &source,
+        &|| false,
+        None,
+    )?;
+    let media = crate::media_access::commit_external_video(&state, &library, &preview.preview_id)?;
+    let course = state.with_library(|db, _| super::store::ensure_course(db, &media))?;
+    state.with_library(|db, _| {
+        let mut preferences = crate::organization::load_library_preferences(db)?;
+        preferences.startup_module = "videoLibrary".into();
+        preferences.remember_workspace = false;
+        preferences
+            .collapsed_module_groups
+            .retain(|id| id != "mediaLibraries");
+        crate::organization::save_library_preferences(db, preferences)?;
+        Ok(())
+    })?;
+    std::fs::write(root.join("workspace.json"),serde_json::to_vec_pretty(&serde_json::json!({"libraryId":library,"courseId":course.id,"mediaId":media,"videoSha256":preview.sha256,"kind":"isolated-real-workspace"})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    let mut context = tauri::generate_context!();
+    context.config_mut().app.windows.clear();
+    crate::application_builder(state, Some(root))
+        .run(context)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod workspace_qa_tests {
+    #[test]
+    fn learning_workspace_qa_blocks_credentials_network_and_user_file_operations() {
+        for command in [
+            "start_learning_playback",
+            "get_workspace_context",
+            "get_media_entry",
+        ] {
+            assert!(super::workspace_command_allowed(command));
+        }
+        for command in [
+            "get_translation_settings",
+            "save_deepseek_credentials",
+            "generate_ai_session",
+            "import_media_entries",
+            "open_external_url",
+            "restore_backup",
+            "save_global_preferences",
+            "run",
+        ] {
+            assert!(!super::workspace_command_allowed(command));
+        }
+    }
+}
+
 pub fn run(root: PathBuf) -> Result<(), String> {
     let allowed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../release-artifacts/yingliu-merge")
