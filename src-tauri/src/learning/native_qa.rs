@@ -97,6 +97,22 @@ pub fn run_workspace(root: PathBuf) -> Result<(), String> {
     )?;
     let media = crate::media_access::commit_external_video(&state, &library, &preview.preview_id)?;
     let course = state.with_library(|db, _| super::store::ensure_course(db, &media))?;
+    let captions = root.join("workspace-captions.srt");
+    let cues = (0..55)
+        .map(|n| {
+            format!(
+                "{}\n00:00:{n:02},000 --> 00:00:{n:02},800\n完整中文字幕第{n}段\n第二行\n\n",
+                n + 1
+            )
+        })
+        .collect::<String>();
+    std::fs::write(&captions, cues).map_err(|e| e.to_string())?;
+    state.with_library_mut(|db, base| {
+        super::subtitles::import(db, base, &course.id, &captions)?;
+        let series = super::store::upsert_series(db, None, "隔离课程系列", "", None)?;
+        super::store::set_series_members(db, &series.id, series.revision, &[course.id.clone()])?;
+        Ok(())
+    })?;
     state.with_library(|db, _| {
         let mut preferences = crate::organization::load_library_preferences(db)?;
         preferences.startup_module = "videoLibrary".into();
@@ -282,6 +298,22 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
             "lavfi",
             "-i",
             "testsrc2=size=320x180:rate=25:duration=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=10",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:a",
+            "aac",
             "-c:v",
             "mpeg4",
             "-n",
@@ -346,6 +378,43 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
         },
     )?;
     let first_ready = ready(app, &library, &snapshot.session_id)?;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        super::native_player::PlaybackAction::Mute { muted: true },
+    )?;
+    let audio_started = std::time::Instant::now();
+    let audio = loop {
+        let value = super::native_player::snapshot(&state, &library, &snapshot.session_id)?;
+        let ids = value
+            .tracks
+            .iter()
+            .filter(|t| t.kind == "audio")
+            .map(|t| t.id)
+            .collect::<Vec<_>>();
+        if ids.len() == 2 {
+            break ids;
+        }
+        if audio_started.elapsed() > std::time::Duration::from_secs(5) {
+            return Err("双音轨fixture未被实际播放器识别".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    for id in &audio {
+        super::native_player::control(
+            app,
+            &library,
+            &snapshot.session_id,
+            super::native_player::PlaybackAction::Audio {
+                track_id: Some(*id),
+            },
+        )?;
+        if super::native_player::effective_audio_id(&state, &library, &snapshot.session_id)? != *id
+        {
+            return Err("实际音轨没有切换".into());
+        }
+    }
     let subtitle_source = root.join("captions.srt");
     std::fs::write(
         &subtitle_source,
@@ -510,6 +579,18 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
     state
         .knowledge_editing
         .store(false, std::sync::atomic::Ordering::Release);
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Seek { position_ms: 1350 },
+    )?;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Pause { paused: true },
+    )?;
     let second = super::native_player::start_playback(app, &library, &course2.id)?;
     super::native_player::set_viewport(
         &state,
@@ -524,6 +605,18 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
         },
     )?;
     ready(app, &library, &second.session_id)?;
+    super::native_player::control(
+        app,
+        &library,
+        &second.session_id,
+        PlaybackAction::Seek { position_ms: 2250 },
+    )?;
+    super::native_player::control(
+        app,
+        &library,
+        &second.session_id,
+        PlaybackAction::Pause { paused: true },
+    )?;
     let (pid2, _) = super::native_player::native_ids(&state, &library, &second.session_id)?;
     if pid2 == pid || running(pid) {
         return Err("切课未停止旧内核".into());
@@ -534,8 +627,21 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
     super::native_player::stop_learning_session(&state, &library, &second.session_id)?;
     super::native_player::stop_learning_session(&state, &library, &second.session_id)?;
     let saved = state.with_library(|db, _| super::store::course(db, &course.id))?;
-    if saved.position_ms < 1400 {
+    if saved.position_ms.abs_diff(1350) > 50 {
         return Err("停止后进度未持久保存".into());
+    }
+    let resumed = super::native_player::start_playback(app, &library, &course.id)?;
+    let resumed = ready(app, &library, &resumed.session_id)?;
+    let (resume_pid, _) = super::native_player::native_ids(&state, &library, &resumed.session_id)?;
+    let resume_error = resumed.position_ms.abs_diff(saved.position_ms);
+    if resume_error > 50 {
+        return Err(format!("切课恢复误差{resume_error}ms超过50ms"));
+    }
+    super::native_player::stop_learning_session(&state, &library, &resumed.session_id)?;
+    if crate::file_digest::digest_file(&source)?.1 != preview.sha256
+        || crate::file_digest::digest_file(&other)?.1 != preview2.sha256
+    {
+        return Err("学习操作改变原视频".into());
     }
     std::fs::write(&source, b"corrupted fixture").map_err(|e| e.to_string())?;
     let broken = super::native_player::start_playback(app, &library, &course.id)?;
@@ -570,7 +676,10 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
             visible: true,
         },
     )?;
-    ready(app, &library, &final_session.session_id)?;
+    let final_ready = ready(app, &library, &final_session.session_id)?;
+    if final_ready.position_ms.abs_diff(2250) > 50 {
+        return Err("第二课程未恢复自己的播放位置".into());
+    }
     let (pid3, _) = super::native_player::native_ids(&state, &library, &final_session.session_id)?;
     super::native_player::control(
         app,
@@ -580,6 +689,6 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
     )?;
     std::thread::sleep(std::time::Duration::from_millis(450));
     Ok(
-        serde_json::json!({"ready":first_ready,"played":played,"saved":saved,"pids":[pid,pid2,pid3],"hwnd":hwnd,"sha256":preview.sha256,"cold":true,"sameCourseReused":true,"switchReapsOld":true,"corruptionRejectedBeforeSpawn":true,"exitCourseId":course2.id,"exitBeforeRevision":exit_before}),
+        serde_json::json!({"ready":first_ready,"played":played,"saved":saved,"pids":[pid,pid2,resume_pid,pid3],"audioTracks":audio,"resumeErrorMs":resume_error,"secondResumeMs":final_ready.position_ms,"originalsUnchangedBeforeCorruptionTest":true,"hwnd":hwnd,"sha256":preview.sha256,"cold":true,"sameCourseReused":true,"switchReapsOld":true,"corruptionRejectedBeforeSpawn":true,"exitCourseId":course2.id,"exitBeforeRevision":exit_before}),
     )
 }

@@ -371,6 +371,21 @@ pub(super) fn native_ids(
         .ok_or("播放内核未就绪")?;
     Ok((engine.process.id(), engine.window.id()))
 }
+#[cfg(all(windows, debug_assertions))]
+pub(super) fn effective_audio_id(state: &AppState, library: &str, id: &str) -> Result<i64, String> {
+    let session = active_session(state, library, id)?;
+    let engine = session
+        .engine
+        .lock()
+        .map_err(|_| "播放内核锁损坏")?
+        .clone()
+        .ok_or("播放内核未就绪")?;
+    engine
+        .ipc
+        .request(vec![json!("get_property"), json!("aid")])?
+        .as_i64()
+        .ok_or_else(|| "实际音轨ID无效".into())
+}
 #[cfg(windows)]
 fn boot_engine(app: &tauri::AppHandle, session: &Arc<PlaybackSession>) -> Result<(), String> {
     use std::io::{BufReader, Write};

@@ -38,8 +38,8 @@ function TranscriptContent({libraryId,courseId,sessionId,onSeek,onSelection}:Pro
     {error&&<div role="alert">{error}<button className="secondary-button" onClick={()=>setRetry(value=>value+1)}>重新读取字幕</button></div>}
     {loading?<LoadFeedback label="正在读取字幕…"/>:!subtitles.length?<p>尚未导入字幕</p>:<>
       <p role="status">共 {total} 段 · 已选 {selected.length} 段；跨页选择保留完整原文。</p>
-      <ol className="learning-cues" start={offset+1}>{items.map((cue,n)=><li key={cue.id}><input type="checkbox" aria-label={`选择第 ${offset+n+1} 段字幕`} checked={selected.some(row=>row.id===cue.id)} onChange={()=>toggle(cue)}/><div><button className="secondary-button" aria-label={`跳转到 ${learningTime(cue.startMs)} · 第 ${offset+n+1} 段`} onClick={()=>onSeek(cue.startMs)}>{learningTime(cue.startMs)}—{learningTime(cue.endMs)}</button><p>{cue.text}</p></div></li>)}</ol>
       <nav aria-label="字幕分页"><button className="secondary-button" aria-label="上一页字幕" disabled={!offset||loading} onClick={()=>setOffset(value=>Math.max(0,value-50))}>上一页</button><span>{Math.floor(offset/50)+1} / {Math.max(1,Math.ceil(total/50))}</span><button className="secondary-button" aria-label="下一页字幕" disabled={offset+items.length>=total||loading} onClick={()=>setOffset(value=>value+50)}>下一页</button></nav>
+      <ol className="learning-cues" start={offset+1}>{items.map((cue,n)=><li key={cue.id}><input type="checkbox" aria-label={`选择第 ${offset+n+1} 段字幕`} checked={selected.some(row=>row.id===cue.id)} onChange={()=>toggle(cue)}/><div><button className="secondary-button" aria-label={`跳转到 ${learningTime(cue.startMs)} · 第 ${offset+n+1} 段`} onClick={()=>onSeek(cue.startMs)}>{learningTime(cue.startMs)}—{learningTime(cue.endMs)}</button><p>{cue.text}</p></div></li>)}</ol>
     </>}
   </section>;
 }
