@@ -6,12 +6,15 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute_batch(include_str!("schema-v25.sql"))
         .map_err(|e| e.to_string())?;
-    tx.execute("UPDATE schema_meta SET value='25' WHERE key='schema_version' AND CAST(value AS INTEGER)<25",[]).map_err(|e|e.to_string())?;
+    tx.execute_batch(include_str!("schema-v26.sql"))
+        .map_err(|e| e.to_string())?;
+    tx.execute("UPDATE schema_meta SET value='26' WHERE key='schema_version' AND CAST(value AS INTEGER)<26",[]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;
 pub mod analysis_models;
 pub mod analysis_result;
+pub mod analysis_store;
 #[cfg(test)]
 mod analysis_tests;
 pub mod commands;

@@ -25,3 +25,28 @@ export interface ScopedPlaybackEvent {libraryId:string;sessionId:string;courseId
 export interface NativePointerEvent extends ScopedPlaybackEvent {kind:"click"|"doubleClick"|"wheelUp"|"wheelDown"|"context";doubleClickMs?:number}
 export interface LearningSubtitle {id:string;courseId:string;name:string;format:"srt"|"vtt";sha256:string;cueCount:number}
 export interface TranscriptCue {id:string;subtitleId:string;startMs:number;endMs:number;text:string}
+export interface CourseAnalysisOptions {subtitleId?:string|null;frameTimesMs:number[]}
+export interface CourseStagePreview {key:string;startMs:number;endMs:number;cached:boolean;tokensMax:number}
+export interface CourseAnalysisPreview {
+  previewId:string;courseId:string;fingerprint:string;subtitleId:string|null;frameIds:string[];
+  model:string;templateId:string;templateVersion:number;promptVersion:string;createdAt:number;expiresAt:number;
+  stages:CourseStagePreview[];tokensMax:number;warnings:string[];
+}
+export interface CourseAnalysisResult {
+  contentType:"tutorial"|"lecture"|"interview"|"documentary"|"other";
+  oneSentenceSummary:string;overview:string;
+  chapters:{startMs:number;endMs:number;title:string;summary:string;keywords:string[];keyframeIds:string[]}[];
+  keyPoints:{timeMs:number;title:string;content:string;importance:number;sourceSegmentIds:string[]}[];
+  tutorialSteps:{order:number;timeMs:number;title:string;description:string;notes:string[]}[];
+  terms:{name:string;definition:string;timeMs:number}[];
+  actionItems:string[];tags:string[];warnings:string[];
+  sections:{id:string;title:string;items:{title:string;content:string;timeMs:number|null;sourceSegmentIds:string[];keyframeIds:string[]}[]}[];
+  sectionValidation:{stage:string;scopeStartMs:number;scopeEndMs:number;sectionId:string;itemIndex:number;itemTitle:string;disposition:string;reason:string}[];
+}
+export interface CourseAnalysisStage {key:string;startMs:number;endMs:number;status:"pending"|"completed"|"failed";tokensUsed:number|null;error:string}
+export interface CourseAnalysisDetail {
+  id:string;courseId:string;previewId:string;sourceFingerprint:string;model:string;
+  status:"queued"|"running"|"partial"|"completed"|"failed"|"cancelled";
+  error:string;createdAt:number;updatedAt:number;staleReasons:string[];
+  stages:import("../../types").Page<CourseAnalysisStage>;selectedStageKey:string|null;result:CourseAnalysisResult|null;
+}

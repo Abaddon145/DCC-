@@ -54,8 +54,8 @@ pub struct LearningSubtitle {
     pub sha256: String,
     pub cue_count: i64,
 }
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptCue {
     pub id: String,
     pub subtitle_id: String,

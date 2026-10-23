@@ -58,12 +58,12 @@
 
 **Files:** learning/analysis.rs、analysis_store.rs、schema-v26.sql；commands.rs/api.ts/types.ts。
 
-资料分段纯函数已完成RED2→GREEN2（证据docs/evidence/merge/task8-segments.md）；以下完整preview/schema/身份检查仍未完成，不能据此消费确认许可。
+资料分段纯函数已完成RED2→GREEN2（证据docs/evidence/merge/task8-segments.md）。完整preview/schema/身份与只读历史已实现；本检查点不暴露付费开始命令，TaskRegistry执行仍属8.4。
 
-- [ ] 隔离双库测试preview身份/24h过期/一次消费/字幕或媒体替换/旧缓存/完整cue分段/六图与全文超限，预览不请求HTTP。
-- [ ] `prepare_course_analysis(expectedLibraryId,courseId,options)`读取受保护媒体lease、完整字幕/允许的帧，生成快照及阶段预算。`get_course_analysis`只返回当前库稳定ID的结果和stale原因。
-- [ ] 所有材料前后hash核对；失败不消费批准，任务真正开始的事务才消费。外部原件保持只读；缓存按来源指纹+模型+模板+提示+格式版本隔离。
-- [ ] 运行定向、全回归、构建，提交schema/preview。
+- [x] 隔离双库测试preview身份/24h过期/一次消费/字幕或媒体替换/旧缓存/完整cue分段/六图与全文超限，预览不请求HTTP。
+- [x] `prepare_course_analysis(expectedLibraryId,courseId,options)`读取受保护媒体lease、完整字幕/允许的帧，生成快照及阶段预算。`get_course_analysis`只返回当前库稳定ID的结果和stale原因；阶段元数据分页，按需读取一个有界结果。
+- [x] 原件通过已核验的只读lease及完整hash、字幕前后hash核对；失败不消费批准。一次消费与queued分析/阶段写入同事务，8.4接入实际任务启动；缓存按来源指纹+模型+模板+提示+格式版本隔离。备份恢复撤销旧批准但保留历史快照。
+- [x] 定向19项、全Rust385通过/2既有忽略、前端344通过、生产构建0、fmt/diff0、秘密扫描402/0。schema/preview与只读历史保存为本地独立检查点；证据docs/evidence/merge/task8-preview.md。8.4真实任务及8.5面板未完成，不把本记录称为整个Task8完成。
 
 ### 8.4 分段及汇总任务
 

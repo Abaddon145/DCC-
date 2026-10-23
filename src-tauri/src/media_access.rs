@@ -102,6 +102,13 @@ pub struct PreparedMediaFile {
 }
 impl PreparedMediaFile {
     pub fn open_for_playback(&self, stop: &dyn Fn() -> bool) -> Result<CheckedMediaFile, String> {
+        self.open_for_analysis(stop).map(|(file, _)| file)
+    }
+    /// Keep the checked read lease and reuse its digest rather than reading a large original twice.
+    pub(crate) fn open_for_analysis(
+        &self,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(CheckedMediaFile, String), String> {
         let (checked, current) = checked_source(&self.path, stop)?;
         if self
             .expected
@@ -111,7 +118,7 @@ impl PreparedMediaFile {
         {
             return Err("SOURCE_CHANGED：原件已变化".into());
         }
-        Ok(checked)
+        Ok((checked, current.sha256))
     }
     fn open_for_read(&self) -> Result<CheckedMediaFile, String> {
         if self.expected.is_some() {

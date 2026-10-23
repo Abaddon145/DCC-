@@ -1,6 +1,47 @@
 //! Source-reference behavior adapted from Yingliu c866508; see YINGLIU-LICENSE.txt.
 use super::analysis_models::*;
 use std::collections::HashSet;
+pub fn read_saved_result(
+    raw: &str,
+    scope: &CourseScope<'_>,
+) -> Result<CourseAnalysisResult, String> {
+    if raw.len() > 1024 * 1024 {
+        return Err("课程缓存超过限制".into());
+    }
+    let saved: CourseAnalysisResult = serde_json::from_str(raw).map_err(|_| "课程缓存结构无效")?;
+    let mut checked = parse_course_result(raw, scope)?;
+    if serde_json::to_vec(&saved.sections).map_err(|e| e.to_string())?
+        != serde_json::to_vec(&checked.sections).map_err(|e| e.to_string())?
+        || serde_json::to_vec(&saved.key_points).map_err(|e| e.to_string())?
+            != serde_json::to_vec(&checked.key_points).map_err(|e| e.to_string())?
+    {
+        return Err("课程缓存包含失效来源，不会静默重写旧结果".into());
+    }
+    if saved.section_validation.len() > 240 {
+        return Err("课程缓存诊断超限".into());
+    }
+    let mut seen = HashSet::new();
+    for report in &saved.section_validation {
+        if report.stage != "parse"
+            || report.scope_start_ms != scope.start_ms
+            || report.scope_end_ms != scope.end_ms
+            || report.item_index >= 20
+            || !["corrected", "omitted"].contains(&report.disposition.as_str())
+            || !seen.insert((&report.section_id, report.item_index))
+            || !saved.sections.iter().any(|s| {
+                s.id == report.section_id
+                    && (report.disposition != "corrected"
+                        || s.items.iter().any(|i| i.title == report.item_title))
+            })
+        {
+            return Err("课程缓存本机诊断无效".into());
+        }
+        text(&report.item_title, 200, true)?;
+        text(&report.reason, 500, true)?;
+    }
+    checked.section_validation = saved.section_validation;
+    Ok(checked)
+}
 fn text(value: &str, max: usize, required: bool) -> Result<(), String> {
     if (required && value.trim().is_empty()) || value.chars().count() > max || value.contains('\0')
     {

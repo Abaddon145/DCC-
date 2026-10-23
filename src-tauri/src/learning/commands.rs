@@ -3,6 +3,53 @@ use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
 #[tauri::command]
+pub async fn get_course_analysis(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+    analysis_id: String,
+    stage_key: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<super::analysis_models::CourseAnalysisDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        super::analysis::get(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &course_id,
+            &analysis_id,
+            stage_key.as_deref(),
+            offset,
+            limit,
+        )
+    })
+    .await
+    .map_err(|_| "课程分析历史读取中断".to_string())?
+}
+#[tauri::command]
+pub async fn prepare_course_analysis(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+    options: super::analysis_models::CourseAnalysisOptions,
+) -> Result<super::analysis_models::CourseAnalysisPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let resources = app.path().resource_dir().ok();
+        super::analysis::prepare(
+            &state,
+            &expected_library_id,
+            &course_id,
+            &options,
+            resources.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| "课程预览准备中断，请重试".to_string())?
+}
+#[tauri::command]
 pub async fn start_learning_playback(
     app: tauri::AppHandle,
     expected_library_id: String,

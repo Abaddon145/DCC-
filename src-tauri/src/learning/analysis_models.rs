@@ -84,8 +84,8 @@ pub struct SectionIssue {
     pub disposition: String,
     pub reason: String,
 }
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnalysisFrame {
     pub id: String,
     pub time_ms: u64,
@@ -98,12 +98,103 @@ pub struct CourseScope<'a> {
     pub frames: &'a [AnalysisFrame],
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CourseSegment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub cues: Vec<TranscriptCue>,
     pub frames: Vec<AnalysisFrame>,
     pub input_hash: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseAnalysisOptions {
+    pub subtitle_id: Option<String>,
+    #[serde(default)]
+    pub frame_times_ms: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseStagePreview {
+    pub key: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub cached: bool,
+    pub tokens_max: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseAnalysisPreview {
+    pub preview_id: String,
+    pub course_id: String,
+    pub fingerprint: String,
+    pub subtitle_id: Option<String>,
+    pub frame_ids: Vec<String>,
+    pub model: String,
+    pub template_id: String,
+    pub template_version: i64,
+    pub prompt_version: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub stages: Vec<CourseStagePreview>,
+    pub tokens_max: u64,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseFrameImage {
+    pub reference: AnalysisFrame,
+    pub data_url: String,
+}
+
+/// Backend-only immutable snapshot. Never accepted as a command argument.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparedCourseAnalysis {
+    pub preview: CourseAnalysisPreview,
+    pub library_id: String,
+    pub root_hash: String,
+    pub source_file_id: String,
+    pub source_sha256: String,
+    pub subtitle_sha256: Option<String>,
+    pub title: String,
+    pub duration_ms: u64,
+    pub segments: Vec<CourseSegment>,
+    pub frames: Vec<CourseFrameImage>,
+    pub format_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseAnalysisStage {
+    pub key: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub status: String,
+    pub tokens_used: Option<u64>,
+    pub error: String,
+}
+
+/// Stage metadata is paged; only the explicitly selected result is loaded.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseAnalysisDetail {
+    pub id: String,
+    pub course_id: String,
+    pub preview_id: String,
+    pub source_fingerprint: String,
+    pub model: String,
+    pub status: String,
+    pub error: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub stale_reasons: Vec<String>,
+    pub stages: crate::models::Page<CourseAnalysisStage>,
+    pub selected_stage_key: Option<String>,
+    pub result: Option<CourseAnalysisResult>,
 }

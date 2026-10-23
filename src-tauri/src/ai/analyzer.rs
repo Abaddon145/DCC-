@@ -155,7 +155,7 @@ fn source_check(
         hash,
     })
 }
-fn jpeg(path: &Path) -> Result<String, String> {
+pub(crate) fn jpeg(path: &Path) -> Result<String, String> {
     let reader = image::ImageReader::open(path)
         .map_err(|_| "分析图片不可读")?
         .with_guessed_format()

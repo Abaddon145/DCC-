@@ -344,6 +344,8 @@ fn application_builder(
                     learning::commands::list_learning_subtitles,
                     learning::commands::transcript_page,
                     learning::commands::load_learning_subtitle,
+                    learning::commands::prepare_course_analysis,
+                    learning::commands::get_course_analysis,
                     commands::get_external_backup_summary,
                     commands::commit_external_video,
                     commands::relocate_external_video,

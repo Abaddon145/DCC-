@@ -312,6 +312,34 @@ pub fn page(
     })
 }
 
+pub(crate) fn verified_cues(
+    db: &Connection,
+    base: &Path,
+    course: &str,
+    id: &str,
+) -> Result<(String, Vec<TranscriptCue>), String> {
+    let duration = super::store::course(db, course)?.duration_ms;
+    let (path, expected) = registered(db, base, course, id)?;
+    let mut bytes = Vec::new();
+    fs::File::open(&path)
+        .map_err(|_| "字幕资料缺失")?
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_BYTES {
+        return Err("字幕资料超过8MiB".into());
+    }
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    if sha != expected {
+        return Err("字幕原件已改变，请重新导入核对".into());
+    }
+    let format = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .ok_or("字幕格式无效")?;
+    Ok((sha, parse(&bytes, format, id, duration)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

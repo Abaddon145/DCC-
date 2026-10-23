@@ -1,9 +1,12 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
 import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
+import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail} from "./types";
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  getCourseAnalysis:(expectedLibraryId:string,courseId:string,analysisId:string,stageKey:string|null=null,offset=0,limit=50)=>invoke<CourseAnalysisDetail>("get_course_analysis",{expectedLibraryId,courseId,analysisId,stageKey,offset,limit}),
+  prepareCourseAnalysis:(expectedLibraryId:string,courseId:string,options:CourseAnalysisOptions)=>invoke<CourseAnalysisPreview>("prepare_course_analysis",{expectedLibraryId,courseId,options}),
   previewExternalVideo:(expectedLibraryId:string,path:string)=>invoke<ExternalVideoPreview>("preview_external_video",{expectedLibraryId,path}),
   commitExternalVideo:(expectedLibraryId:string,previewId:string)=>invoke<string>("commit_external_video",{expectedLibraryId,previewId}),
   relocateExternalVideo:(expectedLibraryId:string,fileId:string,previewId:string,expectedSourceRevision:number)=>invoke<string>("relocate_external_video",{expectedLibraryId,fileId,previewId,expectedSourceRevision}),
