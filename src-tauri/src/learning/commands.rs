@@ -84,6 +84,69 @@ fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or_else(|| "素材库已切换，未读取或修改旧库".into())
 }
 #[tauri::command]
+pub async fn import_learning_subtitle(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+    selected_path: String,
+) -> Result<LearningSubtitle, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        current(
+            app.state::<AppState>()
+                .with_library_if_id(&expected_library_id, |db, base| {
+                    super::subtitles::import(
+                        db,
+                        base,
+                        &course_id,
+                        std::path::Path::new(&selected_path),
+                    )
+                }),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub fn list_learning_subtitles(
+    state: State<AppState>,
+    expected_library_id: String,
+    course_id: String,
+) -> Result<Vec<LearningSubtitle>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::subtitles::list(db, &course_id)
+    }))
+}
+#[tauri::command]
+pub fn transcript_page(
+    state: State<AppState>,
+    expected_library_id: String,
+    course_id: String,
+    subtitle_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<TranscriptCue>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, base| {
+        super::subtitles::page(db, base, &course_id, &subtitle_id, offset, limit)
+    }))
+}
+#[tauri::command]
+pub async fn load_learning_subtitle(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    session_id: String,
+    subtitle_id: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    return tauri::async_runtime::spawn_blocking(move || {
+        native_player::load_subtitle(&app, &expected_library_id, &session_id, &subtitle_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    Err("当前平台不支持原生字幕".into())
+}
+#[tauri::command]
 pub fn ensure_learning_course(
     state: State<AppState>,
     expected_library_id: String,

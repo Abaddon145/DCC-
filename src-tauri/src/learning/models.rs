@@ -44,3 +44,22 @@ pub struct SeriesInput {
     pub description: String,
     pub expected_revision: Option<i64>,
 }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningSubtitle {
+    pub id: String,
+    pub course_id: String,
+    pub name: String,
+    pub format: String,
+    pub sha256: String,
+    pub cue_count: i64,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptCue {
+    pub id: String,
+    pub subtitle_id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}

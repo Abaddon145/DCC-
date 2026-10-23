@@ -22,3 +22,5 @@ export type PlaybackAction =
   | {type:"fullscreen";enabled:boolean}|{type:"shortcuts";bindings:import("./nativeBindings").NativeBinding[]};
 export interface ScopedPlaybackEvent {libraryId:string;sessionId:string;courseId:string}
 export interface NativePointerEvent extends ScopedPlaybackEvent {kind:"click"|"doubleClick"|"wheelUp"|"wheelDown"|"context";doubleClickMs?:number}
+export interface LearningSubtitle {id:string;courseId:string;name:string;format:"srt"|"vtt";sha256:string;cueCount:number}
+export interface TranscriptCue {id:string;subtitleId:string;startMs:number;endMs:number;text:string}

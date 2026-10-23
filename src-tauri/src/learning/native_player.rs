@@ -182,6 +182,39 @@ pub(crate) fn snapshot(
     Ok(value)
 }
 #[cfg(windows)]
+pub(crate) fn load_subtitle(
+    app: &tauri::AppHandle,
+    library: &str,
+    id: &str,
+    subtitle: &str,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let session = active_session(&state, library, id)?;
+    let _operation = session.operations.lock().map_err(|_| "播放操作锁损坏")?;
+    active_session(&state, library, id)?;
+    if !session.snapshot.lock().map_err(|_| "播放状态锁损坏")?.ready {
+        return Err("播放内核尚未就绪".into());
+    }
+    let path = state
+        .with_library_if_id(library, |db, base| {
+            super::subtitles::path(db, base, &session.lease.course_id, subtitle)
+        })?
+        .ok_or("素材库已切换")?;
+    let engine = session
+        .engine
+        .lock()
+        .map_err(|_| "播放内核锁损坏")?
+        .clone()
+        .ok_or("播放内核不可用")?;
+    engine.ipc.request(vec![
+        json!("sub-add"),
+        json!(path.to_string_lossy()),
+        json!("select"),
+    ])?;
+    Ok(())
+}
+#[cfg(windows)]
 fn emit_snapshot(app: &tauri::AppHandle, session: &PlaybackSession) {
     use tauri::Emitter;
     if let Ok(value) = session.snapshot.lock() {

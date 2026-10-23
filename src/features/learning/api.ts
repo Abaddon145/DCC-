@@ -1,6 +1,6 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
-import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport} from "./types";
+import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
@@ -19,4 +19,8 @@ export const learningApi={
   controlPlayback:(expectedLibraryId:string,sessionId:string,action:PlaybackAction)=>invoke<PlaybackSnapshot>("control_learning_playback",{expectedLibraryId,sessionId,action}),
   setViewport:(expectedLibraryId:string,sessionId:string,viewport:NativeViewport)=>invoke<void>("set_learning_viewport",{expectedLibraryId,sessionId,viewport}),
   stopPlayback:(expectedLibraryId:string,sessionId:string)=>invoke<void>("stop_learning_playback",{expectedLibraryId,sessionId}),
+  importSubtitle:(expectedLibraryId:string,courseId:string,selectedPath:string)=>invoke<LearningSubtitle>("import_learning_subtitle",{expectedLibraryId,courseId,selectedPath}),
+  listSubtitles:(expectedLibraryId:string,courseId:string)=>invoke<LearningSubtitle[]>("list_learning_subtitles",{expectedLibraryId,courseId}),
+  transcriptPage:(expectedLibraryId:string,courseId:string,subtitleId:string,offset=0,limit=50)=>invoke<Page<TranscriptCue>>("transcript_page",{expectedLibraryId,courseId,subtitleId,offset,limit}),
+  loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
 };

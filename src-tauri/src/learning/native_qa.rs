@@ -28,6 +28,9 @@ pub(crate) fn workspace_command_allowed(command: &str) -> bool {
             | "get_learning_course"
             | "ensure_learning_course"
             | "list_learning_courses"
+            | "list_learning_subtitles"
+            | "transcript_page"
+            | "load_learning_subtitle"
             | "start_learning_playback"
             | "get_learning_playback"
             | "control_learning_playback"
@@ -339,6 +342,27 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
         },
     )?;
     let first_ready = ready(app, &library, &snapshot.session_id)?;
+    let subtitle_source = root.join("captions.srt");
+    std::fs::write(
+        &subtitle_source,
+        "1\n00:00:01,000 --> 00:00:04,000\n完整中文字幕\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let subtitle = state.with_library(|db, base| {
+        super::subtitles::import(db, base, &course.id, &subtitle_source)
+    })?;
+    super::native_player::load_subtitle(app, &library, &snapshot.session_id, &subtitle.id)?;
+    let subtitle_started = std::time::Instant::now();
+    loop {
+        let value = super::native_player::snapshot(&state, &library, &snapshot.session_id)?;
+        if value.subtitle_id.is_some() && value.tracks.iter().any(|track| track.kind == "sub") {
+            break;
+        }
+        if subtitle_started.elapsed() > std::time::Duration::from_secs(5) {
+            return Err("实际播放器未加载已登记字幕".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let (pid, hwnd) = super::native_player::native_ids(&state, &library, &snapshot.session_id)?;
     if pid == 0 || hwnd == 0 {
         return Err("缺少实际原生进程/子窗口".into());
