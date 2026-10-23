@@ -55,6 +55,10 @@ pub fn run_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
     learning::native_qa::run(root)
 }
 #[cfg(all(windows, debug_assertions))]
+pub fn resume_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::resume(root)
+}
+#[cfg(all(windows, debug_assertions))]
 pub fn verify_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
     learning::native_qa::verify(root)
 }

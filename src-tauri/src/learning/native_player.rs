@@ -386,6 +386,27 @@ pub(super) fn effective_audio_id(state: &AppState, library: &str, id: &str) -> R
         .as_i64()
         .ok_or_else(|| "实际音轨ID无效".into())
 }
+#[cfg(all(windows, debug_assertions))]
+pub(super) fn effective_position_ms(
+    state: &AppState,
+    library: &str,
+    id: &str,
+) -> Result<u64, String> {
+    let session = active_session(state, library, id)?;
+    let engine = session
+        .engine
+        .lock()
+        .map_err(|_| "播放内核锁损坏")?
+        .clone()
+        .ok_or("播放内核未就绪")?;
+    let seconds = engine
+        .ipc
+        .request(vec![json!("get_property"), json!("time-pos")])?
+        .as_f64()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .ok_or("实际播放时间无效")?;
+    Ok((seconds * 1000.0).round() as u64)
+}
 #[cfg(windows)]
 fn boot_engine(app: &tauri::AppHandle, session: &Arc<PlaybackSession>) -> Result<(), String> {
     use std::io::{BufReader, Write};

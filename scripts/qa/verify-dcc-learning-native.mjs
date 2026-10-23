@@ -16,12 +16,15 @@ fs.writeFileSync(path.join(output,'process.txt'),`${result.stdout??''}\n${result
 const verification=result.status===0?spawnSync(binary,['--learning-native-qa-verify',output],{cwd:repo,encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024}):null;
 if(verification)fs.writeFileSync(path.join(output,'verification.txt'),`${verification.stdout??''}\n${verification.stderr??''}\nstatus=${verification.status}; error=${verification.error??''}`);
 const report=JSON.parse(fs.readFileSync(path.join(output,'results.json'),'utf8'));
+const restart=verification?.status===0?spawnSync(binary,['--learning-native-qa-resume',output],{cwd:repo,encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024}):null;
+if(restart)fs.writeFileSync(path.join(output,'restart.txt'),`${restart.stdout??''}\n${restart.stderr??''}\nstatus=${restart.status}; error=${restart.error??''}`);
+const restartReport=restart?.status===0?JSON.parse(fs.readFileSync(path.join(output,'resume-results.json'),'utf8')):null;
 if(report.native===true){
-  for(const pid of report.result?.Ok?.pids??[]){
+  for(const pid of [...report.result?.Ok?.pids??[],...restartReport?.result?.Ok?.pids??[]]){
     let alive=true;try{process.kill(pid,0);}catch(error){if(error.code==='ESRCH')alive=false;else throw error;}
     if(alive)throw new Error(`Unreaped native process: ${pid}`);
   }
 }
-const verified=result.status===0&&verification?.status===0&&report.native===true&&report.postExitVerified===true;
-console.log(JSON.stringify({output,...report,native:verified},null,2));
+const verified=result.status===0&&verification?.status===0&&report.native===true&&report.postExitVerified===true&&restart?.status===0&&restartReport?.native===true;
+console.log(JSON.stringify({output,...report,restart:restartReport,native:verified},null,2));
 if(!verified) process.exitCode=1;

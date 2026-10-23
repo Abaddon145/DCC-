@@ -159,6 +159,12 @@ mod workspace_qa_tests {
 }
 
 pub fn run(root: PathBuf) -> Result<(), String> {
+    run_host(root, false)
+}
+pub fn resume(root: PathBuf) -> Result<(), String> {
+    run_host(root, true)
+}
+fn run_host(root: PathBuf, resuming: bool) -> Result<(), String> {
     let allowed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../release-artifacts/yingliu-merge")
         .canonicalize()
@@ -167,14 +173,39 @@ pub fn run(root: PathBuf) -> Result<(), String> {
     if !root.is_absolute()
         || !canonical.starts_with(&allowed)
         || canonical == allowed
-        || std::fs::read_dir(&root)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_some()
+        || (!resuming
+            && std::fs::read_dir(&root)
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_some())
     {
         return Err("QA只允许空的工作区证据子目录".into());
     }
     crate::media_access::reject_links(&root)?;
+    if resuming {
+        let config = root.join("local/DCCAssetLibrary");
+        crate::media_access::reject_links(&config.join("app-settings.json"))?;
+        crate::media_access::reject_links(&config.join("library.db"))?;
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config.join("app-settings.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let active = PathBuf::from(settings["activeLibrary"].as_str().ok_or("QA缺少库路径")?);
+        if active.canonicalize().map_err(|e| e.to_string())?
+            != config.canonicalize().map_err(|e| e.to_string())?
+        {
+            return Err("恢复QA不能打开隔离目录以外的库".into());
+        }
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("results.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        if report["postExitVerified"] != true
+            || !root.join("local/DCCAssetLibrary/library.db").is_file()
+        {
+            return Err("只能恢复已完成退出验证的隔离QA库".into());
+        }
+    }
     std::env::set_var("LOCALAPPDATA", root.join("local"));
     let state = AppState::initialize()?;
     let mut context = tauri::generate_context!();
@@ -185,12 +216,13 @@ pub fn run(root: PathBuf) -> Result<(), String> {
         let handle=app.handle().clone();
         let root=root.clone();
         std::thread::spawn(move || {
-            let result=check(&handle,&root);
+            let result=if resuming{check_resume(&handle,&root)}else{check(&handle,&root)};
+            let report_file=if resuming{"resume-results.json"}else{"results.json"};
             let report=serde_json::json!({"native":result.is_ok(),"kind":"target-native-host-not-workspace-ui","result":result});
-            let _=std::fs::write(root.join("results.json"),serde_json::to_vec_pretty(&report).unwrap());
+            let _=std::fs::write(root.join(report_file),serde_json::to_vec_pretty(&report).unwrap());
             if report["native"]==true {
                 if let Err(error)=super::native_player::exit_application(&handle,false){
-                    let _=std::fs::write(root.join("results.json"),serde_json::to_vec_pretty(&serde_json::json!({"native":false,"exitError":error})).unwrap());
+                    let _=std::fs::write(root.join(report_file),serde_json::to_vec_pretty(&serde_json::json!({"native":false,"exitError":error})).unwrap());
                     handle.exit(1);
                 }
             }else{handle.exit(1);}
@@ -263,6 +295,35 @@ fn running(pid: u32) -> bool {
         CloseHandle(handle);
         alive
     }
+}
+fn check_resume(
+    app: &tauri::AppHandle,
+    root: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("results.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let id = report["result"]["Ok"]["exitCourseId"]
+        .as_str()
+        .ok_or("QA缺少恢复课程")?;
+    let state = app.state::<AppState>();
+    let library = state.active_library_id()?;
+    let saved = state.with_library(|db, _| super::store::course(db, id))?;
+    if saved.completed || saved.position_ms == 0 {
+        return Err("QA未留下可恢复进度".into());
+    }
+    let opened = super::native_player::start_playback(app, &library, id)?;
+    ready(app, &library, &opened.session_id)?;
+    let actual = super::native_player::effective_position_ms(&state, &library, &opened.session_id)?;
+    let error = actual.abs_diff(saved.position_ms);
+    if error > 50 {
+        return Err(format!("重启后恢复误差{error}ms"));
+    }
+    let (pid, _) = super::native_player::native_ids(&state, &library, &opened.session_id)?;
+    Ok(
+        serde_json::json!({"restoredPositionMs":saved.position_ms,"actualPositionMs":actual,"errorMs":error,"pids":[pid]}),
+    )
 }
 fn ready(
     app: &tauri::AppHandle,
@@ -378,6 +439,38 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
         },
     )?;
     let first_ready = ready(app, &library, &snapshot.session_id)?;
+    let mut seek_errors = Vec::new();
+    for target in [125, 1350, 7999] {
+        super::native_player::control(
+            app,
+            &library,
+            &snapshot.session_id,
+            super::native_player::PlaybackAction::Seek {
+                position_ms: target,
+            },
+        )?;
+        let started = std::time::Instant::now();
+        let initial =
+            super::native_player::effective_position_ms(&state, &library, &snapshot.session_id)?;
+        let actual = loop {
+            let actual = super::native_player::effective_position_ms(
+                &state,
+                &library,
+                &snapshot.session_id,
+            )?;
+            if actual.abs_diff(target) <= 50
+                || started.elapsed() > std::time::Duration::from_secs(2)
+            {
+                break actual;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let error = actual.abs_diff(target);
+        seek_errors.push(serde_json::json!({"targetMs":target,"initialMs":initial,"actualMs":actual,"errorMs":error,"settleMs":started.elapsed().as_millis()}));
+        if error > 50 {
+            return Err(format!("暂停seek误差{error}ms超过50ms"));
+        }
+    }
     super::native_player::control(
         app,
         &library,
@@ -425,6 +518,24 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
         super::subtitles::import(db, base, &course.id, &subtitle_source)
     })?;
     super::native_player::load_subtitle(app, &library, &snapshot.session_id, &subtitle.id)?;
+    let missing_source = root.join("missing-subtitle.srt");
+    std::fs::write(
+        &missing_source,
+        "1\n00:00:01,000 --> 00:00:02,000\nmissing fixture\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let missing = state
+        .with_library(|db, base| super::subtitles::import(db, base, &course.id, &missing_source))?;
+    let missing_path =
+        state.with_library(|db, base| super::subtitles::path(db, base, &course.id, &missing.id))?;
+    std::fs::remove_file(missing_path).map_err(|e| e.to_string())?;
+    if super::native_player::load_subtitle(app, &library, &snapshot.session_id, &missing.id).is_ok()
+    {
+        return Err("字幕缺失未报告错误".into());
+    }
+    if !super::native_player::snapshot(&state, &library, &snapshot.session_id)?.ready {
+        return Err("缺失字幕破坏视频会话".into());
+    }
     let subtitle_started = std::time::Instant::now();
     loop {
         let value = super::native_player::snapshot(&state, &library, &snapshot.session_id)?;
@@ -689,6 +800,6 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
     )?;
     std::thread::sleep(std::time::Duration::from_millis(450));
     Ok(
-        serde_json::json!({"ready":first_ready,"played":played,"saved":saved,"pids":[pid,pid2,resume_pid,pid3],"audioTracks":audio,"resumeErrorMs":resume_error,"secondResumeMs":final_ready.position_ms,"originalsUnchangedBeforeCorruptionTest":true,"hwnd":hwnd,"sha256":preview.sha256,"cold":true,"sameCourseReused":true,"switchReapsOld":true,"corruptionRejectedBeforeSpawn":true,"exitCourseId":course2.id,"exitBeforeRevision":exit_before}),
+        serde_json::json!({"ready":first_ready,"played":played,"saved":saved,"pids":[pid,pid2,resume_pid,pid3],"seekErrors":seek_errors,"missingSubtitleRejected":true,"audioTracks":audio,"resumeErrorMs":resume_error,"secondResumeMs":final_ready.position_ms,"originalsUnchangedBeforeCorruptionTest":true,"hwnd":hwnd,"sha256":preview.sha256,"cold":true,"sameCourseReused":true,"switchReapsOld":true,"corruptionRejectedBeforeSpawn":true,"exitCourseId":course2.id,"exitBeforeRevision":exit_before}),
     )
 }
