@@ -42,6 +42,8 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 
 ## 产品参考
 
+课程结果 DTO 与来源校验参考本地映流 video_downloader 的已提交修复 c866508（MIT，Copyright 2026 14582），适配到栈藏 learning 模块；完整许可见 `YINGLIU-LICENSE.txt`。未迁入源服务、数据库或凭据。
+
 ## Mind Elixir 5.15.1
 
 - 上游：https://github.com/SSShooter/mind-elixir-core
