@@ -9,6 +9,7 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
     tx.execute("UPDATE schema_meta SET value='25' WHERE key='schema_version' AND CAST(value AS INTEGER)<25",[]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
+pub mod analysis;
 pub mod analysis_models;
 pub mod analysis_result;
 #[cfg(test)]

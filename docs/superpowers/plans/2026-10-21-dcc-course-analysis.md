@@ -52,11 +52,13 @@
 
 - [x] mock HTTP验证旧创作/翻译计数不变、课程计入总闸口及course_usage、缺usage/取消保留预留、已用尽不发请求、失败不自动发第二次；RED4→GREEN4。
 - [x] 增加`course_json_with_usage(body,limit,cancel,image_count)`，内部复用reserve/settle事务和目标凭据；扩展用途typed enum替代内部bool，旧调用适配后行为不变。网络响应有界读取，拒绝过大响应不释放未知费用。
-- [ ] Run全量回归/生产构建；确认0外部付费请求并独立提交。已验证Rust374+2既有忽略、前端344、构建0，待本地提交。
+- [x] Run全量回归/生产构建；Rust374+2既有忽略、前端344、构建0；0外部付费请求，本地提交3766f49。
 
 ### 8.3 材料预览与缓存
 
 **Files:** learning/analysis.rs、analysis_store.rs、schema-v26.sql；commands.rs/api.ts/types.ts。
+
+资料分段纯函数已完成RED2→GREEN2（证据docs/evidence/merge/task8-segments.md）；以下完整preview/schema/身份检查仍未完成，不能据此消费确认许可。
 
 - [ ] 隔离双库测试preview身份/24h过期/一次消费/字幕或媒体替换/旧缓存/完整cue分段/六图与全文超限，预览不请求HTTP。
 - [ ] `prepare_course_analysis(expectedLibraryId,courseId,options)`读取受保护媒体lease、完整字幕/允许的帧，生成快照及阶段预算。`get_course_analysis`只返回当前库稳定ID的结果和stale原因。

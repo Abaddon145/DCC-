@@ -84,7 +84,8 @@ pub struct SectionIssue {
     pub disposition: String,
     pub reason: String,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalysisFrame {
     pub id: String,
     pub time_ms: u64,
@@ -95,4 +96,14 @@ pub struct CourseScope<'a> {
     pub end_ms: u64,
     pub cues: &'a [TranscriptCue],
     pub frames: &'a [AnalysisFrame],
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub cues: Vec<TranscriptCue>,
+    pub frames: Vec<AnalysisFrame>,
+    pub input_hash: String,
 }
