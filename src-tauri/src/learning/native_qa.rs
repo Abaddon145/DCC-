@@ -29,6 +29,10 @@ pub(crate) fn workspace_command_allowed(command: &str) -> bool {
             | "ensure_learning_course"
             | "list_learning_courses"
             | "list_learning_subtitles"
+            | "list_learning_series"
+            | "upsert_learning_series"
+            | "set_learning_series_members"
+            | "delete_learning_series"
             | "transcript_page"
             | "load_learning_subtitle"
             | "start_learning_playback"
@@ -432,6 +436,70 @@ fn check(app: &tauri::AppHandle, root: &std::path::Path) -> Result<serde_json::V
     let played = super::native_player::snapshot(&state, &library, &snapshot.session_id)?;
     if played.position_ms < 1400 {
         return Err("实际播放时间未推进".into());
+    }
+    use super::native_player::PlaybackAction;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::AbLoop {
+            a_ms: 200,
+            b_ms: 800,
+        },
+    )?;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Seek { position_ms: 200 },
+    )?;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Pause { paused: false },
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let looped = super::native_player::snapshot(&state, &library, &snapshot.session_id)?;
+    if looped.position_ms > 850 {
+        return Err("实际A-B循环未返回范围内".into());
+    }
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::ClearAbLoop,
+    )?;
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Seek { position_ms: 9800 },
+    )?;
+    let eof_started = std::time::Instant::now();
+    loop {
+        if state
+            .with_library(|db, _| super::store::course(db, &course.id))?
+            .completed
+        {
+            break;
+        }
+        if eof_started.elapsed() > std::time::Duration::from_secs(5) {
+            return Err("真实EOF后未持久化完成状态".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    super::native_player::control(
+        app,
+        &library,
+        &snapshot.session_id,
+        PlaybackAction::Completed { completed: false },
+    )?;
+    if state
+        .with_library(|db, _| super::store::course(db, &course.id))?
+        .completed
+    {
+        return Err("恢复学习未清除完成状态".into());
     }
     state
         .knowledge_editing

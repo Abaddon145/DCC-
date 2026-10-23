@@ -15,6 +15,7 @@ export interface PlaybackSnapshot {
 }
 export interface NativeViewport {left:number;top:number;width:number;height:number;visible:boolean}
 export type PlaybackAction =
+  | {type:"completed";completed:boolean}
   | {type:"pause";paused:boolean}|{type:"seek";positionMs:number}|{type:"rate";rate:number}
   | {type:"volume";volume:number}|{type:"mute";muted:boolean}|{type:"subtitle"|"audio";trackId:number|null}
   | {type:"frameStep";direction:"forward"|"backward"}|{type:"aspect";ratio:"source"|"16:9"|"4:3"|"fill"}

@@ -263,6 +263,11 @@ pub(crate) fn control(
     if !old.ready || old.error.is_some() {
         return Err("播放内核未就绪，请稍候或重试".into());
     }
+    if let PlaybackAction::Completed { completed } = action {
+        set_completed(&state, &session, completed)?;
+        emit_snapshot(app, &session);
+        return snapshot(&state, library, id);
+    }
     match &action {
         PlaybackAction::Audio {
             track_id: Some(track),
@@ -652,6 +657,43 @@ fn persist_snapshot(state: &AppState, session: &PlaybackSession) -> Result<(), S
         .lock()
         .map_err(|_| "播放状态锁损坏")?
         .save_error = result.as_ref().err().cloned();
+    result.map(|_| ())
+}
+fn set_completed(
+    state: &AppState,
+    session: &PlaybackSession,
+    completed: bool,
+) -> Result<(), String> {
+    let value = session
+        .snapshot
+        .lock()
+        .map_err(|_| "播放状态锁损坏")?
+        .clone();
+    if !value.ready {
+        return Err("播放内核未就绪".into());
+    }
+    let seq = session
+        .lease
+        .last_sequence
+        .load(Ordering::Acquire)
+        .checked_add(1)
+        .ok_or("播放进度序列已满")?;
+    let result = save_learning_progress(
+        state,
+        &session.lease,
+        seq,
+        ProgressInput {
+            position_ms: value.position_ms,
+            duration_ms: value.duration_ms,
+            rate: value.rate,
+            completed,
+        },
+    );
+    let mut snapshot = session.snapshot.lock().map_err(|_| "播放状态锁损坏")?;
+    snapshot.save_error = result.as_ref().err().cloned();
+    if result.is_ok() && !completed {
+        snapshot.ended = false;
+    }
     result.map(|_| ())
 }
 #[cfg(test)]
@@ -1146,6 +1188,7 @@ impl NativeViewport {
     deny_unknown_fields
 )]
 pub enum PlaybackAction {
+    Completed { completed: bool },
     Pause { paused: bool },
     Seek { position_ms: u64 },
     Rate { rate: f64 },
@@ -1330,7 +1373,7 @@ mod learning_native_tests {
         assert!(claim_session(&state, &library, &course_fixture(&state).id).is_err());
     }
     #[test]
-    fn learning_native_progress_ignores_late_epoch_and_sequence() {
+    fn learning_progress_ignores_late_epoch_and_sequence() {
         // Authorization/storage model only; the separate IPC component test runs actual mpv.
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::test_state(dir.path());
@@ -1392,6 +1435,90 @@ mod learning_native_tests {
                 .position_ms,
             200
         );
+    }
+    #[test]
+    fn learning_progress_saves_current_position_and_eof_without_a_fake_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(dir.path());
+        let library = state.active_library_id().unwrap();
+        let course = course_fixture(&state);
+        let session = claim_session(&state, &library, &course.id).unwrap();
+        session.lease.valid.store(true, Ordering::Release);
+        {
+            let mut value = session.snapshot.lock().unwrap();
+            value.ready = true;
+            value.position_ms = 800;
+        }
+        persist_snapshot(&state, &session).unwrap();
+        session.snapshot.lock().unwrap().position_ms = 200;
+        persist_snapshot(&state, &session).unwrap();
+        let saved = state
+            .with_library(|db, _| super::super::store::course(db, &course.id))
+            .unwrap();
+        assert_eq!(saved.position_ms, 200);
+        assert!(!saved.completed);
+        {
+            let mut value = session.snapshot.lock().unwrap();
+            apply_event(
+                &mut value,
+                &json!({"event":"property-change","name":"eof-reached","data":true}),
+            )
+            .unwrap();
+        }
+        persist_snapshot(&state, &session).unwrap();
+        assert!(
+            state
+                .with_library(|db, _| super::super::store::course(db, &course.id))
+                .unwrap()
+                .completed
+        );
+        assert!(PlaybackAction::AbLoop {
+            a_ms: 0,
+            b_ms: 1000
+        }
+        .commands(None)
+        .is_err());
+        assert!(PlaybackAction::Seek { position_ms: 200 }
+            .commands(None)
+            .is_ok());
+        stop_learning_session(&state, &library, &session.lease.session_id).unwrap();
+        let resumed = claim_session(&state, &library, &course.id).unwrap();
+        assert_eq!(
+            resumed.snapshot.lock().unwrap().position_ms,
+            0,
+            "completed course explicitly restarts from beginning"
+        );
+    }
+    #[test]
+    fn learning_progress_explicit_completion_preserves_position_and_can_be_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(dir.path());
+        let library = state.active_library_id().unwrap();
+        let course = course_fixture(&state);
+        let session = claim_session(&state, &library, &course.id).unwrap();
+        session.lease.valid.store(true, Ordering::Release);
+        {
+            let mut value = session.snapshot.lock().unwrap();
+            value.ready = true;
+            value.position_ms = 300;
+        }
+        set_completed(&state, &session, true).expect("explicit completion");
+        let saved = state
+            .with_library(|db, _| super::super::store::course(db, &course.id))
+            .unwrap();
+        assert!(saved.completed);
+        assert_eq!(saved.position_ms, 300);
+        session.snapshot.lock().unwrap().ended = true;
+        set_completed(&state, &session, false).unwrap();
+        persist_snapshot(&state, &session).unwrap();
+        assert!(
+            !state
+                .with_library(|db, _| super::super::store::course(db, &course.id))
+                .unwrap()
+                .completed
+        );
+        session.lease.valid.store(false, Ordering::Release);
+        assert!(set_completed(&state, &session, true).is_err());
     }
     #[test]
     fn learning_native_exit_respects_note_save_and_does_not_stop_new_owner() {

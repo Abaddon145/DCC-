@@ -9,7 +9,7 @@ import {NativeLearningSurface} from "./NativeLearningSurface";
 
 const events=vi.hoisted(()=>new Map<string,(event:{payload:any})=>void>());
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,handler:(event:{payload:any})=>void)=>{events.set(name,handler);return ()=>events.delete(name);})}));
-vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn()}}));
 const initial:PlaybackSnapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:1500,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[{id:1,kind:"audio",label:"中文"},{id:2,kind:"sub",label:"中文字幕"}],audioId:1,subtitleId:null,fullscreen:false,error:null,saveError:null};
 const props={libraryId:"lib",courseId:"course",onBack:vi.fn(),notify:vi.fn()};
 beforeEach(()=>{
@@ -118,4 +118,24 @@ it("ignores a delayed next-course lookup after the selected course changes",asyn
   await act(async()=>finish({items:[course,{...course,id:"obsolete-next"}],total:2,offset:0,limit:80}));
   expect(learningApi.stopPlayback).not.toHaveBeenCalled();
   expect(learningApi.startPlayback).not.toHaveBeenCalledWith("lib","obsolete-next");
+});
+it("next-course shortcut follows the selected series rather than library update order",async()=>{
+  vi.mocked(learningApi.listSeries).mockResolvedValue([{id:"series",name:"UE制作",description:"",revision:0,orderedCourseIds:["course","series-next"]}]);
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"课程系列"}));
+  await screen.findByRole("option",{name:"UE制作"});
+  await waitFor(()=>expect(screen.getByLabelText("当前系列")).toHaveValue("series"));
+  fireEvent.keyDown(screen.getByRole("region",{name:"学习播放器"}),{key:"n"});
+  await waitFor(()=>expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","series-next"));
+  expect(learningApi.listCourses).not.toHaveBeenCalled();
+});
+it("only confirms a completed mark after backend success and preserves it on save failure",async()=>{
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"标记课程完成"}));
+  const completed=await screen.findByRole("button",{name:"已完成 · 恢复学习"});
+  expect(completed).toHaveAttribute("aria-pressed","true");
+  vi.mocked(learningApi.controlPlayback).mockRejectedValueOnce(new Error("进度写入失败"));
+  fireEvent.click(completed);
+  expect(await screen.findByRole("alert")).toHaveTextContent("进度写入失败");
+  expect(screen.getByRole("button",{name:"已完成 · 恢复学习"})).toHaveAttribute("aria-pressed","true");
 });
