@@ -54,6 +54,7 @@ pub(crate) struct PlaybackSession {
     closed: AtomicBool,
     operations: Mutex<()>,
     viewport: Mutex<NativeViewport>,
+    expected_fingerprint: Option<String>,
     #[cfg(windows)]
     engine: Mutex<Option<Arc<NativeEngine>>>,
 }
@@ -84,7 +85,24 @@ pub(crate) fn start_playback(
     library: &str,
     course: &str,
 ) -> Result<PlaybackSnapshot, String> {
+    start_playback_with_fingerprint(app, library, course, None)
+}
+#[cfg(windows)]
+pub(crate) fn start_playback_with_fingerprint(
+    app: &tauri::AppHandle,
+    library: &str,
+    course: &str,
+    expected_fingerprint: Option<String>,
+) -> Result<PlaybackSnapshot, String> {
     use tauri::Manager;
+    if expected_fingerprint.as_ref().is_some_and(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err("播放引用摘要无效".into());
+    }
     let state = app.state::<AppState>();
     if state.learning_runtime.exiting.load(Ordering::Acquire) {
         return Err("正在保存并退出，请稍候".into());
@@ -104,7 +122,8 @@ pub(crate) fn start_playback(
         .map_err(|_| "播放状态锁损坏")?
         .clone();
     if let Some(old) = old {
-        if !old.closed.load(Ordering::Acquire)
+        if expected_fingerprint.is_none()
+            && !old.closed.load(Ordering::Acquire)
             && old.lease.library_id == library
             && old.lease.course_id == course
             && old
@@ -119,7 +138,7 @@ pub(crate) fn start_playback(
         finish_session(&state, &old)?;
         detach_session(&state, &old)?;
     }
-    let session = claim_session_locked(&state, library, course)?;
+    let session = claim_session_locked(&state, library, course, expected_fingerprint)?;
     let initial = session
         .snapshot
         .lock()
@@ -743,12 +762,13 @@ pub(crate) fn claim_session(
         .transition
         .lock()
         .map_err(|_| "播放切换锁损坏")?;
-    claim_session_locked(state, library, id)
+    claim_session_locked(state, library, id, None)
 }
 fn claim_session_locked(
     state: &AppState,
     library: &str,
     id: &str,
+    expected_fingerprint: Option<String>,
 ) -> Result<Arc<PlaybackSession>, String> {
     if state.learning_runtime.exiting.load(Ordering::Acquire) {
         return Err("正在保存并退出，请稍候".into());
@@ -820,6 +840,7 @@ fn claim_session_locked(
             height: 0.0,
             visible: false,
         }),
+        expected_fingerprint,
         #[cfg(windows)]
         engine: Mutex::new(None),
     });
@@ -1148,7 +1169,14 @@ fn checked_session_source(
         })?
         .ok_or("素材库已切换")?;
     // The source read/hash and Windows read lease must not hold the library mutex.
-    let checked = prepared.open_for_playback(&|| !current())?;
+    let (checked, hash) = prepared.open_for_analysis(&|| !current())?;
+    if session
+        .expected_fingerprint
+        .as_ref()
+        .is_some_and(|expected| expected != &hash)
+    {
+        return Err("视频原件已变化，未按旧笔记引用启动播放器".into());
+    }
     let valid = state
         .with_library_if_id(&session.lease.library_id, |db, base| {
             super::store::course(db, &session.lease.course_id)?;
@@ -1378,6 +1406,30 @@ impl PlaybackAction {
 mod learning_native_tests {
     use super::*;
     use crate::learning::models::Course;
+    #[test]
+    fn learning_note_native_source_rechecks_requested_fingerprint_at_playback_start() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(root.path());
+        let library = state.active_library_id().unwrap();
+        let course = course_fixture(&state);
+        let path = root
+            .path()
+            .join(format!("media-library/video/{}/video.mp4", course.media_id));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"original registered video").unwrap();
+        let wrong =
+            claim_session_locked(&state, &library, &course.id, Some("f".repeat(64))).unwrap();
+        assert!(
+            checked_session_source(&state, &wrong).is_err(),
+            "a note must not play a different full fingerprint"
+        );
+        stop_learning_session(&state, &library, &wrong.lease.session_id).unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"original registered video"));
+        let correct = claim_session_locked(&state, &library, &course.id, Some(hash)).unwrap();
+        let (lease, _, _) = checked_session_source(&state, &correct).unwrap();
+        assert!(lease.is_file());
+    }
     fn course_fixture(state: &AppState) -> Course {
         state.with_library(|db,_| {
             let id=uuid::Uuid::new_v4().to_string();let file=uuid::Uuid::new_v4().to_string();

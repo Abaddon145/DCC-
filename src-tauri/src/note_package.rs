@@ -32,6 +32,8 @@ struct Package {
     note: Note,
     notebook_path: Vec<String>,
     files: Vec<FileEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archives: Vec<crate::learning::note_archive::ArchiveBundle>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +87,13 @@ fn rewrite(
         } else {
             document["attrs"]["attachmentId"] = json!(target);
         }
+    }
+    if document["type"] == "preservedMarkdown" {
+        let id = document["attrs"]["archiveItemId"]
+            .as_str()
+            .ok_or("原文片段标识缺失")?;
+        document["attrs"]["archiveItemId"] =
+            json!(files.get(id).ok_or("笔记包缺少引用的原文片段")?);
     }
     if document["type"] == "reference"
         && document["attrs"]["kind"] == "note"
@@ -193,12 +202,28 @@ fn export_snapshot(
         });
         paths.push(path);
     }
+    let archives = crate::learning::note_archive::bundle_items(
+        db,
+        &crate::learning::note_nodes::archive_ids(&note.document)?,
+    )?;
+    if files.len() + archives.len() > 1000 {
+        return Err("笔记包文件数量超过1000".into());
+    }
+    for bundle in &archives {
+        let bytes = crate::learning::note_archive::read_archive_item(db, base, &bundle.id)?;
+        crate::learning::note_archive::verify_bundle(bundle, &bytes)?;
+        size = size.checked_add(bundle.size).ok_or("笔记包过大")?;
+        if size > 1024 * 1024 * 1024 {
+            return Err("笔记包总量超过1GB".into());
+        }
+    }
     let package = Package {
         format: "stack-dcc-notes".into(),
-        version: 1,
+        version: if archives.is_empty() { 1 } else { 2 },
         notebook_path: notebook_path(db, note.notebook_id.as_deref())?,
         note,
         files,
+        archives,
     };
     let parent = destination.parent().ok_or("输出目录无效")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(err)?;
@@ -212,6 +237,14 @@ fn export_snapshot(
         for (file, path) in package.files.iter().zip(paths) {
             zip.start_file(&file.path, options).map_err(err)?;
             std::io::copy(&mut fs::File::open(path).map_err(err)?, &mut zip).map_err(err)?;
+        }
+        for bundle in &package.archives {
+            zip.start_file(format!("archives/{}.bin", bundle.id), options)
+                .map_err(err)?;
+            zip.write_all(&crate::learning::note_archive::read_archive_item(
+                db, base, &bundle.id,
+            )?)
+            .map_err(err)?;
         }
         zip.finish().map_err(err)?;
     }
@@ -261,9 +294,10 @@ fn import_with_notebook(
     }
     let package: Package = serde_json::from_slice(&bytes).map_err(|_| "笔记包清单无效")?;
     if package.format != "stack-dcc-notes"
-        || package.version != 1
+        || ![1, 2].contains(&package.version)
+        || (package.version == 1 && !package.archives.is_empty())
         || package.notebook_path.len() > 64
-        || package.files.len() + 1 != archive.len()
+        || package.files.len() + package.archives.len() + 1 != archive.len()
     {
         return Err("不支持的笔记包版本或文件清单不一致".into());
     }
@@ -307,6 +341,49 @@ fn import_with_notebook(
         }
         extracted.push(target);
     }
+    let mut archive_paths = Vec::new();
+    let mut archived_items = HashSet::new();
+    let mut archive_ids = HashSet::new();
+    for bundle in &package.archives {
+        if Uuid::parse_str(&bundle.id).is_err()
+            || !archive_ids.insert(&bundle.id)
+            || bundle.size > 5 * 1024 * 1024
+        {
+            return Err("笔记包原文清单无效".into());
+        }
+        total = total.checked_add(bundle.size).ok_or("笔记包过大")?;
+        if total > 1024 * 1024 * 1024 {
+            return Err("笔记包超过1GB".into());
+        }
+        let path = staging.path().join(format!("{}.bin", Uuid::new_v4()));
+        let mut bytes = Vec::new();
+        archive
+            .by_name(&format!("archives/{}.bin", bundle.id))
+            .map_err(|_| "笔记包缺少原文归档")?
+            .take(5 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(err)?;
+        crate::learning::note_archive::verify_bundle(bundle, &bytes)?;
+        for item in &bundle.items {
+            if !archived_items.insert(item.id.clone()) || original_ids.contains(&item.id) {
+                return Err("笔记包原文标识重复".into());
+            }
+        }
+        fs::write(&path, bytes).map_err(err)?;
+        archive_paths.push(path);
+    }
+    if archived_items != crate::learning::note_nodes::archive_ids(&package.note.document)? {
+        return Err("笔记包原文片段引用与清单不一致".into());
+    }
+    let mut archive_map = HashMap::new();
+    for (bundle, path) in package.archives.iter().zip(archive_paths) {
+        archive_map.extend(crate::learning::note_archive::import_bundle(
+            db,
+            base,
+            bundle,
+            &fs::read(path).map_err(err)?,
+        )?);
+    }
     let tx = db.transaction().map_err(err)?;
     let mut parent: Option<String> = None;
     let mut warnings = vec![];
@@ -349,7 +426,7 @@ fn import_with_notebook(
     )?;
     let directory = base.join("note-attachments").join(&blank.id);
     let result = (|| {
-        let mut map = HashMap::new();
+        let mut map = archive_map;
         for (file, source) in package.files.iter().zip(extracted) {
             let imported = knowledge_files::import(&tx, base, &blank.id, &source)?;
             tx.execute(

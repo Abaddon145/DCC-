@@ -6,7 +6,9 @@ import {learningApi} from "./features/learning/api";
 import {defaultGlobalPreferences,defaultLibraryPreferences} from "./lib/personalization";
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn().mockResolvedValue(()=>{})}));
 vi.mock("./lib/api",async original=>{const module=await original<typeof import("./lib/api")>();return {...module,api:{...module.api,getWorkspaceContext:vi.fn().mockResolvedValue({libraryId:"lib",enabled:false,value:null}),saveWorkspaceContext:vi.fn().mockResolvedValue(true),getPersonalization:vi.fn(),getTranslationSettings:vi.fn().mockResolvedValue({contentLanguage:"zh-CN"}),getMeta:vi.fn().mockResolvedValue({categories:[],filters:{tags:[],dccTools:[],versions:[],formats:[],licenses:[]},totalAssets:0}),listSmartCollections:vi.fn().mockResolvedValue([]),search:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:80})}};});
-vi.mock("./features/learning/api",()=>({learningApi:{ensureCourse:vi.fn(),getCourse:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),controlPlayback:vi.fn(),stopPlayback:vi.fn()}}));
+vi.mock("./features/learning/api",()=>({learningApi:{prepareNoteJump:vi.fn(),ensureCourse:vi.fn(),getCourse:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),controlPlayback:vi.fn(),stopPlayback:vi.fn()}}));
+const noteReference={courseId:"596d257d-3e5c-46c4-a464-187cf180c6bd",mediaId:"b01c829f-de85-4671-8464-5e7db03edf8a",fingerprint:"a".repeat(64),ranges:[{startMs:1000,endMs:3000},{startMs:5000,endMs:6000}],label:"笔记片段"};
+vi.mock("./components/KnowledgeWorkspace",()=>({default:({onLearnReference,initialNoteId}:{onLearnReference?:(reference:typeof noteReference,index:number,noteId:string)=>Promise<void>;initialNoteId?:string})=><section><button onClick={()=>void onLearnReference?.(noteReference,1,"11111111-1111-4111-8111-111111111111")}>学习笔记片段</button>{initialNoteId&&<span>笔记详情 {initialNoteId}</span>}</section>}));
 vi.mock("./components/TaskCenter",()=>({TaskCenter:()=>null}));
 vi.mock("./components/AssetGrid",()=>({AssetGrid:()=>null}));
 vi.mock("./components/ReliabilitySettings",()=>({AutomaticBackupService:()=>null}));
@@ -26,6 +28,23 @@ it("opens the existing video identity and returns to that exact detail",async()=
   fireEvent.click(screen.getByRole("button",{name:"返回视频详情"}));
   expect(await screen.findByText("视频详情 media")).toBeInTheDocument();
   expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
+});
+it("opens a verified note range and returns to the same note identity",async()=>{
+  const snapshot={sessionId:"note-session",libraryId:"lib",courseId:noteReference.courseId,ready:true,positionMs:0,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[],audioId:null,subtitleId:null,fullscreen:false,error:null,saveError:null};
+  vi.mocked(learningApi.prepareNoteJump).mockResolvedValue({courseId:noteReference.courseId,mediaId:noteReference.mediaId,positionMs:5000,endMs:6000});
+  vi.mocked(learningApi.getCourse).mockResolvedValue({id:noteReference.courseId,mediaId:noteReference.mediaId,title:"笔记的课程",positionMs:0,durationMs:60000,rate:1,completed:false,progressRevision:1});
+  vi.mocked(learningApi.startPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.getPlayback).mockResolvedValue(snapshot);
+  let current=snapshot;
+  vi.mocked(learningApi.controlPlayback).mockImplementation(async(_lib,_session,action)=>{if(action.type==="seek")current={...current,positionMs:action.positionMs};return current;});
+  render(<App/>);
+  fireEvent.click(await screen.findByRole("button",{name:"知识库"}));
+  fireEvent.click(await screen.findByRole("button",{name:"学习笔记片段"}));
+  await screen.findByRole("region",{name:"学习播放器"});
+  await waitFor(()=>expect(screen.getByRole("slider",{name:"播放进度"})).toHaveValue("5000"));
+  expect(learningApi.prepareNoteJump).toHaveBeenCalledWith("lib",noteReference,1);
+  expect(learningApi.startPlayback).toHaveBeenCalledWith("lib",noteReference.courseId,noteReference.fingerprint);
+  fireEvent.click(screen.getByRole("button",{name:"返回笔记"}));
+  expect(await screen.findByText("笔记详情 11111111-1111-4111-8111-111111111111")).toBeInTheDocument();
 });
 it("navigation waits for progress save, failure keeps learning and history unchanged",async()=>{
   render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));await screen.findByRole("button",{name:"播放"});

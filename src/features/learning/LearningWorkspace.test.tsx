@@ -27,6 +27,21 @@ beforeEach(()=>{
   const saved:CourseAnalysisDetail={id:"analysis",courseId:"course",previewId:"preview",sourceFingerprint:"a".repeat(64),model:"deepseek-chat",parentAnalysisId:null,status:"completed",error:"",createdAt:1000,updatedAt:1000,staleReasons:[],stages:{items:[],total:0,offset:0,limit:50},selectedStageKey:null,result:{contentType:"tutorial",oneSentenceSummary:"课程要点",overview:"保存的课程说明",chapters:[],keyPoints:[{timeMs:11500,title:"材质参数",content:"学习参数",importance:3,sourceSegmentIds:["cue"]}],tutorialSteps:[],terms:[],actionItems:[],tags:[],warnings:[],sections:[],sectionValidation:[]}};
   vi.mocked(learningApi.getCourseAnalysis).mockResolvedValue(saved);
 });
+it("waits for readiness, pauses and seeks a note target once without resetting later manual seeks",async()=>{
+  let current={...initial,ready:false};
+  vi.mocked(learningApi.startPlayback).mockResolvedValue(current);
+  vi.mocked(learningApi.getPlayback).mockImplementation(async()=>current);
+  vi.mocked(learningApi.controlPlayback).mockImplementation(async(_lib,_session,action)=>{if(action.type==="seek")current={...current,positionMs:action.positionMs};if(action.type==="pause")current={...current,paused:action.paused};return current;});
+  render(<LearningWorkspace {...props} initialPositionMs={5000} backLabel="返回笔记"/>);
+  await screen.findByRole("button",{name:"返回笔记"});
+  expect(vi.mocked(learningApi.controlPlayback).mock.calls.filter(call=>call[2].type==="seek")).toHaveLength(0);
+  await act(async()=>{current={...current,ready:true,paused:false};events.get("learning-playback-state")?.({payload:current});});
+  await waitFor(()=>expect(screen.getByRole("slider",{name:"播放进度"})).toHaveValue("5000"));
+  expect(screen.getByRole("button",{name:"播放"})).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("slider",{name:"播放进度"}),{target:{value:"12000"}});
+  await waitFor(()=>expect(screen.getByRole("slider",{name:"播放进度"})).toHaveValue("12000"));
+  expect(vi.mocked(learningApi.controlPlayback).mock.calls.filter(call=>call[2].type==="seek"&&call[2].positionMs===5000)).toHaveLength(1);
+});
 it("opens analysis beside the native viewport and reuses protected playback seeking",async()=>{
   render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
   fireEvent.click(screen.getByRole("button",{name:"课程分析"}));

@@ -29,8 +29,49 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
   if(command==="get_note_revision")return {id:"history",noteId:note.id,snapshot:{...note,title:"旧版标题"},pinned:false,createdAt:note.createdAt};
   return null;
 });});
-afterEach(cleanup);
+afterEach(()=>{cleanup();vi.restoreAllMocks();});
 describe("knowledge editing",()=>{
+  it("asks once when deleting a protected outline block and keeps both editors aligned on rejection",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command,args)=>command==="get_note"?Promise.resolve({...note,document:{type:"doc",content:[{type:"preservedMarkdown",attrs:{archiveItemId:"59f222de-82c9-4e8e-8352-17142811caa7",label:"保护段落"}}]}}):original(command,args));
+    const confirm=vi.spyOn(window,"confirm").mockReturnValue(true);
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"大纲"}));
+    fireEvent.click(await screen.findByRole("button",{name:"保护段落"}));
+    const body=await screen.findByRole("textbox",{name:"节点完整内容"});
+    const nested=(body as HTMLElement & {editor:import("@tiptap/react").Editor}).editor;
+    const main=(document.querySelector(".knowledge-editor .tiptap") as HTMLElement & {editor:import("@tiptap/react").Editor}).editor;
+    act(()=>{nested.commands.setNodeSelection(0);nested.commands.deleteSelection();});
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(main.getJSON().content!.some(block=>block.type==="preservedMarkdown")).toBe(false);
+    act(()=>{main.commands.undo();});
+    confirm.mockClear().mockReturnValue(false);
+    act(()=>{nested.commands.setNodeSelection(0);nested.commands.deleteSelection();});
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(main.getJSON().content!.some(block=>block.type==="preservedMarkdown")).toBe(true);
+    expect(nested.getJSON().content!.some(block=>block.type==="preservedMarkdown")).toBe(true);
+    confirm.mockRestore();
+  });
+  it("keeps learning blocks in the real editor, reads scoped raw content and opens the selected range",async()=>{
+    const ref={courseId:"596d257d-3e5c-46c4-a464-187cf180c6bd",mediaId:"b01c829f-de85-4671-8464-5e7db03edf8a",fingerprint:"a".repeat(64),ranges:[{startMs:1000,endMs:3000},{startMs:5000,endMs:6000}],label:"课程引用"};
+    const item="59f222de-82c9-4e8e-8352-17142811caa7";
+    const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command,args)=>{
+      if(command==="get_note")return Promise.resolve({...note,document:{type:"doc",content:[{type:"learningReference",attrs:ref},{type:"preservedMarkdown",attrs:{archiveItemId:item,label:"保留原文"}}]}});
+      if(command==="read_note_preserved_markdown")return Promise.resolve("---\r\nUE: 5\r\n---\r\n");
+      return original(command,args);
+    });
+    let opened:unknown;
+    render(<KnowledgeWorkspace notify={mocks.notify} onLearnReference={async(reference,index)=>{opened={reference,index};}}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    fireEvent.click(await screen.findByRole("button",{name:"查看保留原文"}));
+    expect(await screen.findByRole("textbox",{name:"保留的 Markdown 原文"})).toHaveValue("---\nUE: 5\n---\n");
+    expect(mocks.invoke).toHaveBeenCalledWith("read_note_preserved_markdown",{libraryId:"test-library",id:note.id,itemId:item});
+    fireEvent.click(screen.getByRole("button",{name:"播放片段 2"}));
+    await waitFor(()=>expect(opened).toEqual({reference:ref,index:1}));
+  });
   it("opens document and global search without first clicking a mode",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);
     fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));

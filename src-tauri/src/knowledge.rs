@@ -349,10 +349,23 @@ pub(crate) fn inspect_document(
             "reference",
             "attachment",
             "mindMap",
+            "learningReference",
+            "preservedMarkdown",
         ]
         .contains(&kind)
         {
             return Err("笔记含不支持的节点类型".into());
+        }
+        if let Some(learning) = crate::learning::note_nodes::inspect_node(node)? {
+            match learning {
+                crate::learning::note_nodes::LearningNode::Reference(reference) => {
+                    references.push(("media".into(), reference.media_id, reference.label.clone()));
+                    text.push_str(&reference.label);
+                }
+                crate::learning::note_nodes::LearningNode::Preserved(block) => {
+                    text.push_str(&block.label)
+                }
+            }
         }
         if let Some(marks) = node.get("marks").and_then(Value::as_array) {
             for mark in marks {
@@ -526,6 +539,7 @@ pub fn save(db: &mut Connection, input: NoteInput) -> Result<Note> {
 }
 pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool) -> Result<Note> {
     let (plain, references) = inspect_document(&input.document)?;
+    crate::learning::note_nodes::validate_registered(tx, &input.document)?;
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 300 {
         return Err("笔记标题需为 1–300 个字符".into());

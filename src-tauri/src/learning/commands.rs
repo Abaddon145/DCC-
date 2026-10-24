@@ -2,6 +2,25 @@ use super::native_player::{self, NativeViewport, PlaybackAction, PlaybackSnapsho
 use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
+#[tauri::command]
+pub async fn prepare_learning_note_jump(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    reference: super::note_nodes::LearningReference,
+    range_index: usize,
+) -> Result<super::note_nodes::NoteJump, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        super::note_nodes::prepare_jump(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &reference,
+            range_index,
+        )
+    })
+    .await
+    .map_err(|_| "课程来源核对已中断，请重试".to_owned())?
+}
 async fn component_job<F>(
     app: tauri::AppHandle,
     expected: String,
@@ -147,10 +166,16 @@ pub async fn start_learning_playback(
     app: tauri::AppHandle,
     expected_library_id: String,
     course_id: String,
+    expected_fingerprint: Option<String>,
 ) -> Result<PlaybackSnapshot, String> {
     #[cfg(windows)]
     return tauri::async_runtime::spawn_blocking(move || {
-        native_player::start_playback(&app, &expected_library_id, &course_id)
+        native_player::start_playback_with_fingerprint(
+            &app,
+            &expected_library_id,
+            &course_id,
+            expected_fingerprint,
+        )
     })
     .await
     .map_err(|e| e.to_string())?;

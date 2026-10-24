@@ -211,6 +211,31 @@ fn render(db: &Connection, base: &Path, node: &Value, budget: &mut u64) -> Resul
             escape(node["attrs"]["alt"].as_str().unwrap_or(""))
         ));
     }
+    if let Some(learning) = crate::learning::note_nodes::inspect_node(node)? {
+        return match learning {
+            crate::learning::note_nodes::LearningNode::Preserved(block) => {
+                let bytes = crate::learning::note_archive::read_archive_item(
+                    db,
+                    base,
+                    &block.archive_item_id,
+                )?;
+                *budget = budget.checked_add(bytes.len() as u64).ok_or("原文过大")?;
+                if *budget > 100 * 1024 * 1024 {
+                    return Err("原文导出超过100MB，请使用笔记包".into());
+                }
+                let raw = String::from_utf8(bytes).map_err(|_| "归档片段编码无效")?;
+                Ok(format!(
+                    "<section><p>{}</p><pre>{}</pre></section>",
+                    escape(&block.label),
+                    escape(&raw)
+                ))
+            }
+            crate::learning::note_nodes::LearningNode::Reference(reference) => Ok(format!(
+                "<pre>{}</pre>",
+                escape(&crate::learning::note_nodes::reference_text(&reference))
+            )),
+        };
+    }
     if kind == "mindMap" {
         return map_svg(&node["attrs"]["data"]);
     }
@@ -276,6 +301,64 @@ pub fn html(db: &Connection, base: &Path, id: &str, revision: i64) -> Result<Str
     }
     Ok(format!("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>body{{max-width:860px;margin:48px auto;padding:24px;font:16px/1.8 system-ui;color:#242a33;background:#fff}}img,svg{{max-width:100%;height:auto}}pre{{white-space:pre-wrap;background:#f2f4f7;padding:16px}}table{{border-collapse:collapse}}td,th{{border:1px solid #bbb;padding:8px}}blockquote{{border-left:3px solid #bbb;margin-left:0;padding-left:18px}}</style></head><body><h1>{}</h1>{body}</body></html>",escape(&note.title),escape(&note.title)))
 }
+fn plain(db: &Connection, base: &Path, node: &Value, budget: &mut usize) -> Result<String, String> {
+    if let Some(learning) = crate::learning::note_nodes::inspect_node(node)? {
+        return match learning {
+            crate::learning::note_nodes::LearningNode::Reference(reference) => {
+                Ok(crate::learning::note_nodes::reference_text(&reference))
+            }
+            crate::learning::note_nodes::LearningNode::Preserved(block) => {
+                let raw = crate::learning::note_archive::read_archive_item(
+                    db,
+                    base,
+                    &block.archive_item_id,
+                )?;
+                *budget = budget.checked_add(raw.len()).ok_or("原文过大")?;
+                if *budget > 100 * 1024 * 1024 {
+                    return Err("纯文本原文超过100MB，请使用笔记包".into());
+                }
+                Ok(format!(
+                    "{}\n{}",
+                    block.label,
+                    String::from_utf8(raw).map_err(|_| "原文片段编码无效")?
+                ))
+            }
+        };
+    }
+    if node["type"] == "text" {
+        return Ok(node["text"].as_str().unwrap_or("").into());
+    }
+    if node["type"] == "hardBreak" {
+        return Ok("\n".into());
+    }
+    if node["type"] == "mindMap" {
+        return crate::knowledge::inspect_document(
+            &serde_json::json!({"type":"doc","content":[node]}),
+        )
+        .map(|v| v.0);
+    }
+    if let Some(children) = node["content"].as_array() {
+        let parts = children
+            .iter()
+            .map(|child| plain(db, base, child, budget))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(parts.join(
+            if matches!(
+                node["type"].as_str(),
+                Some("paragraph" | "heading" | "codeBlock")
+            ) {
+                ""
+            } else {
+                "\n"
+            },
+        ));
+    }
+    Ok(node["attrs"]["label"]
+        .as_str()
+        .or(node["attrs"]["alt"].as_str())
+        .unwrap_or("")
+        .into())
+}
 pub fn export(
     db: &Connection,
     base: &Path,
@@ -297,7 +380,12 @@ pub fn export(
     let text = if format == "html" {
         html(db, base, id, revision)?
     } else {
-        format!("{}\n\n{}", note.title, note.plain_text)
+        knowledge::inspect_document(&note.document)?;
+        format!(
+            "{}\n\n{}",
+            note.title,
+            plain(db, base, &note.document, &mut 0)?
+        )
     };
     let mut stage = tempfile::NamedTempFile::new_in(path.parent().ok_or("导出目录无效")?)
         .map_err(|e| e.to_string())?;

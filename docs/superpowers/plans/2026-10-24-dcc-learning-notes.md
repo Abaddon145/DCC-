@@ -53,6 +53,26 @@
 3. 9.4 笔记包/显式 Markdown/HTML/TXT 导出与恢复：原字节/块引用随包复制，保留时间与来源；跨库引用不凭 UUID 假装可用；不修改旧 JSON。
 4. 全 Task 9 回归/600 KiB 实际编辑 I/O；IME/撤销/失败草稿/物理显示在真实测试中分别报告，不能以纯函数模拟冒充完成。
 
+## 9.2 typed 节点生命周期（BASE aee7b74）
+
+**Files:** `learning/note_nodes.rs` / `note_nodes_tests.rs`，`knowledge.rs` / `note_clipboard.rs` / `note_package.rs` / `note_markdown.rs` / `note_export.rs`；`src/lib/learningNoteNodes.tsx` 与测试，现有编辑器、Markdown manager、大纲共享插件注册。
+
+**Interfaces / 决定：**
+- `LearningReference { courseId, mediaId, fingerprint, ranges:[{startMs,endMs}], label }`：两个规范 UUID，fingerprint 为当前主文件全 SHA-256，小写 64 hex；1–256 段，整数毫秒，按序且不重叠，0<=start<end<=604800000；label 非空且 <=2000 UTF-8 字节。允许陈旧引用留在正文，点击再检查当前课程/媒体/时长/全文件摘要，不静默改指向。
+- `PreservedMarkdown {archiveItemId,label}`：规范 UUID、同样 label 规则；不接受任意路径、HTML 或内嵌伪造正文。保存与粘贴必须确认片段登记存在；归档无删除接口，跨笔记复用同库不可变片段不会随原笔记删除失效。
+- `inspect_node(node)->Option<ValidatedLearningNode>` 从 attrs 去掉已有 topicId/topicDepth/topicColor 后严格反序列化，禁止子节点和 marks。复用 `knowledge::inspect_document` 的正文大小、层级与主题规则；时间引用在现有反链表登记为 media 引用，不重建反链系统。
+- 归档片段显示由库/笔记作用域命令按 UUID 读取，只有当前笔记或其已保存历史中的片段可查看；前端懒加载只读 textarea、状态与重试，无 innerHTML。
+- 共享 ProseMirror filterTransaction 比较前后两个新类型的身份数量，仅实际删除时确认；移动不弹，拒绝删除时正文不变，撤销仍可恢复。无更新的程序化历史展示不弹确认。结构视图已有通用删除提示和插件避免重复确认。
+- 笔记包在有归档时用 version2，旧 version1 仍读写兼容。只导出实际引用片段的原字节、hash、size、安全 zip path 与派生来源身份；完整父原件继续由整库备份保留，不能因复制一个块而夹带其他原文段落。导入先全部核验，再复用 archive_bytes/add_archive_item，remap UUID 后走现有 note 事务。原字节发布后若笔记事务失败，归档可作为待处理保留，不把笔记报告为成功。代价：同一父原件的多个片段在包内分别存储，沿用 1000 文件/1GB 包上限。
+- Markdown 显式导出用可信登记片段替换 `dccpreserved://<itemId>` 占位，恢复原语法与换行；HTML 转义后输出 pre，TXT 输出原字节解码文本；缺失或损坏片段使导出失败，不导出空白假成功。时间引用导出保留课程/媒体/指纹与全部 range。
+
+- [x] RED→GREEN 后端真实保存/检索/缺引用拒绝/既有回收恢复、剪贴板同库跨笔记、包跨库往返与损坏拒绝、MD/HTML/TXT 输出，旧包仍兼容。命令同主 Task9 的 `learning_note` filter；最终完整 Rust 437 通过，见证据。
+- [x] RED→GREEN 前端真实 Tiptap 编辑器：两个节点读写/移动/删除取消与撤销/纯 HTML 不创建特权节点/Markdown 占位不丢、只读查看的加载/错误/重试；旧节点照常。
+- [x] 笔记时间跳转命令/播放器入口在 9.3 转换提交前接通：`prepare_learning_note_jump(expectedLibraryId,reference,rangeIndex)`，spawn_blocking 全源校验后返回 courseId/mediaId/positionMs；App 使用现有学习 target/离开保存守卫，首帧 ready 后只执行一次暂停定位。前端字段不是磁盘访问能力。
+- 启动命令增加可选 expectedFingerprint，绑定新播放会话；启动原件的现有只读租约再次验证全摘要，避免 prepare/start 间原件替换。旧三参数 Rust QA 入口保留兼容。界面定位按会话首次 ready 执行一次，后续手动 seek 不重置；系列切到其他课程不套用旧引用指纹。
+- 大纲/导图的内嵌 BlockEditor 也复用节点，但删除统一在主正文事务确认一次；主正文拒绝时内嵌内容立即恢复，不保留看似删掉的界面草稿。
+- [x] 完整回归/构建/证据/本地提交，不标 Task9 全部完成；最终 437 Rust / 376 前端通过，生产构建成功。证据 `docs/evidence/merge/task9-note-nodes.md`；实际 IME/DPI 与真实迁入仍单独验收。
+
 ## Review Focus
 
 - 损坏同名归档不能被自动覆盖，重复导入不能返回假成功（9.1 损坏/去重测试）。

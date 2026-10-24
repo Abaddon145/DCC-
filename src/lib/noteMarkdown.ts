@@ -1,3 +1,4 @@
+import {learningNoteExtensions} from "./learningNoteNodes";
 import { MarkdownManager } from "@tiptap/markdown";
 import StarterKit from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
@@ -8,7 +9,7 @@ import { NoteReferenceNode, NoteAttachmentNode, NoteRemoteImageNode, NoteMindMap
 import type { JSONContent } from "@tiptap/react";
 import {structureDepths} from "./noteStructure";
 
-const manager = new MarkdownManager({ extensions: [StarterKit,TableKit,TaskList,TaskItem,Image,NoteReferenceNode,NoteAttachmentNode,NoteRemoteImageNode,NoteMindMapNode] });
+const manager = new MarkdownManager({ extensions: [StarterKit,TableKit,TaskList,TaskItem,Image,NoteReferenceNode,NoteAttachmentNode,NoteRemoteImageNode,NoteMindMapNode,...learningNoteExtensions()] });
 export function parseNoteMarkdown(text:string):JSONContent {
   // Check lexer tokens before any DOM parsing; HTML inside fenced code remains ordinary code.
   let unsafe=false;

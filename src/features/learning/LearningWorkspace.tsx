@@ -17,8 +17,8 @@ import {CourseAnalysisPanel} from "./CourseAnalysisPanel";
 import type {PlaybackAction,PlaybackSnapshot,ScopedPlaybackEvent,NativePointerEvent} from "./types";
 import "./LearningWorkspace.css";
 
-export interface LearningWorkspaceProps {libraryId:string;courseId:string;projectId?:string;onBack:()=>void;notify:(message:string,error?:boolean)=>void}
-export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,onBack,notify}:LearningWorkspaceProps){
+export interface LearningWorkspaceProps {libraryId:string;courseId:string;projectId?:string;initialPositionMs?:number;sourceFingerprint?:string;backLabel?:string;onBack:()=>void;notify:(message:string,error?:boolean)=>void}
+export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,initialPositionMs,sourceFingerprint,backLabel,onBack,notify}:LearningWorkspaceProps){
   const [courseId,setCourseId]=useState(initialCourseId),[title,setTitle]=useState("学习视频"),[snapshot,setSnapshot]=useState<PlaybackSnapshot|null>(null),[error,setError]=useState(""),[retry,setRetry]=useState(0),[leaving,setLeaving]=useState(false);
   const [focus,setFocus]=useState<"learning"|"editor">("learning"),[blocked,setBlocked]=useState(false),[composing,setComposing]=useState(false),[menu,setMenu]=useState<{x:number;y:number}|null>(null),[help,setHelp]=useState(false);
   const [transcript,setTranscript]=useState(false);
@@ -43,6 +43,14 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
       if(current.current?.sessionId===sid&&next.libraryId===libraryId&&next.courseId===courseId){accept(next);if(command.type==="completed")setCompleted(command.completed);}
     }).catch(reason=>{if(current.current?.sessionId===sid){setError(String(reason));notify(String(reason),true);}});
   },[libraryId,courseId,accept,notify,gate]);
+  const initialSeek=useRef("");
+  useEffect(()=>{
+    if(!snapshot?.ready||courseId!==initialCourseId||initialPositionMs==null)return;
+    const key=`${libraryId}:${courseId}:${snapshot.sessionId}:${initialPositionMs}`;
+    if(initialSeek.current===key)return;
+    initialSeek.current=key;
+    control({type:"pause",paused:true});control({type:"seek",positionMs:initialPositionMs});
+  },[snapshot?.ready,snapshot?.sessionId,libraryId,courseId,initialCourseId,initialPositionMs,control]);
   const stop=useCallback(async()=>{
     if(stopped.current)return;
     busy.current=true;setLeaving(true);if(click.current){clearTimeout(click.current);click.current=null;}
@@ -114,7 +122,7 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
       listen<NativePointerEvent>("learning-playback-pointer",event=>{const value=event.payload;if(!scoped(value))return;pointerRef.current({kind:value.kind==="wheelUp"||value.kind==="wheelDown"?"wheel":value.kind,inside:true,doubleClickMs:value.doubleClickMs,deltaY:value.kind==="wheelUp"?-1:1},true);}),
     ].map(promise=>promise.then(dispose=>{if(active)disposes.push(dispose);else dispose();})));
     const key=`${libraryId}:${courseId}:${retry}`;
-    if(start.current?.key!==key)start.current={key,promise:listeners.then(()=>learningApi.startPlayback(libraryId,courseId))};
+    if(start.current?.key!==key)start.current={key,promise:listeners.then(()=>sourceFingerprint&&courseId===initialCourseId?learningApi.startPlayback(libraryId,courseId,sourceFingerprint):learningApi.startPlayback(libraryId,courseId))};
     void start.current.promise.then(async value=>{
       if(!active||!gate.isCurrent(ticket)||value.libraryId!==libraryId||value.courseId!==courseId)return;
       accept(value);
@@ -124,7 +132,7 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
     }).catch(reason=>{if(active&&gate.isCurrent(ticket))setError(String(reason));});
     void learningApi.getCourse(libraryId,courseId).then(course=>{if(active&&gate.isCurrent(ticket)){setTitle(course.title);setCompleted(course.completed);}}).catch(reason=>{if(active)setError(String(reason));});
     return()=>{active=false;gate.invalidate();adjacentGate.invalidate();disposes.forEach(dispose=>dispose());if(click.current){clearTimeout(click.current);click.current=null;}};
-  },[libraryId,courseId,retry,gate,adjacentGate,accept]);
+  },[libraryId,courseId,retry,gate,adjacentGate,accept,sourceFingerprint,initialCourseId]);
   useEffect(()=>{
     const focusChanged=(event:FocusEvent)=>setFocus((event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")?"editor":"learning");
     const compositionStart=()=>setComposing(true),compositionEnd=()=>setComposing(false);
@@ -148,7 +156,7 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
   useEffect(()=>{if(snapshot?.ready&&!hasLearningOverlay()&&document.activeElement===document.body)root.current?.focus();},[snapshot?.ready]);
   const failure=error||snapshot?.error||snapshot?.saveError;
   return <section ref={root} tabIndex={-1} className="learning-workspace" role="region" aria-label="学习播放器">
-    <header className="learning-header"><button className="secondary-button" disabled={leaving} onClick={()=>void back()}><ArrowLeft size={16}/>{projectId?"返回项目":"返回视频详情"}</button><div><span className="eyebrow">LEARNING WORKSPACE</span><h1>{title}</h1></div><button ref={helpButton} className="secondary-button" onClick={()=>setHelp(value=>!value)} aria-expanded={help}><Keyboard size={16}/>快捷键</button></header>
+    <header className="learning-header"><button className="secondary-button" disabled={leaving} onClick={()=>void back()}><ArrowLeft size={16}/>{backLabel||(projectId?"返回项目":"返回视频详情")}</button><div><span className="eyebrow">LEARNING WORKSPACE</span><h1>{title}</h1></div><button ref={helpButton} className="secondary-button" onClick={()=>setHelp(value=>!value)} aria-expanded={help}><Keyboard size={16}/>快捷键</button></header>
     {failure&&<div className="learning-error" role="alert"><span>{failure}</span><button className="secondary-button" disabled={leaving} onClick={()=>{setError("");setRetry(value=>value+1);}}>重试播放</button></div>}
     {!snapshot&&!failure&&<LoadFeedback label="正在启动原生播放器…" skeleton/>}
     <div className="learning-workspace-actions"><button className="secondary-button learning-transcript-toggle" aria-expanded={transcript} onClick={()=>{setTranscript(value=>!value);setAnalysis(false);}}>{transcript?"收起课程字幕":"课程字幕"}</button>

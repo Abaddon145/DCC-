@@ -1,6 +1,6 @@
 //! Immutable source bytes. This is not the editable note document or a Vault writer.
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -39,8 +39,8 @@ pub struct NoteArchive {
     pub sha256: String,
     pub size: u64,
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArchiveItem {
     pub id: String,
     pub archive_id: String,
@@ -48,6 +48,114 @@ pub struct ArchiveItem {
     pub end_byte: u64,
     pub sha256: String,
     pub label: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchiveBundle {
+    pub id: String,
+    pub profile_id: String,
+    pub source_key: String,
+    pub version_key: String,
+    pub sha256: String,
+    pub size: u64,
+    pub items: Vec<ArchiveItem>,
+}
+pub fn bundle_items(
+    db: &Connection,
+    ids: &std::collections::HashSet<String>,
+) -> Result<Vec<ArchiveBundle>, String> {
+    let mut bundles = Vec::new();
+    for id in ids {
+        valid_id(id)?;
+        let item=db.query_row("SELECT id,archive_id,start_byte,end_byte,sha256,label FROM learning_note_archive_items WHERE id=?1",[id],item_row).map_err(error)?;
+        let (profile_id, origin_hash): (String, String) = db
+            .query_row(
+                "SELECT source_profile_id,sha256 FROM learning_note_archives WHERE id=?1",
+                [&item.archive_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(error)?;
+        let size = item
+            .end_byte
+            .checked_sub(item.start_byte)
+            .ok_or("原文范围无效")?;
+        // Portable notes carry the selected bytes, never unrelated parts of the source document.
+        bundles.push(ArchiveBundle {
+            id: item.id.clone(),
+            profile_id,
+            source_key: format!("dcc-note-item/{}", item.id),
+            version_key: origin_hash,
+            sha256: item.sha256.clone(),
+            size,
+            items: vec![ArchiveItem {
+                archive_id: item.id.clone(),
+                start_byte: 0,
+                end_byte: size,
+                ..item
+            }],
+        });
+    }
+    bundles.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(bundles)
+}
+pub fn verify_bundle(bundle: &ArchiveBundle, bytes: &[u8]) -> Result<(), String> {
+    valid_id(&bundle.id)?;
+    valid_id(&bundle.profile_id)?;
+    if !valid_text(&bundle.source_key, 4096)
+        || !valid_text(&bundle.version_key, 300)
+        || bundle.items.is_empty()
+        || bytes.len() > MAX_BYTES
+        || bytes.len() as u64 != bundle.size
+        || digest(bytes) != bundle.sha256
+    {
+        return Err("笔记包原文归档清单或摘要无效".into());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut ranges = std::collections::HashSet::new();
+    for item in &bundle.items {
+        valid_id(&item.id)?;
+        if item.archive_id != bundle.id
+            || !valid_text(&item.label, 2000)
+            || !ids.insert(&item.id)
+            || !ranges.insert((item.start_byte, item.end_byte))
+            || digest(checked_slice(bytes, item.start_byte, item.end_byte)?) != item.sha256
+        {
+            return Err("笔记包原文片段范围、标识或摘要无效".into());
+        }
+    }
+    Ok(())
+}
+pub fn import_bundle(
+    db: &Connection,
+    base: &Path,
+    bundle: &ArchiveBundle,
+    bytes: &[u8],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    verify_bundle(bundle, bytes)?;
+    let archive = archive_bytes(
+        db,
+        base,
+        &ArchiveSource {
+            profile_id: &bundle.profile_id,
+            source_key: &bundle.source_key,
+            version_key: &bundle.version_key,
+        },
+        bytes,
+        &bundle.sha256,
+    )?;
+    let mut map = std::collections::HashMap::new();
+    for item in &bundle.items {
+        let saved = add_archive_item(
+            db,
+            base,
+            &archive.id,
+            item.start_byte,
+            item.end_byte,
+            &item.label,
+        )?;
+        map.insert(item.id.clone(), saved.id);
+    }
+    Ok(map)
 }
 pub fn archive_bytes(
     db: &Connection,

@@ -412,6 +412,8 @@ fn application_builder(
                     knowledge_commands::export_note_markdown,
                     knowledge_commands::export_note_document,
                     knowledge_commands::get_note_export_html,
+                    knowledge_commands::read_note_preserved_markdown,
+                    learning::commands::prepare_learning_note_jump,
                     knowledge_commands::export_note_map,
                     knowledge_commands::import_note_package,
                     knowledge_commands::search_note_reference_targets,

@@ -5,6 +5,35 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub async fn read_note_preserved_markdown(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    item_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let base = state
+            .with_library_if_id(&library_id, |_, base| Ok(base.to_owned()))?
+            .ok_or("素材库已切换")?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let text = crate::learning::note_nodes::read_preserved(&db, &base, &id, &item_id)?;
+        state
+            .with_library_if_id(&library_id, |_, current| {
+                if current != base {
+                    return Err("素材库位置已变化，请重新打开笔记".into());
+                }
+                Ok(())
+            })?
+            .ok_or("素材库已切换")?;
+        Ok(text)
+    })
+    .await
+    .map_err(|_| "原文读取已中断，请重试".to_owned())?
+}
+
+#[tauri::command]
 pub fn start_note_screenshot() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

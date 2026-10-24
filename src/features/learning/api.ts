@@ -5,6 +5,7 @@ import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,Co
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  prepareNoteJump:(expectedLibraryId:string,reference:import("../../lib/learningNoteNodes").LearningReferenceData,rangeIndex:number)=>invoke<{courseId:string;mediaId:string;positionMs:number;endMs:number}>("prepare_learning_note_jump",{expectedLibraryId,reference,rangeIndex}),
   transcriptionComponents:(expectedLibraryId:string)=>invoke<import("./types").WhisperComponentStatus>("get_learning_transcription_components",{expectedLibraryId}),
   importTranscriptionModel:(expectedLibraryId:string,modelId:string,selectedPath:string)=>invoke<import("./types").WhisperComponentStatus>("import_learning_transcription_model",{expectedLibraryId,modelId,selectedPath}),
   installTranscriptionTools:(expectedLibraryId:string,selectedResourceRoot:string)=>invoke<import("./types").WhisperComponentStatus>("install_learning_transcription_tools",{expectedLibraryId,selectedResourceRoot}),
@@ -22,7 +23,7 @@ export const learningApi={
   upsertSeries:(expectedLibraryId:string,input:SeriesInput)=>invoke<Series>("upsert_learning_series",{expectedLibraryId,input}),
   setSeriesMembers:(expectedLibraryId:string,id:string,expectedRevision:number,courseIds:string[])=>invoke<Series>("set_learning_series_members",{expectedLibraryId,id,expectedRevision,courseIds}),
   deleteSeries:(expectedLibraryId:string,id:string,expectedRevision:number)=>invoke<void>("delete_learning_series",{expectedLibraryId,id,expectedRevision}),
-  startPlayback:(expectedLibraryId:string,courseId:string)=>invoke<PlaybackSnapshot>("start_learning_playback",{expectedLibraryId,courseId}),
+  startPlayback:(expectedLibraryId:string,courseId:string,expectedFingerprint?:string)=>invoke<PlaybackSnapshot>("start_learning_playback",{expectedLibraryId,courseId,...(expectedFingerprint?{expectedFingerprint}:{})}),
   getPlayback:(expectedLibraryId:string,sessionId:string)=>invoke<PlaybackSnapshot>("get_learning_playback",{expectedLibraryId,sessionId}),
   controlPlayback:(expectedLibraryId:string,sessionId:string,action:PlaybackAction)=>invoke<PlaybackSnapshot>("control_learning_playback",{expectedLibraryId,sessionId,action}),
   setViewport:(expectedLibraryId:string,sessionId:string,viewport:NativeViewport)=>invoke<void>("set_learning_viewport",{expectedLibraryId,sessionId,viewport}),
