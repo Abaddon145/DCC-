@@ -34,11 +34,7 @@ pub(crate) fn cached_stage(
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let segment = input
-        .segments
-        .iter()
-        .find(|s| s.input_hash == stage.key)
-        .ok_or("缓存不属于预览阶段")?;
+    let segment = stage_material(input, &stage.key)?;
     let scope = CourseScope {
         start_ms: segment.start_ms,
         end_ms: segment.end_ms,
@@ -82,8 +78,52 @@ pub fn library_identity(base: &Path) -> Result<(String, String), String> {
     Ok((marker.library_id, hash(root.to_string_lossy().as_bytes())))
 }
 pub fn fingerprint(input: &PreparedCourseAnalysis) -> Result<String, String> {
-    let bytes=serde_json::to_vec(&serde_json::json!({"library":input.library_id,"root":input.root_hash,"course":input.preview.course_id,"file":input.source_file_id,"source":input.source_sha256,"subtitle":input.preview.subtitle_id,"subtitleHash":input.subtitle_sha256,"title":input.title,"duration":input.duration_ms,"segments":input.segments,"frames":input.frames,"model":input.preview.model,"template":input.preview.template_id,"templateVersion":input.preview.template_version,"prompt":input.preview.prompt_version,"format":input.format_version})).map_err(|_|"课程材料无法编码")?;
+    let mut material = serde_json::json!({"library":input.library_id,"root":input.root_hash,"course":input.preview.course_id,"file":input.source_file_id,"source":input.source_sha256,"subtitle":input.preview.subtitle_id,"subtitleHash":input.subtitle_sha256,"title":input.title,"duration":input.duration_ms,"segments":input.segments,"frames":input.frames,"model":input.preview.model,"template":input.preview.template_id,"templateVersion":input.preview.template_version,"prompt":input.preview.prompt_version,"format":input.format_version});
+    if let Some(summary) = &input.summary {
+        material["summary"] = serde_json::to_value(summary).map_err(|_| "汇总材料无法编码")?;
+    }
+    let bytes = serde_json::to_vec(&material).map_err(|_| "课程材料无法编码")?;
     Ok(hash(bytes))
+}
+
+/// Original cue/frame identities remain the authority for both stage types.
+pub(crate) fn stage_material(
+    input: &PreparedCourseAnalysis,
+    key: &str,
+) -> Result<CourseSegment, String> {
+    if let Some(summary) = &input.summary {
+        let group = summary
+            .groups
+            .iter()
+            .find(|g| g.key == key)
+            .ok_or("汇总阶段不属于来源快照")?;
+        Ok(CourseSegment {
+            start_ms: group.start_ms,
+            end_ms: group.end_ms,
+            input_hash: key.into(),
+            cues: input
+                .segments
+                .iter()
+                .flat_map(|s| s.cues.iter())
+                .filter(|c| c.start_ms >= group.start_ms && c.end_ms <= group.end_ms)
+                .cloned()
+                .collect(),
+            frames: input
+                .frames
+                .iter()
+                .map(|f| &f.reference)
+                .filter(|f| f.time_ms >= group.start_ms && f.time_ms < group.end_ms)
+                .cloned()
+                .collect(),
+        })
+    } else {
+        input
+            .segments
+            .iter()
+            .find(|s| s.input_hash == key)
+            .cloned()
+            .ok_or_else(|| "阶段不属于历史材料".into())
+    }
 }
 fn validate(input: &PreparedCourseAnalysis) -> Result<(), String> {
     let p = &input.preview;
@@ -108,10 +148,16 @@ fn validate(input: &PreparedCourseAnalysis) -> Result<(), String> {
         || p.model != crate::translation_service::MODEL
         || p.template_id != TEMPLATE_ID
         || p.template_version != TEMPLATE_VERSION
-        || p.prompt_version != PROMPT_VERSION
+        || p.prompt_version
+            != if input.summary.is_some() {
+                super::analysis_summary::PROMPT_VERSION
+            } else {
+                PROMPT_VERSION
+            }
         || p.stages.is_empty()
         || p.stages.len() > 4096
-        || p.stages.len() != input.segments.len()
+        || input.segments.is_empty()
+        || input.segments.len() > 4096
         || input.frames.len() > 4096 * 6
         || p.frame_ids
             != input
@@ -125,19 +171,57 @@ fn validate(input: &PreparedCourseAnalysis) -> Result<(), String> {
     {
         return Err("课程预览范围、版本或身份无效，请重新预览".into());
     }
+    let materials = if let Some(summary) = &input.summary {
+        uuid(&summary.parent_analysis_id)?;
+        if !digest(&summary.parent_fingerprint)
+            || summary.groups.is_empty()
+            || summary.groups.len() > 64
+        {
+            return Err("汇总谱系或分组无效".into());
+        }
+        let groups = super::analysis_summary::plan_summary(
+            &input.title,
+            input.duration_ms,
+            summary.groups[0].layer,
+            summary.previous_requests,
+            summary
+                .groups
+                .iter()
+                .flat_map(|g| g.sources.iter().cloned())
+                .map(Ok),
+        )?;
+        if serde_json::to_vec(&groups).map_err(|_| "汇总无法编码")?
+            != serde_json::to_vec(&summary.groups).map_err(|_| "汇总无法编码")?
+        {
+            return Err("汇总分组或预算与完整材料不一致".into());
+        }
+        groups
+            .into_iter()
+            .map(|g| (g.key, g.start_ms, g.end_ms, g.tokens_max))
+            .collect::<Vec<_>>()
+    } else {
+        input
+            .segments
+            .iter()
+            .map(|s| (s.input_hash.clone(), s.start_ms, s.end_ms, 0))
+            .collect()
+    };
+    if p.stages.len() != materials.len() || input.segments.iter().any(|s| s.frames.len() > 6) {
+        return Err("课程阶段数量或帧范围无效".into());
+    }
     let mut total = 0u64;
     let mut keys = std::collections::HashSet::new();
-    for (stage, segment) in p.stages.iter().zip(&input.segments) {
+    for (stage, (key, start_ms, end_ms, tokens)) in p.stages.iter().zip(&materials) {
         if !digest(&stage.key)
             || !keys.insert(&stage.key)
-            || stage.key != segment.input_hash
-            || stage.start_ms != segment.start_ms
-            || stage.end_ms != segment.end_ms
+            || &stage.key != key
+            || stage.start_ms != *start_ms
+            || stage.end_ms != *end_ms
             || stage.start_ms >= stage.end_ms
             || stage.end_ms > input.duration_ms
             || stage.tokens_max == 0
             || stage.tokens_max > 1000000
-            || segment.frames.len() > 6
+            || (input.summary.is_some() && stage.tokens_max != *tokens)
         {
             return Err("课程阶段预览无效".into());
         }
@@ -321,11 +405,7 @@ pub(crate) fn history(
     };
     if let Some(input) = &snapshot {
         let (cues, frames, start_ms, end_ms) = if let Some(key) = stage {
-            let segment = input
-                .segments
-                .iter()
-                .find(|s| s.input_hash == key)
-                .ok_or("阶段不属于历史材料")?;
+            let segment = stage_material(input, key)?;
             (
                 segment.cues.clone(),
                 segment.frames.clone(),
@@ -369,11 +449,13 @@ pub(crate) fn history(
 /// PreparedCourseAnalysis or a caller-supplied fingerprint as proof of consent.
 pub(crate) fn begin_analysis(
     db: &mut Connection,
+    base: &Path,
     input: &PreparedCourseAnalysis,
     now: i64,
 ) -> Result<String, String> {
     validate(input)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
+    super::analysis_summary::verify_parent_material(&tx, base, input)?;
     let course = super::store::course(&tx, &input.preview.course_id)?;
     let file: String = tx
         .query_row(
@@ -461,6 +543,30 @@ pub(crate) fn finish_analysis(
     if !["completed", "partial", "failed", "cancelled"].contains(&status) {
         return Err("课程分析状态无效".into());
     }
-    if db.execute("UPDATE learning_analyses SET status=?1,error=?2,updated_at=?3 WHERE id=?4 AND course_id=?5 AND source_fingerprint=?6 AND status IN ('queued','running')",params![status,error.chars().take(2000).collect::<String>(),chrono::Utc::now().timestamp(),id,input.preview.course_id,input.preview.fingerprint]).map_err(|e|e.to_string())?!=1 {return Err("课程分析记录已失效".into());}
-    Ok(())
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut final_result = None;
+    if status == "completed" {
+        let (total,completed):(usize,usize)=tx.query_row("SELECT count(*),COALESCE(sum(status='completed'),0) FROM learning_analysis_stages WHERE analysis_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        if total != input.preview.stages.len() || completed != total {
+            return Err("仍有未完成阶段，未发布完整结果".into());
+        }
+        if input.summary.as_ref().is_some_and(|s| s.groups.len() == 1) {
+            let key = &input.preview.stages[0].key;
+            let raw:Option<String>=tx.query_row("SELECT CASE WHEN length(CAST(result_json AS BLOB))<=1048576 THEN result_json END FROM learning_analysis_stages WHERE analysis_id=?1 AND stage_key=?2",params![id,key],|r|r.get(0)).map_err(|_|"最终汇总阶段缺失")?;
+            let raw = raw.ok_or("最终汇总结果缺失或超限")?;
+            let material = stage_material(input, key)?;
+            super::analysis_result::read_saved_result(
+                &raw,
+                &CourseScope {
+                    start_ms: material.start_ms,
+                    end_ms: material.end_ms,
+                    cues: &material.cues,
+                    frames: &material.frames,
+                },
+            )?;
+            final_result = Some(raw);
+        }
+    }
+    if tx.execute("UPDATE learning_analyses SET status=?1,error=?2,updated_at=?3,result_json=?7 WHERE id=?4 AND course_id=?5 AND source_fingerprint=?6 AND status IN ('queued','running')",params![status,error.chars().take(2000).collect::<String>(),chrono::Utc::now().timestamp(),id,input.preview.course_id,input.preview.fingerprint,final_result]).map_err(|e|e.to_string())?!=1 {return Err("课程分析记录已失效".into());}
+    tx.commit().map_err(|e| e.to_string())
 }

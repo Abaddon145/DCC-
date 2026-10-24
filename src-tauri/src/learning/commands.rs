@@ -3,6 +3,25 @@ use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
 #[tauri::command]
+pub async fn prepare_course_summary(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+    parent_analysis_id: String,
+) -> Result<super::analysis_models::CourseAnalysisPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        super::analysis::prepare_summary(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &course_id,
+            &parent_analysis_id,
+        )
+    })
+    .await
+    .map_err(|_| "课程汇总预览准备中断，请重试".to_string())?
+}
+#[tauri::command]
 pub async fn get_course_analysis(
     app: tauri::AppHandle,
     expected_library_id: String,

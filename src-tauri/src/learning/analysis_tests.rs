@@ -7,7 +7,7 @@ fn learning_analysis_history_remains_readable_without_reusing_expired_consent() 
     let video = dir.path().join("fixture.mp4");
     std::fs::write(&video, b"registered managed video synthetic bytes").unwrap();
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
-    let id = super::analysis_store::begin_analysis(&mut db, &input, 1001).unwrap();
+    let id = super::analysis_store::begin_analysis(&mut db, dir.path(), &input, 1001).unwrap();
     let (raw, _) = fixture();
     let segment = &input.segments[0];
     let scope = CourseScope {
@@ -203,7 +203,7 @@ fn learning_analysis_v25_migration_and_competing_confirmation_keep_identity() {
             let mut worker =
                 crate::tasks::open_media_worker_connection(&dir.path().join("library.db")).unwrap();
             barrier.wait();
-            super::analysis_store::begin_analysis(&mut worker, &input, 1001)
+            super::analysis_store::begin_analysis(&mut worker, dir.path(), &input, 1001)
         };
         let a = scope.spawn(run);
         let b = scope.spawn(run);
@@ -283,9 +283,13 @@ fn learning_analysis_prepare_real_frames_are_stable_and_failed_decode_publishes_
         .all(|f| f.data_url.starts_with("data:image/jpeg;base64,") && f.data_url.len() <= 350000));
     let mut worker =
         crate::tasks::open_media_worker_connection(&dir.path().join("library.db")).unwrap();
-    let analysis_id =
-        super::analysis_store::begin_analysis(&mut worker, &loaded, chrono::Utc::now().timestamp())
-            .unwrap();
+    let analysis_id = super::analysis_store::begin_analysis(
+        &mut worker,
+        dir.path(),
+        &loaded,
+        chrono::Utc::now().timestamp(),
+    )
+    .unwrap();
     let fresh = super::analysis::get(
         &state,
         &library,
@@ -639,6 +643,7 @@ pub(super) fn stored_fixture() -> (
         segments,
         frames: vec![],
         format_version: 1,
+        summary: None,
     };
     input.preview.fingerprint = super::analysis_store::fingerprint(&input).unwrap();
     (dir, db, input)
@@ -648,7 +653,7 @@ pub(super) fn stored_fixture() -> (
 fn learning_analysis_stage_rejects_oversized_encoded_results_without_partial_update() {
     let (dir, mut db, input) = stored_fixture();
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
-    let id = super::analysis_store::begin_analysis(&mut db, &input, 1001).unwrap();
+    let id = super::analysis_store::begin_analysis(&mut db, dir.path(), &input, 1001).unwrap();
     let (raw, _) = fixture();
     let segment = &input.segments[0];
     let mut result = parse_course_result(
@@ -721,12 +726,12 @@ fn learning_analysis_preview_storage_is_scoped_expiring_and_single_use() {
     changed.preview.tokens_max = 1;
     changed.preview.stages[0].tokens_max = 1;
     assert!(
-        super::analysis_store::begin_analysis(&mut db, &changed, 1001).is_err(),
+        super::analysis_store::begin_analysis(&mut db, dir.path(), &changed, 1001).is_err(),
         "a matching material fingerprint alone cannot authorize a modified cost preview"
     );
-    let id = super::analysis_store::begin_analysis(&mut db, &loaded, 1001)
+    let id = super::analysis_store::begin_analysis(&mut db, dir.path(), &loaded, 1001)
         .expect("one confirmed execution");
-    assert!(super::analysis_store::begin_analysis(&mut db, &loaded, 1002).is_err());
+    assert!(super::analysis_store::begin_analysis(&mut db, dir.path(), &loaded, 1002).is_err());
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM learning_analyses WHERE id=?1",
@@ -903,7 +908,7 @@ fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_fai
 fn learning_analysis_cache_preserves_local_diagnostics_and_binds_full_material_identity() {
     let (dir, mut db, input) = stored_fixture();
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
-    let id = super::analysis_store::begin_analysis(&mut db, &input, 1001).unwrap();
+    let id = super::analysis_store::begin_analysis(&mut db, dir.path(), &input, 1001).unwrap();
     let (raw, _) = fixture();
     let segment = &input.segments[0];
     let scope = CourseScope {
@@ -940,7 +945,7 @@ fn learning_analysis_cache_preserves_local_diagnostics_and_binds_full_material_i
     cached.preview.stages[0].cached = true;
     cached.preview.tokens_max = 0;
     super::analysis_store::save_preview(&db, dir.path(), &cached).unwrap();
-    let next = super::analysis_store::begin_analysis(&mut db, &cached, 1002)
+    let next = super::analysis_store::begin_analysis(&mut db, dir.path(), &cached, 1002)
         .expect("cached stages consume no new request budget");
     assert_eq!(
         db.query_row(

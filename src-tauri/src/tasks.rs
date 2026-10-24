@@ -71,7 +71,13 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
-            Self::CourseAnalysis(_) => "课程分段分析",
+            Self::CourseAnalysis(r) => {
+                if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
+                    "课程汇总分析"
+                } else {
+                    "课程分段分析"
+                }
+            }
             Self::AIAnalyze(_) => "资产 AI 分析",
             Self::Download(_) => "下载",
             Self::AssetMediaImport { .. } => "素材预览附件导入",
@@ -102,9 +108,6 @@ impl TaskRequest {
             Self::CourseAnalysis(r) => {
                 Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
                 Uuid::parse_str(&r.preview_id).map_err(|_| "课程预览标识无效")?;
-                if r.stage != crate::learning::analysis_models::CourseAnalysisPhase::Segments {
-                    return Err("汇总需要单独预览批准，当前仅可提交分段分析".into());
-                }
                 Ok(())
             }
             Self::AIAnalyze(r) => {

@@ -6,6 +6,124 @@ use std::collections::HashSet;
 
 pub const PROMPT_VERSION: &str = "dcc-course-summary-v1";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SummaryContext {
+    pub parent_analysis_id: String,
+    pub parent_fingerprint: String,
+    pub previous_requests: usize,
+    pub groups: Vec<SummaryGroup>,
+}
+
+/// Local draft only. A command must recheck live originals and register this
+/// snapshot before it becomes an approvable preview.
+pub(crate) fn draft_summary(
+    db: &rusqlite::Connection,
+    base: &std::path::Path,
+    library: &str,
+    course: &str,
+    parent: &str,
+    now: i64,
+) -> Result<super::analysis_models::PreparedCourseAnalysis, String> {
+    draft_with_depth(db, base, library, course, parent, now, 8)
+}
+
+fn draft_with_depth(
+    db: &rusqlite::Connection,
+    base: &std::path::Path,
+    library: &str,
+    course: &str,
+    parent: &str,
+    now: i64,
+    remaining: u8,
+) -> Result<super::analysis_models::PreparedCourseAnalysis, String> {
+    use super::{analysis_models::CourseStagePreview, analysis_store as store};
+    let (mut input, groups) = plan_saved_with_depth(db, base, library, course, parent, remaining)?;
+    let previous_requests = input
+        .summary
+        .as_ref()
+        .map_or(0, |s| s.previous_requests + s.groups.len());
+    input.summary = Some(SummaryContext {
+        parent_analysis_id: parent.into(),
+        parent_fingerprint: input.preview.fingerprint.clone(),
+        previous_requests,
+        groups,
+    });
+    input.preview.preview_id = uuid::Uuid::new_v4().to_string();
+    input.preview.created_at = now;
+    input.preview.expires_at = now.checked_add(86400).ok_or("汇总预览时间无效")?;
+    input.preview.prompt_version = PROMPT_VERSION.into();
+    input.preview.stages = input
+        .summary
+        .as_ref()
+        .ok_or("汇总资料缺失")?
+        .groups
+        .iter()
+        .map(|g| CourseStagePreview {
+            key: g.key.clone(),
+            start_ms: g.start_ms,
+            end_ms: g.end_ms,
+            cached: false,
+            tokens_max: g.tokens_max,
+        })
+        .collect();
+    input.preview.fingerprint = store::fingerprint(&input)?;
+    let cached = input
+        .preview
+        .stages
+        .iter()
+        .map(|stage| store::cached_stage(db, &input, stage).map(|r| r.is_some()))
+        .collect::<Result<Vec<_>, _>>()?;
+    input.preview.tokens_max = 0;
+    for (stage, cached) in input.preview.stages.iter_mut().zip(cached) {
+        stage.cached = cached;
+        if !cached {
+            input.preview.tokens_max = input
+                .preview
+                .tokens_max
+                .checked_add(stage.tokens_max)
+                .ok_or("汇总预算超限")?;
+        }
+    }
+    input.preview.warnings =
+        vec!["仅汇总本层已完成结果；后续层须用实际结果重新预览确认，不会自动付费合并".into()];
+    Ok(input)
+}
+
+pub(crate) fn verify_parent_material(
+    db: &rusqlite::Connection,
+    base: &std::path::Path,
+    input: &super::analysis_models::PreparedCourseAnalysis,
+) -> Result<(), String> {
+    verify_parent_with_depth(db, base, input, 8)
+}
+
+fn verify_parent_with_depth(
+    db: &rusqlite::Connection,
+    base: &std::path::Path,
+    input: &super::analysis_models::PreparedCourseAnalysis,
+    remaining: u8,
+) -> Result<(), String> {
+    if let Some(summary) = &input.summary {
+        if remaining == 0 {
+            return Err("汇总谱系超过8层或存在循环".into());
+        }
+        let expected = draft_with_depth(
+            db,
+            base,
+            &input.library_id,
+            &input.preview.course_id,
+            &summary.parent_analysis_id,
+            input.preview.created_at,
+            remaining - 1,
+        )?;
+        if expected.preview.fingerprint != input.preview.fingerprint {
+            return Err("汇总父结果或谱系已改变，请重新预览".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn plan_saved_segments(
     db: &rusqlite::Connection,
     base: &std::path::Path,
@@ -19,17 +137,45 @@ pub fn plan_saved_segments(
     ),
     String,
 > {
+    plan_saved_with_depth(db, base, library, course, analysis, 8)
+}
+
+fn plan_saved_with_depth(
+    db: &rusqlite::Connection,
+    base: &std::path::Path,
+    library: &str,
+    course: &str,
+    analysis: &str,
+    remaining: u8,
+) -> Result<
+    (
+        super::analysis_models::PreparedCourseAnalysis,
+        Vec<SummaryGroup>,
+    ),
+    String,
+> {
     let (detail, snapshot) =
         super::analysis_store::history(db, base, library, course, analysis, None, 0, 1)?;
     if detail.status != "completed" || !detail.stale_reasons.is_empty() {
         return Err("先完成并核对全部分段结果，再预览汇总".into());
     }
     let snapshot = snapshot.ok_or("汇总缺少可核验的来源快照")?;
+    verify_parent_with_depth(db, base, &snapshot, remaining)?;
+    let (layer, previous_requests) = match &snapshot.summary {
+        Some(s) => {
+            if s.groups.len() == 1 {
+                return Err("全课汇总已完成，无需再次付费合并".into());
+            }
+            (s.groups[0].layer + 1, s.previous_requests + s.groups.len())
+        }
+        None => (1, 0),
+    };
     let groups = {
         let index = snapshot
-            .segments
+            .preview
+            .stages
             .iter()
-            .map(|s| (s.input_hash.as_str(), s))
+            .map(|s| (s.key.as_str(), s))
             .collect::<std::collections::HashMap<_, _>>();
         let mut seen = HashSet::new();
         let mut statement=db.prepare("SELECT substr(stage_key,1,65),start_ms,end_ms,substr(input_hash,1,65),substr(status,1,32),CASE WHEN length(CAST(result_json AS BLOB))<=1048576 THEN result_json END FROM learning_analysis_stages WHERE analysis_id=?1 ORDER BY start_ms,stage_key").map_err(|e|e.to_string())?;
@@ -47,18 +193,19 @@ pub fn plan_saved_segments(
             .map_err(|e| e.to_string())?;
         let sources = rows.map(|row| {
             let (key, start_ms, end_ms, hash, status, raw) = row.map_err(|e| e.to_string())?;
-            let segment = index
+            let stage = index
                 .get(key.as_str())
                 .ok_or("结果阶段不属于课程来源快照")?;
             if hash != key
                 || status != "completed"
-                || start_ms != segment.start_ms
-                || end_ms != segment.end_ms
+                || start_ms != stage.start_ms
+                || end_ms != stage.end_ms
                 || !seen.insert(key.clone())
             {
                 return Err("汇总阶段状态或范围已改变".into());
             }
             let raw = raw.ok_or("完整分段结果缺失或超过1MiB，未略过处理")?;
+            let segment = super::analysis_store::stage_material(&snapshot, &key)?;
             let result = super::analysis_result::read_saved_result(
                 &raw,
                 &super::analysis_models::CourseScope {
@@ -75,7 +222,13 @@ pub fn plan_saved_segments(
                 result,
             })
         });
-        let groups = plan_summary(&snapshot.title, snapshot.duration_ms, 1, 0, sources)?;
+        let groups = plan_summary(
+            &snapshot.title,
+            snapshot.duration_ms,
+            layer,
+            previous_requests,
+            sources,
+        )?;
         if seen.len() != index.len() {
             return Err("存在缺失分段结果，未生成部分汇总计划".into());
         }

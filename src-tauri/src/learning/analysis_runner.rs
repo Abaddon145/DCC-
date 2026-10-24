@@ -48,9 +48,6 @@ where
     F: FnMut(Value, usize, Arc<AtomicBool>) -> Fut,
     Fut: std::future::Future<Output = Result<CreativeReply, String>>,
 {
-    if request.stage != CourseAnalysisPhase::Segments {
-        return Err("汇总需要单独预览批准，不能使用分段批准".into());
-    }
     let (_lease, cancel) = crate::ai::acquire_request(&task.id)?;
     let stopped = || {
         cancel.load(Ordering::SeqCst)
@@ -68,6 +65,9 @@ where
         &request.preview_id,
         &stop,
     )?;
+    if input.summary.is_some() != (request.stage == CourseAnalysisPhase::Summary) {
+        return Err("分析类型与已确认预览不一致，未使用此次批准".into());
+    }
     let limit = state.translation_preferences()?.deepseek_monthly_limit;
     if input.preview.tokens_max > 0
         && state
@@ -88,22 +88,27 @@ where
     if stop() {
         return Err("课程分析已停止，未开始分析".into());
     }
-    let id = store::begin_analysis(&mut worker, &input, chrono::Utc::now().timestamp())?;
+    let id = store::begin_analysis(&mut worker, &base, &input, chrono::Utc::now().timestamp())?;
     drop(worker);
     drop(live);
     let total = input.preview.stages.len();
     let mut completed = input.preview.stages.iter().filter(|s| s.cached).count();
-    let report = |completed: usize| json!({"analysisId":id,"courseId":input.preview.course_id,"completedStages":completed,"totalStages":total,"stage":"segments"});
+    let phase = if input.summary.is_some() {
+        "汇总分析"
+    } else {
+        "分段分析"
+    };
+    let report = |completed: usize| json!({"analysisId":id,"courseId":input.preview.course_id,"completedStages":completed,"totalStages":total,"stage":request.stage});
     state.tasks.update(
         &task.id,
         completed,
         total,
         String::new(),
-        "分段分析".into(),
+        phase.into(),
         Some(report(completed)),
     );
     let outcome = async {
-        for (stage, segment) in input.preview.stages.iter().zip(&input.segments) {
+        for stage in &input.preview.stages {
             if stop() {
                 return Err("课程分析已停止；已发送请求可能产生用量".into());
             }
@@ -111,10 +116,24 @@ where
                 continue;
             }
             let live = analysis::check_sources_controlled(state, &task.library_id, &input, &stop)?;
-            let body = analysis::request_body(&input, segment)?;
-            if crate::translation_service::course_budget(&body, segment.frames.len())?
-                != stage.tokens_max
-            {
+            let segment = store::stage_material(&input, &stage.key)?;
+            let (body, images) = if let Some(summary) = &input.summary {
+                let group = summary
+                    .groups
+                    .iter()
+                    .find(|g| g.key == stage.key)
+                    .ok_or("汇总阶段缺失")?;
+                (
+                    super::analysis_summary::request_body(&input.title, group)?,
+                    0,
+                )
+            } else {
+                (
+                    analysis::request_body(&input, &segment)?,
+                    segment.frames.len(),
+                )
+            };
+            if crate::translation_service::course_budget(&body, images)? != stage.tokens_max {
                 return Err("课程请求预算与批准不一致，请重新预览".into());
             }
             drop(live);
@@ -128,7 +147,7 @@ where
                 }
             };
             let reply = tokio::select! {
-                reply=exchange(body,segment.frames.len(),cancel.clone()) => reply,
+                reply=exchange(body,images,cancel.clone()) => reply,
                 _=watcher => Err("课程分析已停止；已发送请求的预留仍保留".into()),
             };
             let (answer, used) = match reply {
@@ -173,7 +192,7 @@ where
                 completed,
                 total,
                 String::new(),
-                "分段分析".into(),
+                phase.into(),
                 None,
             );
         }

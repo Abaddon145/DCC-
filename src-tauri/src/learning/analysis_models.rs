@@ -181,6 +181,9 @@ pub struct PreparedCourseAnalysis {
     pub segments: Vec<CourseSegment>,
     pub frames: Vec<CourseFrameImage>,
     pub format_version: i64,
+    // Omitted, not null: existing segment snapshot bytes/hashes stay compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<super::analysis_summary::SummaryContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]

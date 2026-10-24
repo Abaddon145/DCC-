@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 // These tests exercise the real app-wide single-request AI lane.
 static RUNNER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn sources() -> (tempfile::TempDir, AppState, CourseAnalysisPreview) {
+pub(super) fn sources() -> (tempfile::TempDir, AppState, CourseAnalysisPreview) {
     let (dir, db, old) = super::analysis_tests::stored_fixture();
     std::fs::write(
         dir.path().join("fixture.mp4"),
@@ -95,6 +95,8 @@ fn server_controlled(
             }
             let raw = if bad_index == Some(index) {
                 "{\"unexpected\":true}".into()
+            } else if source.get("sources").is_some() {
+                source["sources"][0]["result"].to_string()
             } else {
                 json!({"contentType":"tutorial","oneSentenceSummary":"课程摘要","overview":"保留真实来源的学习结果","chapters":[],"keyPoints":[{"timeMs":start,"title":"重点","content":"已校验的重点","importance":3,"sourceSegmentIds":[source["cues"][0]["id"]]}],"tutorialSteps":[],"terms":[],"actionItems":[],"tags":[],"sections":[],"warnings":[]}).to_string()
             };
@@ -107,17 +109,77 @@ fn server_controlled(
     (url, handle)
 }
 
+fn complete_segments(
+    dir: &std::path::Path,
+    state: &AppState,
+    first: &CourseAnalysisPreview,
+    chars: usize,
+) -> String {
+    let library = state.active_library_id().unwrap();
+    let root =
+        super::analysis::load_confirmed(&state, &library, &first.course_id, &first.preview_id)
+            .unwrap();
+    let mut db = crate::tasks::open_media_worker_connection(&dir.join("library.db")).unwrap();
+    let parent =
+        super::analysis_store::begin_analysis(&mut db, dir, &root, chrono::Utc::now().timestamp())
+            .unwrap();
+    let result: CourseAnalysisResult=serde_json::from_value(json!({"contentType":"tutorial","oneSentenceSummary":"课程摘要","overview":"字".repeat(chars),"chapters":[],"keyPoints":[],"tutorialSteps":[],"terms":[],"actionItems":["练习"],"tags":[],"sections":[],"warnings":[]})).unwrap();
+    for stage in &root.preview.stages {
+        super::analysis_store::record_stage(
+            &mut db,
+            &root,
+            &parent,
+            &stage.key,
+            Ok(&result),
+            Some(101),
+        )
+        .unwrap();
+    }
+    super::analysis_store::finish_analysis(&db, &root, &parent, "completed", "").unwrap();
+    parent
+}
+
 #[test]
-fn learning_analysis_runner_cancellation_and_source_change_do_not_commit_a_response() {
+fn learning_analysis_runner_summary_uses_its_own_consent_and_retries_only_missing_groups() {
     let _serial = RUNNER_TEST_LOCK.lock().unwrap();
-    for case in ["cancel", "source", "library"] {
-        let (dir, state, preview) = sources();
-        let state = std::sync::Arc::new(state);
-        let library = state.active_library_id().unwrap();
+    let (dir, state, first) = sources();
+    let library = state.active_library_id().unwrap();
+    let parent = complete_segments(dir.path(), &state, &first, 10000);
+    let db = crate::tasks::open_media_worker_connection(&dir.path().join("library.db")).unwrap();
+    let p = super::analysis::prepare_summary(&state, &library, &first.course_id, &parent).unwrap();
+    assert_eq!(p.stages.len(), 2);
+    let wrong = CourseAnalysisRequest {
+        course_id: p.course_id.clone(),
+        preview_id: p.preview_id.clone(),
+        stage: CourseAnalysisPhase::Segments,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::CourseAnalysis(wrong.clone()))
+        .unwrap();
+    assert!(
+        tauri::async_runtime::block_on(run_segments(&state, &task, &wrong, |_, _, _| async {
+            panic!("wrong phase cannot send a request")
+        }))
+        .is_err()
+    );
+    state.tasks.cancel(&task.id).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT consumed_at FROM learning_analysis_previews WHERE id=?1",
+            [&p.preview_id],
+            |r| r.get::<_, Option<i64>>(0)
+        )
+        .unwrap(),
+        None,
+        "wrong phase must not consume summary consent"
+    );
+    let (url, server) = server(4, Some(1));
+    let execute = |preview: &CourseAnalysisPreview| {
         let request = CourseAnalysisRequest {
             course_id: preview.course_id.clone(),
             preview_id: preview.preview_id.clone(),
-            stage: CourseAnalysisPhase::Segments,
+            stage: CourseAnalysisPhase::Summary,
         };
         let (task, _) = state
             .tasks
@@ -125,33 +187,13 @@ fn learning_analysis_runner_cancellation_and_source_change_do_not_commit_a_respo
                 library.clone(),
                 TaskRequest::CourseAnalysis(request.clone()),
             )
-            .unwrap();
-        let target = state.clone();
-        let task_id = task.id.clone();
-        let video = dir.path().join("fixture.mp4");
-        let (url, server) = server_controlled(
-            1,
-            None,
-            Some(Box::new(move |_| match case {
-                "cancel" => {
-                    target.tasks.cancel(&task_id).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-                "source" => std::fs::write(&video, b"changed original").unwrap(),
-                "library" => target
-                    .with_active_mut(|active| {
-                        active.marker.library_id = uuid::Uuid::new_v4().to_string();
-                        Ok(())
-                    })
-                    .unwrap(),
-                _ => unreachable!(),
-            })),
-        );
+            .expect("summary enters the same task registry");
         let result = tauri::async_runtime::block_on(run_segments(
             &state,
             &task,
             &request,
             |body, images, cancel| {
+                assert_eq!(images, 0, "summary must not re-upload frame JPEGs");
                 let service = &state.translation_service;
                 let url = &url;
                 async move {
@@ -162,93 +204,257 @@ fn learning_analysis_runner_cancellation_and_source_change_do_not_commit_a_respo
                 }
             },
         ));
-        assert!(result.is_err(), "{case} must reject response");
-        assert_eq!(server.join().unwrap(), vec![0]);
-        let db =
-            crate::tasks::open_media_worker_connection(&dir.path().join("library.db")).unwrap();
-        assert_eq!(
+        state.tasks.cancel(&task.id).unwrap();
+        result
+    };
+    assert!(execute(&p).is_err());
+    assert_eq!(
+        state.translation_service.usage().unwrap().course_tokens,
+        202
+    );
+    let retry = super::analysis::prepare_summary(&state, &library, &p.course_id, &parent).unwrap();
+    assert_eq!(
+        retry.stages.iter().map(|s| s.cached).collect::<Vec<_>>(),
+        vec![true, false]
+    );
+    let completed = execute(&retry).expect("new summary approval pays only for missing group");
+    assert_eq!(completed["stage"], "summary");
+    let next = super::analysis::prepare_summary(
+        &state,
+        &library,
+        &p.course_id,
+        completed["analysisId"].as_str().unwrap(),
+    )
+    .unwrap();
+    let final_report = execute(&next).unwrap();
+    let detail = super::analysis::get(
+        &state,
+        &library,
+        &p.course_id,
+        final_report["analysisId"].as_str().unwrap(),
+        None,
+        0,
+        1,
+    )
+    .unwrap();
+    assert!(
+        detail.result.is_some(),
+        "one terminal group is published as the full summary result"
+    );
+    assert_eq!(detail.status, "completed");
+    assert!(detail.stale_reasons.is_empty());
+    assert_eq!(server.join().unwrap(), vec![0, 900000, 900000, 0]);
+    assert_eq!(
+        state.translation_service.usage().unwrap().course_tokens,
+        404
+    );
+    assert!(
+        execute(&next).is_err(),
+        "old approval cannot issue another request"
+    );
+    let cached = super::analysis::prepare_summary(
+        &state,
+        &library,
+        &p.course_id,
+        completed["analysisId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cached.tokens_max, 0);
+    execute(&cached).expect("terminal cached result works with fixture server closed");
+    assert_eq!(
+        state.translation_service.usage().unwrap().course_tokens,
+        404
+    );
+}
+
+#[test]
+fn learning_analysis_runner_cancellation_and_source_change_do_not_commit_a_response() {
+    let _serial = RUNNER_TEST_LOCK.lock().unwrap();
+    for summary in [false, true] {
+        for case in ["cancel", "source", "library", "ancestor"] {
+            if !summary && case == "ancestor" {
+                continue;
+            }
+            let (dir, state, mut preview) = sources();
+            let parent = if summary {
+                let id = complete_segments(dir.path(), &state, &preview, 10);
+                preview = super::analysis::prepare_summary(
+                    &state,
+                    &state.active_library_id().unwrap(),
+                    &preview.course_id,
+                    &id,
+                )
+                .unwrap();
+                id
+            } else {
+                String::new()
+            };
+            let state = std::sync::Arc::new(state);
+            let library = state.active_library_id().unwrap();
+            let request = CourseAnalysisRequest {
+                course_id: preview.course_id.clone(),
+                preview_id: preview.preview_id.clone(),
+                stage: if summary {
+                    CourseAnalysisPhase::Summary
+                } else {
+                    CourseAnalysisPhase::Segments
+                },
+            };
+            let (task, _) = state
+                .tasks
+                .submit(
+                    library.clone(),
+                    TaskRequest::CourseAnalysis(request.clone()),
+                )
+                .unwrap();
+            let target = state.clone();
+            let task_id = task.id.clone();
+            let video = dir.path().join("fixture.mp4");
+            let database = dir.path().join("library.db");
+            let (url, server) = server_controlled(
+                1,
+                None,
+                Some(Box::new(move |_| match case {
+                    "cancel" => {
+                        target.tasks.cancel(&task_id).unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    "source" => std::fs::write(&video, b"changed original").unwrap(),
+                    "ancestor" => {
+                        let db = crate::tasks::open_media_worker_connection(&database).unwrap();
+                        db.execute("UPDATE learning_analysis_stages SET result_json='broken' WHERE analysis_id=?1",[&parent]).unwrap();
+                    }
+                    "library" => target
+                        .with_active_mut(|active| {
+                            active.marker.library_id = uuid::Uuid::new_v4().to_string();
+                            Ok(())
+                        })
+                        .unwrap(),
+                    _ => unreachable!(),
+                })),
+            );
+            let result = tauri::async_runtime::block_on(run_segments(
+                &state,
+                &task,
+                &request,
+                |body, images, cancel| {
+                    let service = &state.translation_service;
+                    let url = &url;
+                    async move {
+                        crate::translation_service::course_fixture_exchange(
+                            service, &body, 1000000, &cancel, images, url,
+                        )
+                        .await
+                    }
+                },
+            ));
+            assert!(result.is_err(), "{case} must reject response");
+            assert_eq!(server.join().unwrap(), vec![0]);
+            let db =
+                crate::tasks::open_media_worker_connection(&dir.path().join("library.db")).unwrap();
+            assert_eq!(
             db.query_row(
-                "SELECT count(*) FROM learning_analysis_stages WHERE status='completed'",
-                [],
+                "SELECT count(*) FROM learning_analysis_stages s JOIN learning_analyses a ON a.id=s.analysis_id WHERE s.status='completed' AND a.preview_id=?1",
+                [&preview.preview_id],
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
             0,
             "{case}: no invalid response committed"
         );
-        let status: String = db
-            .query_row("SELECT status FROM learning_analyses", [], |r| r.get(0))
-            .unwrap();
-        if case == "cancel" {
-            assert_eq!(status, "cancelled");
-        }
-        if case == "source" {
-            assert_eq!(status, "failed");
-            assert_eq!(
-                state.translation_service.usage().unwrap().course_tokens,
-                101,
-                "known use survives rejected source changes"
+            let status: String = db
+                .query_row(
+                    "SELECT status FROM learning_analyses WHERE preview_id=?1",
+                    [&preview.preview_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if case == "cancel" {
+                assert_eq!(status, "cancelled");
+            }
+            if ["source", "ancestor"].contains(&case) {
+                assert_eq!(status, "failed");
+                assert_eq!(
+                    state.translation_service.usage().unwrap().course_tokens,
+                    101,
+                    "known use survives rejected source changes"
+                );
+            }
+            assert!(
+                state.translation_service.usage().unwrap().course_tokens > 0,
+                "possibly billed request is not free"
             );
         }
-        assert!(
-            state.translation_service.usage().unwrap().course_tokens > 0,
-            "possibly billed request is not free"
-        );
     }
 }
 
 #[test]
 fn learning_analysis_runner_quota_or_precancel_preserves_unused_approval() {
     let _serial = RUNNER_TEST_LOCK.lock().unwrap();
-    for precancel in [false, true] {
-        let (_dir, state, preview) = sources();
-        let library = state.active_library_id().unwrap();
-        let request = CourseAnalysisRequest {
-            course_id: preview.course_id.clone(),
-            preview_id: preview.preview_id.clone(),
-            stage: CourseAnalysisPhase::Segments,
-        };
-        let (task, _) = state
-            .tasks
-            .submit(
-                library.clone(),
-                TaskRequest::CourseAnalysis(request.clone()),
-            )
-            .unwrap();
-        if precancel {
-            state.tasks.cancel(&task.id).unwrap();
-        } else {
-            let mut preferences = state.translation_preferences().unwrap();
-            preferences.deepseek_monthly_limit = 1;
-            state.save_translation_preferences(preferences).unwrap();
-        }
-        let result = tauri::async_runtime::block_on(run_segments(
-            &state,
-            &task,
-            &request,
-            |_, _, _| async { panic!("quota/precancel must not reach transport") },
-        ));
-        assert!(result.is_err());
-        state
-            .with_library(|db, _| {
-                assert!(db
-                    .query_row(
-                        "SELECT consumed_at FROM learning_analysis_previews WHERE id=?1",
-                        [&preview.preview_id],
-                        |r| r.get::<_, Option<i64>>(0)
-                    )
-                    .unwrap()
-                    .is_none());
-                assert_eq!(
-                    db.query_row("SELECT count(*) FROM learning_analyses", [], |r| r
-                        .get::<_, i64>(0))
+    for summary in [false, true] {
+        for precancel in [false, true] {
+            let (dir, state, mut preview) = sources();
+            let library = state.active_library_id().unwrap();
+            if summary {
+                let parent = complete_segments(dir.path(), &state, &preview, 10);
+                preview =
+                    super::analysis::prepare_summary(&state, &library, &preview.course_id, &parent)
+                        .unwrap();
+            }
+            let request = CourseAnalysisRequest {
+                course_id: preview.course_id.clone(),
+                preview_id: preview.preview_id.clone(),
+                stage: if summary {
+                    CourseAnalysisPhase::Summary
+                } else {
+                    CourseAnalysisPhase::Segments
+                },
+            };
+            let (task, _) = state
+                .tasks
+                .submit(
+                    library.clone(),
+                    TaskRequest::CourseAnalysis(request.clone()),
+                )
+                .unwrap();
+            if precancel {
+                state.tasks.cancel(&task.id).unwrap();
+            } else {
+                let mut preferences = state.translation_preferences().unwrap();
+                preferences.deepseek_monthly_limit = 1;
+                state.save_translation_preferences(preferences).unwrap();
+            }
+            let result = tauri::async_runtime::block_on(run_segments(
+                &state,
+                &task,
+                &request,
+                |_, _, _| async { panic!("quota/precancel must not reach transport") },
+            ));
+            assert!(result.is_err());
+            state
+                .with_library(|db, _| {
+                    assert!(db
+                        .query_row(
+                            "SELECT consumed_at FROM learning_analysis_previews WHERE id=?1",
+                            [&preview.preview_id],
+                            |r| r.get::<_, Option<i64>>(0)
+                        )
+                        .unwrap()
+                        .is_none());
+                    assert_eq!(
+                        db.query_row(
+                            "SELECT count(*) FROM learning_analyses WHERE preview_id=?1",
+                            [&preview.preview_id],
+                            |r| r.get::<_, i64>(0)
+                        )
                         .unwrap(),
-                    0
-                );
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(state.translation_service.usage().unwrap().course_tokens, 0);
+                        0
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(state.translation_service.usage().unwrap().course_tokens, 0);
+        }
     }
 }
 
