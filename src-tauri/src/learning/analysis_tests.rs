@@ -577,7 +577,7 @@ fn learning_analysis_segments_bound_frames_and_reject_invalid_or_excessive_sourc
     );
 }
 
-fn stored_fixture() -> (
+pub(super) fn stored_fixture() -> (
     tempfile::TempDir,
     rusqlite::Connection,
     PreparedCourseAnalysis,
@@ -642,6 +642,47 @@ fn stored_fixture() -> (
     };
     input.preview.fingerprint = super::analysis_store::fingerprint(&input).unwrap();
     (dir, db, input)
+}
+
+#[test]
+fn learning_analysis_stage_rejects_oversized_encoded_results_without_partial_update() {
+    let (dir, mut db, input) = stored_fixture();
+    super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
+    let id = super::analysis_store::begin_analysis(&mut db, &input, 1001).unwrap();
+    let (raw, _) = fixture();
+    let segment = &input.segments[0];
+    let mut result = parse_course_result(
+        &raw.to_string(),
+        &CourseScope {
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            cues: &segment.cues,
+            frames: &segment.frames,
+        },
+    )
+    .unwrap();
+    result.overview = "x".repeat(1048576);
+    assert!(
+        super::analysis_store::record_stage(
+            &mut db,
+            &input,
+            &id,
+            &segment.input_hash,
+            Ok(&result),
+            Some(101)
+        )
+        .is_err(),
+        "encoded result must remain inside the cache read limit"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT status FROM learning_analysis_stages WHERE analysis_id=?1",
+            [&id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "pending"
+    );
 }
 
 #[test]

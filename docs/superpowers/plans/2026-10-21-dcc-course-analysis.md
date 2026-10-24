@@ -69,9 +69,11 @@
 
 **Files:** tasks.rs、learning/analysis.rs、analysis_store.rs。
 
+分段检查点已实现并验证：真实TaskRegistry日志+localhost HTTP驱动生产runner，3成功/1失败→新preview只发送第4段，全缓存0新请求；391项Rust/345项前端及生产构建通过。证据docs/evidence/merge/task8-runner.md。整课汇总分组/费用预览和桌面实际调度仍未完成，不能把本检查点称为8.4全部完成。
+
 - [ ] mock HTTP真调用链：4段中3成功1失败，重新确认preview后仅重发第4段；取消/切库/超额/陈旧preview不误写。汇总超限分组不截断成功段。
-- [ ] 新CourseAnalysis进入TaskRegistry与全局ai::acquire_request；取消监控和网络后再次验源，逐段事务提交。通用retry对课程返回需重新预览，不重放已消费preview。
-- [ ] TaskCenter保留全部活动/失败/需操作项，历史分页仍有界；没有真实总量不显示假百分比。
+- [x] 分段CourseAnalysis进入TaskRegistry与全局ai::acquire_request；取消监控和网络后再次验源，逐段事务提交。通用retry对课程返回需重新预览，不重放已消费preview；汇总在独立预览实现前明确拒绝。
+- [x] TaskCenter保留全部活动/失败/需操作项，完成历史200条、逐项结果沿用分页；只有真实阶段总量才显示计数。
 - [ ] Run全回归及构建，提交任务接入。
 
 ### 8.5 学习工作区分析页签

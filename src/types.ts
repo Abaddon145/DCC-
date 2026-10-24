@@ -12,6 +12,7 @@ export type ContentLanguage = "zh-CN" | "en";
 export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string; skipAutoTranslation?: boolean }
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | {kind:"courseAnalysis";request:import("./features/learning/types").CourseAnalysisRequest}
   | {kind:"aiAnalyze";request:import("./features/intelligence/types").AnalysisRequest}
   | {kind:"download";request:DownloadRequest}
   | { kind: "ueAssets"; request: unknown }

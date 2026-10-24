@@ -26,6 +26,7 @@ export interface NativePointerEvent extends ScopedPlaybackEvent {kind:"click"|"d
 export interface LearningSubtitle {id:string;courseId:string;name:string;format:"srt"|"vtt";sha256:string;cueCount:number}
 export interface TranscriptCue {id:string;subtitleId:string;startMs:number;endMs:number;text:string}
 export interface CourseAnalysisOptions {subtitleId?:string|null;frameTimesMs:number[]}
+export interface CourseAnalysisRequest {courseId:string;previewId:string;stage:"segments"|"summary"}
 export interface CourseStagePreview {key:string;startMs:number;endMs:number;cached:boolean;tokensMax:number}
 export interface CourseAnalysisPreview {
   previewId:string;courseId:string;fingerprint:string;subtitleId:string|null;frameIds:string[];

@@ -18,6 +18,7 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest),
     #[serde(rename = "aiAnalyze")]
     AIAnalyze(crate::asset::intelligence_models::AnalysisRequest),
     Download(crate::downloader::models::DownloadRequest),
@@ -70,6 +71,7 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::CourseAnalysis(_) => "课程分段分析",
             Self::AIAnalyze(_) => "资产 AI 分析",
             Self::Download(_) => "下载",
             Self::AssetMediaImport { .. } => "素材预览附件导入",
@@ -97,6 +99,14 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::CourseAnalysis(r) => {
+                Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
+                Uuid::parse_str(&r.preview_id).map_err(|_| "课程预览标识无效")?;
+                if r.stage != crate::learning::analysis_models::CourseAnalysisPhase::Segments {
+                    return Err("汇总需要单独预览批准，当前仅可提交分段分析".into());
+                }
+                Ok(())
+            }
             Self::AIAnalyze(r) => {
                 Uuid::parse_str(&r.asset_id).map_err(|_| "分析资产标识无效")?;
                 Uuid::parse_str(&r.preview_id)
@@ -118,6 +128,13 @@ impl TaskRequest {
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
             Self::Translation { ids } if ids.len() > 5000 => Err("单次翻译最多 5000 项".into()),
             Self::Migration(r) if r.mode != "migrate" => Err("任务中心只接受复制迁移操作".into()),
+            _ => Ok(()),
+        }
+    }
+    fn ensure_retryable(&self) -> Result<(), String> {
+        match self {
+            Self::CourseAnalysis(_) => Err("课程分析必须重新预览并确认费用，不能重放旧批准".into()),
+            Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             _ => Ok(()),
         }
     }
@@ -406,7 +423,12 @@ impl TaskRegistry {
             .filter(|t| t.library_id == library_id)
             .rev()
             .scan(0usize, |history, task| {
-                if active(&task.status) {
+                if active(&task.status)
+                    || matches!(
+                        task.status.as_str(),
+                        "failed" | "interrupted" | "stopped" | "paused"
+                    )
+                {
                     Some(Some(task))
                 } else {
                     *history += 1;
@@ -529,6 +551,9 @@ impl TaskRegistry {
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
         if let TaskRequest::AIAnalyze(request) = &task.payload {
             if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
+        }
+        if let TaskRequest::CourseAnalysis(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id && active(&t.status) && matches!(&t.payload,TaskRequest::CourseAnalysis(r) if r.course_id==request.course_id && r.preview_id==request.preview_id && r.stage==request.stage)) { return Ok((existing.clone(),false)); }
         }
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
             if let Some(existing)=store.entries.iter().find(|value|active(&value.status)&&matches!(&value.payload,TaskRequest::ModelThumbnail{entry_id:id} if id==entry_id)){return Ok((existing.clone(),false))}
@@ -947,6 +972,7 @@ pub fn start_library_task_for_library(
             | TaskRequest::AssetImport(_)
             | TaskRequest::AssetProcess { .. }
             | TaskRequest::AIAnalyze(_)
+            | TaskRequest::CourseAnalysis(_)
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -991,9 +1017,7 @@ pub fn retry_library_task(
     id: String,
 ) -> Result<LibraryTask, String> {
     let previous = state.tasks.get(&id)?;
-    if matches!(previous.payload, TaskRequest::UeAssets(_)) {
-        return Err(UE_TASK_HISTORY_ONLY.into());
-    }
+    previous.payload.ensure_retryable()?;
     if previous.library_id != state.active_library_id()? {
         return Err("请先打开任务所属的素材库".into());
     }
@@ -1119,6 +1143,9 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::CourseAnalysis(request) => {
+            crate::learning::analysis_runner::run(app, task, request).await
+        }
         TaskRequest::AIAnalyze(request) => crate::asset::analysis::run(app, task, request).await,
         TaskRequest::AssetProcess { asset_id, force } => {
             tauri::async_runtime::spawn_blocking(move || {
@@ -1828,6 +1855,55 @@ mod tests {
         registry.finish(&first.id, Err("停止".into()));
         assert!(registry.has_manual_thumbnail_task("lib", "first"));
         assert!(!registry.has_manual_thumbnail_task("other", "first"));
+    }
+    #[test]
+    fn course_task_queue_deduplicates_approval_and_refuses_generic_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request =
+            TaskRequest::CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest {
+                course_id: Uuid::new_v4().to_string(),
+                preview_id: Uuid::new_v4().to_string(),
+                stage: crate::learning::analysis_models::CourseAnalysisPhase::Segments,
+            });
+        let (first, _) = registry.submit("library".into(), request.clone()).unwrap();
+        let (second, launch) = registry.submit("library".into(), request.clone()).unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "double click must not queue the same approval twice"
+        );
+        assert!(!launch);
+        assert!(request.ensure_retryable().unwrap_err().contains("重新预览"));
+        assert!(TaskRequest::Links.ensure_retryable().is_ok());
+        let mut invalid = request.clone();
+        if let TaskRequest::CourseAnalysis(r) = &mut invalid {
+            r.course_id = "bad".into();
+        }
+        assert!(registry.submit("library".into(), invalid).is_err());
+    }
+    #[test]
+    fn task_history_keeps_old_action_items_but_bounds_completed_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (failed, _) = registry.submit("lib".into(), TaskRequest::Links).unwrap();
+        registry.finish(&failed.id, Err("需要处理".into()));
+        for _ in 0..205 {
+            let (task, _) = registry.submit("lib".into(), TaskRequest::Links).unwrap();
+            registry.finish(&task.id, Ok(serde_json::json!({})));
+        }
+        let visible = registry.list("lib").unwrap();
+        assert!(
+            visible.iter().any(|t| t.id == failed.id),
+            "old failed task cannot disappear behind completed history"
+        );
+        assert_eq!(
+            visible.iter().filter(|t| t.status == "completed").count(),
+            200
+        );
+        assert!(
+            visible.iter().all(|t| t.result.is_none()),
+            "summary does not include full results"
+        );
     }
     #[test]
     fn journal_recovers_as_interrupted_and_does_not_autorun() {

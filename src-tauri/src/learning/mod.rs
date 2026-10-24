@@ -14,6 +14,9 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
 pub mod analysis;
 pub mod analysis_models;
 pub mod analysis_result;
+pub mod analysis_runner;
+#[cfg(test)]
+mod analysis_runner_tests;
 pub mod analysis_store;
 #[cfg(test)]
 mod analysis_tests;

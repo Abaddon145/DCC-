@@ -10,6 +10,13 @@ vi.mock("../lib/api",()=>({api:{getLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),
 vi.mock("./ModelThumbnailTask",()=>({ModelThumbnailTask:()=>null}));
 const task=(patch:Partial<LibraryTask>={}):LibraryTask=>({id:"task",libraryId:"lib",label:"媒体导入",status:"completed",phase:"",current:201,total:201,currentName:"",createdAt:"",updatedAt:"",cancellable:true,message:"",result:{rows:Array.from({length:201},(_,index)=>({name:`文件-${index}`,status:"imported",message:"已保存"}))},payload:{kind:"mediaImport",request:{kind:"image",paths:[],folderId:null,tags:[],favorite:false}},...patch});
 describe("TaskCenter",()=>{
+ it("does not replay a paid course approval through generic retry",async()=>{
+   vi.mocked(api.listLibraryTasks).mockResolvedValue([task({label:"课程分段分析",status:"failed",payload:{kind:"courseAnalysis",request:{courseId:"course",previewId:"used-preview",stage:"segments"}}})]);
+   render(<TaskCenter notify={vi.fn()}/>);fireEvent.click(screen.getByRole("button",{name:"任务中心"}));
+   const action=await screen.findByRole("button",{name:"需重新预览确认"});
+   expect(action).toBeDisabled();fireEvent.click(action);expect(api.retryLibraryTask).not.toHaveBeenCalled();
+   expect(screen.getByText(/旧批准不能重试/)).toBeInTheDocument();
+ });
  it("shows a native exit-save failure without closing the workspace",async()=>{
    function Workspace(){const [message,setMessage]=useState("");return <><TaskCenter notify={setMessage}/>{message&&<p role="alert">{message}</p>}<button>继续编辑</button></>}
    render(<Workspace/>);

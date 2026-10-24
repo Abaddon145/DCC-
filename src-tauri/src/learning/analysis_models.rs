@@ -116,6 +116,20 @@ pub struct CourseAnalysisOptions {
     pub frame_times_ms: Vec<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum CourseAnalysisPhase {
+    Segments,
+    Summary,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseAnalysisRequest {
+    pub course_id: String,
+    pub preview_id: String,
+    pub stage: CourseAnalysisPhase,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CourseStagePreview {

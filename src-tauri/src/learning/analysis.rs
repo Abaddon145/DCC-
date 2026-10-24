@@ -235,6 +235,16 @@ pub(crate) fn load_confirmed(
     course: &str,
     preview: &str,
 ) -> Result<PreparedCourseAnalysis, String> {
+    load_confirmed_controlled(state, library, course, preview, &|| false).map(|(input, _)| input)
+}
+
+pub(crate) fn load_confirmed_controlled(
+    state: &crate::state::AppState,
+    library: &str,
+    course: &str,
+    preview: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<(PreparedCourseAnalysis, LiveSource), String> {
     let base = state
         .with_library_if_id(library, |_, base| Ok(base.to_owned()))?
         .ok_or("素材库已切换")?;
@@ -247,8 +257,8 @@ pub(crate) fn load_confirmed(
         preview,
         chrono::Utc::now().timestamp(),
     )?;
-    check_sources(state, library, &input)?;
-    Ok(input)
+    let live = check_sources_controlled(state, library, &input, stop)?;
+    Ok((input, live))
 }
 
 fn check_sources(
@@ -256,12 +266,25 @@ fn check_sources(
     library: &str,
     input: &PreparedCourseAnalysis,
 ) -> Result<(), String> {
-    let live = live_source(
+    check_sources_controlled(state, library, input, &|| false).map(|_| ())
+}
+
+pub(crate) fn check_sources_controlled(
+    state: &crate::state::AppState,
+    library: &str,
+    input: &PreparedCourseAnalysis,
+    stop: &dyn Fn() -> bool,
+) -> Result<LiveSource, String> {
+    if stop() {
+        return Err("课程分析已停止".into());
+    }
+    let live = live_source_controlled(
         state,
         library,
         &input.preview.course_id,
         input.preview.subtitle_id.as_deref(),
         false,
+        stop,
     )?;
     if live.file_id != input.source_file_id
         || live.sha != input.source_sha256
@@ -300,7 +323,10 @@ fn check_sources(
         return Err("课程完整资料已变化，请重新预览".into());
     }
     recheck_live(state, library, &live)?;
-    Ok(())
+    if stop() {
+        return Err("课程分析已停止".into());
+    }
+    Ok(live)
 }
 
 pub(crate) fn request_body(
@@ -323,7 +349,7 @@ pub(crate) fn request_body(
     )
 }
 
-struct LiveSource {
+pub(crate) struct LiveSource {
     db: rusqlite::Connection,
     base: std::path::PathBuf,
     course: super::models::Course,
@@ -342,6 +368,17 @@ fn live_source(
     subtitle: Option<&str>,
     choose_default: bool,
 ) -> Result<LiveSource, String> {
+    live_source_controlled(state, library, course, subtitle, choose_default, &|| false)
+}
+
+fn live_source_controlled(
+    state: &crate::state::AppState,
+    library: &str,
+    course: &str,
+    subtitle: Option<&str>,
+    choose_default: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<LiveSource, String> {
     let base = state
         .with_library_if_id(library, |_, base| Ok(base.to_owned()))?
         .ok_or("素材库已切换")?;
@@ -357,7 +394,8 @@ fn live_source(
     let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
     let prepared = crate::media_access::prepare_media_file(&db, &base, &file_id, &grants)?;
     let stop = || {
-        state.active_library_id().ok().as_deref() != Some(library)
+        cancelled()
+            || state.active_library_id().ok().as_deref() != Some(library)
             || state.tasks.maintenance().is_some()
     };
     let (lease, sha) = prepared.open_for_analysis(&stop)?;

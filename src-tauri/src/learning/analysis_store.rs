@@ -418,3 +418,49 @@ pub(crate) fn begin_analysis(
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
+
+pub(crate) fn record_stage(
+    db: &mut Connection,
+    input: &PreparedCourseAnalysis,
+    id: &str,
+    key: &str,
+    result: Result<&CourseAnalysisResult, &str>,
+    tokens: Option<u64>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    let (status, raw, error) = match result {
+        Ok(result) => {
+            let raw = serde_json::to_string(result).map_err(|_| "课程结果无法编码")?;
+            if raw.len() > 1024 * 1024 {
+                return Err("课程编码结果超过1MiB，未登记为成功缓存".into());
+            }
+            ("completed", Some(raw), String::new())
+        }
+        Err(error) => ("failed", None, error.chars().take(2000).collect()),
+    };
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let changed = tx.execute("UPDATE learning_analysis_stages SET status=?1,result_json=?2,tokens_used=?3,error=?4,updated_at=?5 WHERE analysis_id=?6 AND stage_key=?7 AND status='pending' AND EXISTS(SELECT 1 FROM learning_analyses a WHERE a.id=?6 AND a.course_id=?8 AND a.source_fingerprint=?9 AND a.status IN ('queued','running'))",params![status,raw,tokens,error,now,id,key,input.preview.course_id,input.preview.fingerprint]).map_err(|e|e.to_string())?;
+    if changed != 1 {
+        return Err("课程阶段已失效，未覆盖旧结果".into());
+    }
+    tx.execute(
+        "UPDATE learning_analyses SET status='running',updated_at=?1 WHERE id=?2",
+        params![now, id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+pub(crate) fn finish_analysis(
+    db: &Connection,
+    input: &PreparedCourseAnalysis,
+    id: &str,
+    status: &str,
+    error: &str,
+) -> Result<(), String> {
+    if !["completed", "partial", "failed", "cancelled"].contains(&status) {
+        return Err("课程分析状态无效".into());
+    }
+    if db.execute("UPDATE learning_analyses SET status=?1,error=?2,updated_at=?3 WHERE id=?4 AND course_id=?5 AND source_fingerprint=?6 AND status IN ('queued','running')",params![status,error.chars().take(2000).collect::<String>(),chrono::Utc::now().timestamp(),id,input.preview.course_id,input.preview.fingerprint]).map_err(|e|e.to_string())?!=1 {return Err("课程分析记录已失效".into());}
+    Ok(())
+}

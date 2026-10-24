@@ -17,6 +17,28 @@ const PROMPT_VERSION: &str = "dcc-translation-v1";
 const MAX_OUTPUT: u64 = 4096;
 const MAX_RESPONSE_SPLITS: usize = 4;
 
+#[cfg(test)]
+pub(crate) async fn course_fixture_exchange(
+    service: &TranslationService,
+    body: &serde_json::Value,
+    limit: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+    image_count: usize,
+    url: &str,
+) -> Result<CreativeReply, String> {
+    assert!(url.starts_with("http://127.0.0.1:"));
+    service
+        .course_exchange(
+            body,
+            limit,
+            cancel,
+            "local-course-fixture",
+            url,
+            image_count,
+        )
+        .await
+}
+
 pub(crate) fn analysis_budget(body: &serde_json::Value, image_count: usize) -> Result<u64, String> {
     image_budget(body, image_count, 4)
 }
