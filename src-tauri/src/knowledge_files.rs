@@ -19,7 +19,7 @@ pub struct Attachment {
     pub mime: String,
     pub size: u64,
 }
-fn content_type(extension: &str) -> Option<&'static str> {
+pub(crate) fn content_type(extension: &str) -> Option<&'static str> {
     match extension {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -29,6 +29,17 @@ fn content_type(extension: &str) -> Option<&'static str> {
         "txt" | "md" => Some("text/plain; charset=utf-8"),
         _ => None,
     }
+}
+pub(crate) fn validate_image(path: &Path) -> Result<(), String> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (w, h) = reader.into_dimensions().map_err(|_| "无法解析附件图片")?;
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 100_000_000 {
+        return Err("图片尺寸无效或超过 1 亿像素".into());
+    }
+    Ok(())
 }
 
 pub fn stage_clipboard_rgba(
@@ -103,14 +114,7 @@ pub fn import(
     staging.flush().map_err(|e| e.to_string())?;
     staging.as_file().sync_all().map_err(|e| e.to_string())?;
     if mime.starts_with("image/") {
-        let reader = image::ImageReader::open(staging.path())
-            .map_err(|e| e.to_string())?
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?;
-        let (w, h) = reader.into_dimensions().map_err(|_| "无法解析附件图片")?;
-        if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 100_000_000 {
-            return Err("图片尺寸无效或超过 1 亿像素".into());
-        }
+        validate_image(staging.path())?;
     }
     let (_, sha) = file_digest::digest_file(staging.path())?;
     let target = base.join(&relative);

@@ -261,6 +261,52 @@ pub fn read_archive(db: &Connection, base: &Path, id: &str) -> Result<Vec<u8>, S
     }
     Ok(bytes)
 }
+pub(crate) fn add_archive_items(
+    db: &Connection,
+    base: &Path,
+    archive_id: &str,
+    items: &[(u64, u64, &str)],
+) -> Result<Vec<ArchiveItem>, String> {
+    if items.len() > 100_000 {
+        return Err("归档片段过多".into());
+    }
+    let bytes = read_archive(db, base, archive_id)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "原字节不是有效UTF-8，仅保留归档待处理")?;
+    let hashes = items
+        .iter()
+        .map(|(start, end, label)| {
+            if !valid_text(label, 2000) {
+                return Err("归档片段标题无效或超过2000字节".into());
+            }
+            checked_text_slice(text, *start, *end).map(digest)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    db.execute_batch("SAVEPOINT learning_note_archive_batch")
+        .map_err(error)?;
+    let result = (|| {
+        let mut saved = Vec::with_capacity(items.len());
+        for ((start, end, label), hash) in items.iter().zip(hashes) {
+            let id = Uuid::new_v4().to_string();
+            db.execute("INSERT INTO learning_note_archive_items(id,archive_id,start_byte,end_byte,sha256,label) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(archive_id,start_byte,end_byte) DO NOTHING",params![id,archive_id,start,end,hash,label]).map_err(error)?;
+            let item=db.query_row("SELECT id,archive_id,start_byte,end_byte,sha256,label FROM learning_note_archive_items WHERE archive_id=?1 AND start_byte=?2 AND end_byte=?3",params![archive_id,start,end],item_row).map_err(error)?;
+            if item.sha256 != hash {
+                return Err("已登记归档片段摘要损坏，未覆盖".into());
+            }
+            saved.push(item);
+        }
+        Ok(saved)
+    })();
+    if result.is_err() {
+        db.execute_batch(
+            "ROLLBACK TO learning_note_archive_batch; RELEASE learning_note_archive_batch",
+        )
+        .map_err(error)?;
+    } else {
+        db.execute_batch("RELEASE learning_note_archive_batch")
+            .map_err(error)?;
+    }
+    result
+}
 pub fn add_archive_item(
     db: &Connection,
     base: &Path,
@@ -269,21 +315,9 @@ pub fn add_archive_item(
     end_byte: u64,
     label: &str,
 ) -> Result<ArchiveItem, String> {
-    if !valid_text(label, 2000) {
-        return Err("归档片段标题无效或超过2000字节".into());
-    }
-    let bytes = read_archive(db, base, archive_id)?;
-    let slice = checked_slice(&bytes, start_byte, end_byte)?;
-    let hash = digest(slice);
-    let id = Uuid::new_v4().to_string();
-    db.execute("INSERT INTO learning_note_archive_items(id,archive_id,start_byte,end_byte,sha256,label) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(archive_id,start_byte,end_byte) DO NOTHING",
-        params![id,archive_id,start_byte,end_byte,hash,label]).map_err(error)?;
-    let item=db.query_row("SELECT id,archive_id,start_byte,end_byte,sha256,label FROM learning_note_archive_items WHERE archive_id=?1 AND start_byte=?2 AND end_byte=?3",
-        params![archive_id,start_byte,end_byte],item_row).map_err(error)?;
-    if item.sha256 != hash {
-        return Err("已登记归档片段摘要损坏，未覆盖".into());
-    }
-    Ok(item)
+    add_archive_items(db, base, archive_id, &[(start_byte, end_byte, label)])?
+        .pop()
+        .ok_or("未登记原文片段".into())
 }
 fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArchiveItem> {
     Ok(ArchiveItem {
@@ -297,14 +331,17 @@ fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArchiveItem> {
 }
 fn checked_slice(bytes: &[u8], start: u64, end: u64) -> Result<&[u8], String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "原字节不是有效UTF-8，仅保留归档待处理")?;
+    checked_text_slice(text, start, end)
+}
+fn checked_text_slice(text: &str, start: u64, end: u64) -> Result<&[u8], String> {
     if start >= end
-        || end > bytes.len() as u64
+        || end > text.len() as u64
         || !text.is_char_boundary(start as usize)
         || !text.is_char_boundary(end as usize)
     {
         return Err("归档片段范围越界或切开UTF-8字符".into());
     }
-    Ok(&bytes[start as usize..end as usize])
+    Ok(&text.as_bytes()[start as usize..end as usize])
 }
 pub fn read_archive_item(db: &Connection, base: &Path, id: &str) -> Result<Vec<u8>, String> {
     valid_id(id)?;

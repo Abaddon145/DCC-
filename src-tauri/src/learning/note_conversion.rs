@@ -1,14 +1,14 @@
 //! Pure source conversion; publication and identity checks belong to the caller.
 use super::note_nodes::{LearningReference, TimeRange};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Options, Parser, Tag};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ops::Range;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum AttachmentKind {
     Image,
     File,
@@ -18,6 +18,8 @@ pub struct AttachmentTarget {
     pub kind: AttachmentKind,
 }
 pub type AttachmentMap = HashMap<String, AttachmentTarget>;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MediaTarget {
     pub course_id: String,
     pub media_id: String,
@@ -25,8 +27,8 @@ pub struct MediaTarget {
     pub duration_ms: u64,
 }
 pub type MediaMap = HashMap<String, MediaTarget>;
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreservedSpan {
     pub placeholder_id: String,
     pub start_byte: usize,
@@ -34,8 +36,8 @@ pub struct PreservedSpan {
     pub label: String,
     pub reason: String,
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversionPreview {
     pub document: Option<Value>,
     pub archive_hash: String,

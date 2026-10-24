@@ -1490,7 +1490,7 @@ fn acceptance_asset_network_backup_restores_identity_analysis_and_soft_delete() 
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "27"
+        "28"
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM asset_relations", [], |r| r

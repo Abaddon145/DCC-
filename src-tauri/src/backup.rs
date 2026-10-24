@@ -246,6 +246,7 @@ pub fn recover_interrupted_restore(
     let restored = db::open_database(&active.db_path)?;
     crate::media_access::invalidate_external_grants(&restored)?;
     crate::learning::analysis_store::invalidate_previews(&restored)?;
+    crate::learning::note_preview::invalidate_previews(&restored)?;
     active.connection = Some(restored);
     fs::remove_file(marker).map_err(|_| "原库已恢复，但中断标记未能清除")?;
     Ok(())
@@ -270,6 +271,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     let check = db::open_database(&prepared_db)?;
     crate::media_access::invalidate_external_grants(&check)?;
     crate::learning::analysis_store::invalidate_previews(&check)?;
+    crate::learning::note_preview::invalidate_previews(&check)?;
     let integrity: String = check
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -762,7 +764,7 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "27"
+            "28"
         );
         assert_eq!(
             restored

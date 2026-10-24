@@ -103,3 +103,24 @@
 - [x] 核对锁文件最小增量、第三方许可；定向测试、完整 Rust 446 / 前端 380 通过、生产构建成功。证据 `docs/evidence/merge/task9-note-conversion.md`，本地独立提交；此步未接通预览/提交或实际迁入。
 
 9.3b 再固定库/来源身份、预览快照、附件原子发布、目标 revision、幂等与状态报告接口，并在启用入口前测试取消/切库/失败恢复；不能把纯转换器的模拟通过当成真实迁入成功。
+
+## 9.3b1 持久预览与事务提交内核（BASE 7ac1644）
+
+**Files:** 新 `learning/note_preview.rs` / `note_preview_tests.rs`、`schema-v28.sql`；修改 learning/mod、纯转换 DTO serde、knowledge_files 的格式查询可见性及现有 schema 版本断言。命令/UI 在内核通过后接通，不先开放接受任意路径的前端接口。
+
+**Interfaces / 决定：**
+- `Destination::New{title,notebook_id}` 或 `Replace{note_id,expected_revision}`。Replace 必须显式选择，保持既有笔记元数据，保存再次核对修订；冲突留原文和预览，不覆盖用户编辑。需要另存时生成 New 预览，不自动作此决定。
+- `AttachmentSource{source_key,path,sha256}` 仅为 Rust 内部已批准来源参数，不反序列化为前端文件权限。最多1000个、单项100MiB、合计1GiB，规范键<=4096字节；先复制到本库 `learning-data/note-previews/<previewId>/<uuid>.<ext>` 并核对完整摘要。重解析路径拒绝，磁盘空间复用 runtime/tools::ensure_space；格式复用 knowledge_files。未知/缺失附件不传映射，转换器生成 pending 原文。
+- `CourseMap=HashMap<sourceKey,courseId>` 为后台明确来源映射。读取实际课程/媒体/主文件/时长与完整摘要、现有本机授权；只读租约保持到相应操作结束。提交再次验证当前映射、所有引用范围，不能接受前端自报 fingerprint。
+- `prepare_note_preview(db,base,libraryId,archiveId,destination,sources,courses,grants)->StoredNotePreview`：只读已登记原件。保存有界快照（<=16MiB）及附件副本，不创建笔记。原件完整SHA、库ID与规范位置摘要、目标修订、明确映射和快照摘要一起绑定；相同身份/材料与目标复用非取消预览。
+- schema28 单表 `learning_note_previews` 保存 UUID、归档ID、身份摘要、快照JSON及SHA、ready/committed/cancelled 状态、结果回执和时间。预览不是正文；结果仍唯一写现有 knowledge_notes/revisions/attachments/search。无需单独任务队列或第二笔记系统。
+- `commit_note_preview(db,base,libraryId,previewId,grants,finalize)->NoteCommitReceipt`。后台连接校验原件与附件后进入 IMMEDIATE 事务，再读取状态；已提交只返回原回执，即使用户后来编辑也不再次写入。取消不可提交。原文片段在同一事务登记并 remap，附件复用既有 knowledge_files::import，笔记复用 save_in；失败回滚且只清理本次新发布附件。保留既有附件与所有原文归档。
+- `finalize(Transaction)->Result` 是原子最终门：生产调用在 AppState.with_library_if_id 的短锁中核对库/位置/维护状态并 commit；大量复制与完整摘要不持有全局 AppState 锁。外层迁入 TaskRegistry 的任务租约/取消仍由 Task12 负责，本内核不另建调度系统。
+- `cancel_note_preview` 记录 cancelled 并只清理该预览登记的副本；提交后不可撤销为取消。清理失败可重试，警告保留，不将已落库笔记伪装成失败。无效编码不生成空白成功笔记；pending 正文与成功回执分别显示，不把部分转换报告为完整迁入。
+- 来源档案/逐项迁入映射继续由 Task12 的 learning_origin_map 管理，本表只负责用户确认的不可变转换快照与幂等回执，不以标题或内容摘要跨来源合并。
+
+- [x] RED：4 组预览/提交桩全部失败；追加回执丢失/坏图片与批量片段、备份恢复先失败再实现。真实临时库覆盖上述边界，最终 11 组通过。最终门拒绝为可控事务回调模拟，真实 AppState 命令适配留 9.3b2。
+- [x] GREEN：持久快照、独占副本、源/库/修订验证、单事务保存/回执，失败恢复与精确清理；v27->v28 幂等并保留旧正文/归档。批量片段仅读父原件/验证 UTF-8 一次，savepoint 覆盖整批；恢复备份撤销 ready 预览，保留原件及已提交正文。
+- [x] 定向 39 项、完整 Rust 457 / 前端 380 通过、生产构建成功，凭据扫描与本地阶段提交。证据 `docs/evidence/merge/task9-note-preview-core.md`。真实迁入、命令/UI激活、旧历史浏览/计数仍后续完成。
+
+**9.3b2 接续前核对：** 原子 AppState 库/位置/维护最终门，耗时 IO 的可取消上下文；前端只给归档/附件 UUID，不开放路径；保留注册附件原文件名；重复请求/并发提交重读持久回执；未发布图片须使用受控预览读取能力，不能把占位 UUID 当已登记附件；恢复/迁移后的历史原文浏览与重新预览入口独立于旧批准。
