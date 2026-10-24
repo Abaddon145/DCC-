@@ -29,6 +29,7 @@ pub(crate) fn workspace_command_allowed(command: &str) -> bool {
             | "ensure_learning_course"
             | "list_learning_courses"
             | "list_learning_subtitles"
+            | "get_learning_transcription_components"
             | "list_learning_series"
             | "list_course_analyses"
             | "get_course_analysis"

@@ -1,14 +1,14 @@
 //! Optional local transcription. Source reference: Yingliu c866508 (MIT;
 //! resources/YINGLIU-LICENSE.txt). No download or process execution here.
 use super::models::TranscriptCue;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhisperManifest {
     pub version: u32,
@@ -16,9 +16,13 @@ pub struct WhisperManifest {
     pub model_revision: String,
     pub models: Vec<WhisperModel>,
     pub binary_hashes: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub license_hashes: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub media_hashes: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhisperModel {
     pub id: String,
@@ -36,12 +40,20 @@ pub struct VerifiedTranscription {
     pub model: PathBuf,
     pub version: String,
     pub model_sha256: String,
+    pub component_sha256: String,
     _files: Vec<File>,
 }
 
 pub struct ParsedTranscript {
     pub language: Option<String>,
     pub cues: Vec<TranscriptCue>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseTranscriptionRequest {
+    pub course_id: String,
+    pub model_id: String,
 }
 
 pub fn component_specs() -> Result<WhisperManifest, String> {
@@ -76,6 +88,32 @@ pub(super) fn verify_with_manifest(
         .iter()
         .find(|m| m.id == model_id)
         .ok_or("语音模型选项无效，请选择清单中的模型")?;
+    let (executable, mut files) = verify_tool_files(tool_root, manifest, stop)?;
+    let (path, file) = verify_model_file(model_root, model, stop)?;
+    if stop() {
+        return Err("语音组件校验已取消".into());
+    }
+    files.push(file);
+    use sha2::{Digest, Sha256};
+    let component_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(manifest).map_err(|_| "组件清单无法编码")?)
+    );
+    Ok(VerifiedTranscription {
+        executable,
+        model: path,
+        version: manifest.whisper_version.clone(),
+        model_sha256: model.sha256.clone(),
+        component_sha256,
+        _files: files,
+    })
+}
+
+pub(super) fn verify_tool_files(
+    tool_root: &Path,
+    manifest: &WhisperManifest,
+    stop: &dyn Fn() -> bool,
+) -> Result<(PathBuf, Vec<File>), String> {
     let mut files = Vec::new();
     let mut executable = None;
     for (name, sha) in &manifest.binary_hashes {
@@ -103,6 +141,17 @@ pub(super) fn verify_with_manifest(
             return Err("语音工具目录含未登记的可执行组件，未执行此工具".into());
         }
     }
+    for (name, sha) in &manifest.license_hashes {
+        files.push(verified_file(tool_root, name, None, sha, stop)?.1);
+    }
+    Ok((executable.ok_or("语音组件缺少入口")?, files))
+}
+
+pub(super) fn verify_model_file(
+    model_root: &Path,
+    model: &WhisperModel,
+    stop: &dyn Fn() -> bool,
+) -> Result<(PathBuf, File), String> {
     let (path, mut file) = verified_file(
         model_root,
         &model.filename,
@@ -110,6 +159,11 @@ pub(super) fn verify_with_manifest(
         &model.sha256,
         stop,
     )?;
+    validate_model_header(&mut file)?;
+    Ok((path, file))
+}
+
+pub(super) fn validate_model_header(file: &mut File) -> Result<(), String> {
     let mut header = [0u8; 44];
     file.read_exact(&mut header)
         .map_err(|_| "语音模型文件不完整")?;
@@ -122,33 +176,17 @@ pub(super) fn verify_with_manifest(
     {
         return Err("不是受支持的Whisper GGML语音模型".into());
     }
-    if stop() {
-        return Err("语音组件校验已取消".into());
-    }
-    files.push(file);
-    Ok(VerifiedTranscription {
-        executable: executable.ok_or("语音组件缺少入口")?,
-        model: path,
-        version: manifest.whisper_version.clone(),
-        model_sha256: model.sha256.clone(),
-        _files: files,
-    })
+    Ok(())
 }
 
-fn verified_file(
+pub(super) fn verified_file(
     root: &Path,
     name: &str,
     bytes: Option<u64>,
     sha: &str,
     stop: &dyn Fn() -> bool,
 ) -> Result<(PathBuf, File), String> {
-    let raw_root = root.to_str().ok_or("语音组件目录无效")?;
-    let normal = raw_root.strip_prefix(r"\\?\").unwrap_or(raw_root);
-    if !root.is_absolute()
-        || normal.starts_with(['\\', '/'])
-        || normal.get(2..).is_some_and(|p| p.contains(':'))
-        || raw_root.chars().any(char::is_control)
-        || name.is_empty()
+    if name.is_empty()
         || name == "."
         || name == ".."
         || !name
@@ -159,11 +197,33 @@ fn verified_file(
     {
         return Err("语音组件路径或摘要不安全".into());
     }
+    verified_local_file(&root.join(name), bytes, sha, stop)
+}
+pub(super) fn verified_local_file(
+    path: &Path,
+    bytes: Option<u64>,
+    sha: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<(PathBuf, File), String> {
+    let raw = path.to_str().ok_or("语音组件路径无效")?;
+    let normal = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    if !path.is_absolute()
+        || normal.starts_with(['\\', '/'])
+        || normal.get(2..).is_some_and(|p| p.contains(':'))
+        || raw.chars().any(char::is_control)
+        || sha.len() != 64
+        || !sha.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("语音组件路径或摘要不安全".into());
+    }
+    let name = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or("语音组件名称无效")?;
     if stop() {
         return Err("语音组件校验已取消".into());
     }
-    let path = root.join(name);
-    crate::media_access::reject_links(&path)?;
+    crate::media_access::reject_links(path)?;
     let path = path
         .canonicalize()
         .map_err(|_| format!("语音组件缺失：{name}；请先选择安装组件或导入模型"))?;

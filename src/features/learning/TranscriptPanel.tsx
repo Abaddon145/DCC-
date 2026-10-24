@@ -4,10 +4,12 @@ import {LoadFeedback} from "../../components/LoadFeedback";
 import {useRequestGate} from "../../lib/workspace";
 import {learningApi} from "./api";
 import {learningTime} from "./LearningControls";
+import {LocalTranscriptionPanel} from "./LocalTranscriptionPanel";
 import type {LearningSubtitle,TranscriptCue} from "./types";
 interface Props {libraryId:string;courseId:string;sessionId?:string;onSeek:(ms:number)=>void;onSelection?:(cues:TranscriptCue[])=>void}
 export function TranscriptPanel(props:Props){return <TranscriptContent key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 function TranscriptContent({libraryId,courseId,sessionId,onSeek,onSelection}:Props){
+  const [local,setLocal]=useState(false);
   const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[id,setId]=useState(""),[items,setItems]=useState<TranscriptCue[]>([]),[offset,setOffset]=useState(0),[total,setTotal]=useState(0),[selected,setSelected]=useState<TranscriptCue[]>([]);
   const [loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(""),[retry,setRetry]=useState(0);
   const gate=useRequestGate(),selectionCallback=useRef(onSelection);selectionCallback.current=onSelection;
@@ -33,7 +35,8 @@ function TranscriptContent({libraryId,courseId,sessionId,onSeek,onSelection}:Pro
   const load=async()=>{if(!sessionId||!id||busy)return;setBusy(true);setError("");try{await learningApi.loadSubtitle(libraryId,sessionId,id);}catch(reason){setError(String(reason));}finally{setBusy(false);}};
   const toggle=(cue:TranscriptCue)=>{const next=selected.some(row=>row.id===cue.id)?selected.filter(row=>row.id!==cue.id):[...selected,cue];setSelected(next);selectionCallback.current?.(next);};
   return <section className="learning-transcript" aria-label="课程字幕">
-    <header><h2>课程字幕</h2><button className="secondary-button" disabled={busy||loading} onClick={()=>void importFile()}>{busy?"正在处理…":"导入 SRT / VTT"}</button></header>
+    <header><h2>课程字幕</h2><div className="learning-panel-actions"><button className="secondary-button" aria-expanded={local} onClick={()=>setLocal(value=>!value)}>{local?"收起本地转写":"本地转写"}</button><button className="secondary-button" disabled={busy||loading} onClick={()=>void importFile()}>{busy?"正在处理…":"导入 SRT / VTT"}</button></div></header>
+    {local&&<LocalTranscriptionPanel libraryId={libraryId} courseId={courseId} onComplete={next=>{setId(next);setOffset(0);setSelected([]);selectionCallback.current?.([]);setRetry(value=>value+1);}}/>}
     {!!subtitles.length&&<div className="learning-panel-actions"><label>字幕文件<select value={id} disabled={busy} onChange={event=>{setId(event.target.value);setOffset(0);setSelected([]);selectionCallback.current?.([]);}}>{subtitles.map(subtitle=><option key={subtitle.id} value={subtitle.id}>{subtitle.name} · {subtitle.cueCount} 段</option>)}</select></label><button className="secondary-button" disabled={!sessionId||!id||busy||loading||!!error} onClick={()=>void load()}>在播放器加载</button></div>}
     {error&&<div role="alert">{error}<button className="secondary-button" onClick={()=>setRetry(value=>value+1)}>重新读取字幕</button></div>}
     {loading?<LoadFeedback label="正在读取字幕…"/>:!subtitles.length?<p>尚未导入字幕</p>:<>

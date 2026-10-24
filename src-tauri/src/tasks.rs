@@ -18,6 +18,7 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    CourseTranscription(crate::learning::transcription::CourseTranscriptionRequest),
     CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest),
     #[serde(rename = "aiAnalyze")]
     AIAnalyze(crate::asset::intelligence_models::AnalysisRequest),
@@ -71,6 +72,7 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::CourseTranscription(_) => "本地课程转写",
             Self::CourseAnalysis(r) => {
                 if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
                     "课程汇总分析"
@@ -105,6 +107,13 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::CourseTranscription(r) => {
+                Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
+                if !matches!(r.model_id.as_str(), "base" | "small") {
+                    return Err("模型选项无效".into());
+                }
+                Ok(())
+            }
             Self::CourseAnalysis(r) => {
                 Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
                 Uuid::parse_str(&r.preview_id).map_err(|_| "课程预览标识无效")?;
@@ -555,6 +564,9 @@ impl TaskRegistry {
         if let TaskRequest::AIAnalyze(request) = &task.payload {
             if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
         }
+        if let TaskRequest::CourseTranscription(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::CourseTranscription(r)if r.course_id==request.course_id&&r.model_id==request.model_id)){return Ok((existing.clone(),false));}
+        }
         if let TaskRequest::CourseAnalysis(request) = &task.payload {
             if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id && active(&t.status) && matches!(&t.payload,TaskRequest::CourseAnalysis(r) if r.course_id==request.course_id && r.preview_id==request.preview_id && r.stage==request.stage)) { return Ok((existing.clone(),false)); }
         }
@@ -976,6 +988,7 @@ pub fn start_library_task_for_library(
             | TaskRequest::AssetProcess { .. }
             | TaskRequest::AIAnalyze(_)
             | TaskRequest::CourseAnalysis(_)
+            | TaskRequest::CourseTranscription(_)
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -1146,6 +1159,9 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::CourseTranscription(request) => {
+            crate::learning::transcription_runner::run(app, task, request).await
+        }
         TaskRequest::CourseAnalysis(request) => {
             crate::learning::analysis_runner::run(app, task, request).await
         }
@@ -1540,6 +1556,27 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learning_transcription_task_is_typed_and_deduplicated() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request = TaskRequest::CourseTranscription(
+            crate::learning::transcription::CourseTranscriptionRequest {
+                course_id: Uuid::new_v4().to_string(),
+                model_id: "base".into(),
+            },
+        );
+        let (first, _) = tasks.submit("library".into(), request.clone()).unwrap();
+        let (second, launch) = tasks.submit("library".into(), request.clone()).unwrap();
+        assert_eq!(first.id, second.id);
+        assert!(!launch);
+        let mut bad = request;
+        if let TaskRequest::CourseTranscription(r) = &mut bad {
+            r.model_id = "../model".into();
+        }
+        assert!(tasks.submit("library".into(), bad).is_err());
+    }
     use super::*;
     #[test]
     fn core_import_retry_keeps_only_incomplete_paths_and_scan_rows() {

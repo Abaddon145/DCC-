@@ -4,6 +4,74 @@ use sha2::{Digest, Sha256};
 
 const SUBTITLE: &str = "a26d86ee-3323-45cc-adc5-2e3693e3d4e7";
 
+#[test]
+fn learning_transcription_model_import_is_explicit_verified_and_never_overwrites() {
+    use super::transcription_install::*;
+    let (root, _tools, models, spec) = components();
+    let source = root.path().join("原始模型.bin");
+    std::fs::copy(models.join("ggml-base.bin"), &source).unwrap();
+    let config = root.path().join("配置");
+    import_model_with_spec(&config, &source, &spec.models[0]).unwrap();
+    let target = WhisperPaths::new(&config).models.join("ggml-base.bin");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        std::fs::read(&source).unwrap()
+    );
+    import_model_with_spec(&config, &source, &spec.models[0]).unwrap();
+    std::fs::write(&target, b"existing damaged model").unwrap();
+    assert!(import_model_with_spec(&config, &source, &spec.models[0]).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"existing damaged model");
+    assert!(import_model(&config, "../unknown", &source).is_err());
+    std::fs::write(&source, b"bad source").unwrap();
+    let untouched = root.path().join("拒绝安装");
+    assert!(import_model_with_spec(&untouched, &source, &spec.models[0]).is_err());
+    assert!(!WhisperPaths::new(&untouched).models.exists());
+}
+
+#[test]
+fn learning_transcription_tool_install_copies_only_pinned_components_and_license() {
+    use super::transcription_install::*;
+    let (root, tools, _models, mut spec) = components();
+    let source = root.path().join("组件来源");
+    std::fs::create_dir_all(source.join("tools")).unwrap();
+    std::fs::create_dir_all(source.join("licenses")).unwrap();
+    for name in spec.binary_hashes.keys() {
+        std::fs::copy(tools.join(name), source.join("tools").join(name)).unwrap();
+    }
+    std::fs::write(
+        source.join("licenses/whisper-MIT.txt"),
+        b"synthetic license",
+    )
+    .unwrap();
+    spec.license_hashes.insert(
+        "whisper-MIT.txt".into(),
+        format!("{:x}", Sha256::digest(b"synthetic license")),
+    );
+    std::fs::write(source.join("tools/untrusted.exe"), b"do not copy").unwrap();
+    let config = root.path().join("配置");
+    install_with_manifest(&config, &source, &spec).unwrap();
+    let target = WhisperPaths::new(&config).tools;
+    assert_eq!(
+        std::fs::read(target.join("whisper-cli.exe")).unwrap(),
+        b"synthetic exe"
+    );
+    assert_eq!(
+        std::fs::read(target.join("whisper-MIT.txt")).unwrap(),
+        b"synthetic license"
+    );
+    assert!(!target.join("untrusted.exe").exists());
+    std::fs::write(target.join("ggml.dll"), b"keep existing damaged DLL").unwrap();
+    assert!(install_with_manifest(&config, &source, &spec).is_err());
+    assert_eq!(
+        std::fs::read(target.join("ggml.dll")).unwrap(),
+        b"keep existing damaged DLL"
+    );
+    std::fs::write(source.join("licenses/whisper-MIT.txt"), b"invalid license").unwrap();
+    let other = root.path().join("拒绝工具");
+    assert!(install_with_manifest(&other, &source, &spec).is_err());
+    assert!(!WhisperPaths::new(&other).tools.exists());
+}
+
 fn rows(value: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&json!({"result":{"language":"zh"},"transcription":value})).unwrap()
 }
@@ -77,7 +145,7 @@ fn learning_transcription_accepts_complete_srt_at_exact_eight_mib_limit() {
 
 // Micro files prove the production verifier's behavior. They never enter the
 // compiled allowlist and are not executable binaries or usable speech models.
-fn components() -> (
+pub(super) fn components() -> (
     tempfile::TempDir,
     std::path::PathBuf,
     std::path::PathBuf,

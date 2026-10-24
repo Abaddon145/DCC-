@@ -36,5 +36,9 @@ pub mod native_window;
 pub mod store;
 pub mod subtitles;
 pub mod transcription;
+pub mod transcription_install;
+pub mod transcription_runner;
+#[cfg(test)]
+mod transcription_runner_tests;
 #[cfg(test)]
 mod transcription_tests;

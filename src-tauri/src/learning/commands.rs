@@ -2,6 +2,68 @@ use super::native_player::{self, NativeViewport, PlaybackAction, PlaybackSnapsho
 use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
+async fn component_job<F>(
+    app: tauri::AppHandle,
+    expected: String,
+    work: F,
+) -> Result<super::transcription_install::ComponentStatus, String>
+where
+    F: FnOnce(&std::path::Path) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        if state.active_library_id()? != expected {
+            return Err("素材库已切换，未处理组件".into());
+        }
+        let config = state.config_directory();
+        work(&config)?;
+        let result = super::transcription_install::inspect_components(&config)?;
+        if state.active_library_id()? != expected {
+            return Err("素材库已切换；组件为全局数据，请在当前库刷新状态".into());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "语音组件处理已中断，请重新检查状态".to_owned())?
+}
+#[tauri::command]
+pub async fn get_learning_transcription_components(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+) -> Result<super::transcription_install::ComponentStatus, String> {
+    component_job(app, expected_library_id, |_| Ok(())).await
+}
+#[tauri::command]
+pub async fn import_learning_transcription_model(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    model_id: String,
+    selected_path: String,
+) -> Result<super::transcription_install::ComponentStatus, String> {
+    component_job(app, expected_library_id, move |config| {
+        super::transcription_install::import_model(
+            config,
+            &model_id,
+            std::path::Path::new(&selected_path),
+        )
+    })
+    .await
+}
+#[tauri::command]
+pub async fn install_learning_transcription_tools(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    selected_resource_root: String,
+) -> Result<super::transcription_install::ComponentStatus, String> {
+    component_job(app, expected_library_id, move |config| {
+        super::transcription_install::install_tools(
+            config,
+            std::path::Path::new(&selected_resource_root),
+        )
+    })
+    .await
+}
 #[tauri::command]
 pub fn list_course_analyses(
     state: State<AppState>,

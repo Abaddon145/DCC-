@@ -123,6 +123,20 @@ pub fn import(
     course: &str,
     source: &Path,
 ) -> Result<LearningSubtitle, String> {
+    import_guarded(db, base, course, source, |tx| {
+        tx.commit().map_err(|e| e.to_string())
+    })
+}
+pub(super) fn import_guarded<'db, F>(
+    db: &'db Connection,
+    base: &Path,
+    course: &str,
+    source: &Path,
+    publish: F,
+) -> Result<LearningSubtitle, String>
+where
+    F: FnOnce(rusqlite::Transaction<'db>) -> Result<(), String>,
+{
     let c = super::store::course(db, course)?;
     let value = source.to_str().ok_or("字幕路径无效")?;
     let normal = value.strip_prefix(r"\\?\").unwrap_or(value);
@@ -215,7 +229,7 @@ pub fn import(
                     .map_err(|e| e.to_string())?;
             }
         }
-        tx.commit().map_err(|e| e.to_string())
+        publish(tx)
     })();
     if let Err(error) = registration {
         let _ = fs::remove_file(target);

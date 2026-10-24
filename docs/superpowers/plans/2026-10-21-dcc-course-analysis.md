@@ -118,18 +118,32 @@
 
 #### 8.6b 工具选择与同一任务系统
 
-**Files:** 后续细化 `learning/transcription.rs`、`runtime/process.rs`、`learning/commands.rs`、`tasks.rs`、现有准备工具脚本。
+**Files:** 新 `learning/transcription_install.rs`、`transcription_runner.rs` 及测试；改 `learning/transcription.rs`、`runtime/process.rs`、`learning/commands.rs`、`subtitles.rs`、`tasks.rs`。现有 mpv 准备脚本保持不变；Whisper 资源包的正式分发检查留 Task14，不自动从源工作区安装组件。
 
-- [ ] 用户明确选安装或导入固定模型才落盘；本阶段不后台下载。临时文件、磁盘检查、完整摘要、原子不覆盖发布、失败只清理本次文件。
-- [ ] 同一 TaskRegistry 的转写请求只含 courseId/modelId；原件 lease/完整hash、工具模型身份与版本组成缓存键，取消/超时/切库结束 Job 子树，独立缓存目录清理，保留现有成功字幕。
-- [ ] 固定 FFmpeg PCM16/16kHz/单声道与 Whisper CPU 参数；兼容中文路径，不开放 shell/cwd/自定义参数。输出经 8.6a 解析和既有字幕事务登记；同任务重试需重新验证原件及组件。
-- [ ] 本地 fake process/合成原件验证取消、超时、部分文件、源替换、幂等及字幕回滚；用户选择真实模型后才进行真实识别验收，不混淆两种证据。
+**8.6b 固定接口（2026-10-24，基线2024f1d）：**
+- `runtime::process::capture_in(exe,args,cwd:Option<&Path>,timeout,stop,line)` 与 `spawn_owned_in(exe,args,cwd)`；既有调用默认 `None`，只允许后端提供普通绝对目录，保持 Windows Job/无 shell/双管道有界读取，预取消不启动。
+- `WhisperPaths::new(config)` 固定 `learning-tools/whisper-1.9.1`、`learning-models`；`inspect_components(config)` 只读完整校验，返回版本、模型{id,label,bytes,installed,message,url}，文件存在不等于已安装。
+- `import_model(config,modelId,selectedPath)` 只允许固定模型，先完整验证源文件/头，再原子不覆盖复制到本机模型目录；`install_tools(config,selectedResourceRoot)` 仅复制固定清单的 tools/ 下文件及 licenses/whisper-MIT.txt，校验后将自有临时目录原子不覆盖发布，不能执行源目录里的额外工具。
+- `CourseTranscriptionRequest{courseId,modelId}` 作为 `TaskRequest::CourseTranscription`；验证 UUID 和 base/small，按库/课程/模型去重，开始必须 expectedLibraryId。失败重试重新验源/组件，沿用同一 TaskRegistry，不新建队列或表。
+- `transcription_runner::run(app,task,request)` 使用 worker connection、原件 read lease/完整hash、当前媒体文件ID/授权、已知时长，固定 PCM16/16kHz/单声道、Whisper `-ng -l auto -oj`/≤8 CPU线程；中文工作目录使用 ASCII 相对 model.bin/audio.wav/transcript。同包FFmpeg/FFprobe及shared DLL按M0摘要校验，不换构建。
+- 缓存键为库ID/root hash/courseID/source fileID/完整source hash/时长/Whisper组件清单/模型hash/参数版本；已登记 `whisper-<modelId>-<完整key>.srt` 即可复用，不创建第二套持久化。运行时目录 `.dcc/runtime/transcription/<临时UUID>` 不进入备份；成功字幕仍在 learning-data/subtitles。
+- `subtitles::import_guarded(...,commit)` 复用原有文件/事务登记：耗时复制/插入在 worker，最终持当前库短锁核对源ID/授权/停止状态并提交；失败回滚并只移除本次字幕文件。既有手动字幕导入使用相同实现，不改接口。
+- 先用真实文件/SQLite/TaskRegistry及可控进程边界测试：目录与Unicode、预取消/超时/子树、模型篡改/同目录已有文件不覆盖、三个处理阶段参数/失败与清理、缓存/换模型/源替换/切库/提交失败/同任务去重。实际模型识别仍需用户明确安装选择，不用fake process冒充。
+
+- [x] 用户明确选安装或导入固定模型才落盘；本阶段不后台下载。临时文件、磁盘检查、完整摘要、原子不覆盖发布、失败只清理本次文件。
+- [x] 同一 TaskRegistry 的转写请求只含 courseId/modelId；原件 lease/完整hash、工具模型身份与版本组成缓存键，取消/超时/切库结束 Job 子树，独立缓存目录清理，保留现有成功字幕。
+- [x] 固定 FFmpeg PCM16/16kHz/单声道与 Whisper CPU 参数；兼容中文路径，不开放 shell/cwd/自定义参数。输出经 8.6a 解析和既有字幕事务登记；同任务重试需重新验证原件及组件。
+- [x] 本地 fake process/合成原件验证取消、超时、部分文件、源替换、幂等及字幕回滚；真实模型尚未安装，实际识别仍为 Task14 未验收项，不将上述模拟当作实机识别。
+
+8.6b 裁定：不增加数据库表。`learning-data/transcriptions/<course>/<key>.json` 仅保存来源/模型/参数指纹到已有字幕 ID/摘要的有界缓存映射，解决相同字幕字节去重后名字不能表达多个来源的问题。允许重建此缓存元数据，不覆盖字幕/原件/不可变分析快照；缓存写失败时保留已完成的有效字幕并返回警告。完整 PCM 超过 RIFF/WAV 容量时明确拒绝，不截断课程。
 
 #### 8.6c 学习工作区入口
 
-**Files:** 后续细化 `TranscriptPanel.tsx`、learning API/types 及测试。
+**Files:** 新 `LocalTranscriptionPanel.tsx` 及测试；改 `TranscriptPanel.tsx`、`LearningWorkspace.css`、learning API/types 及命令注册。
 
-- [ ] 显示未安装/校验失败/可用与模型大小，明确本地 CPU/磁盘成本；用户启动后进入统一任务中心，完成刷新现有字幕列表，不自动发付费分析。
-- [ ] UI 测试覆盖缺组件、明确选择、旧库结果忽略、取消与新字幕可定位；最后统一 Task14 的真实模型、DPI/跨屏验收。
+- [x] 显示未安装/校验失败/可用与模型大小，明确本地 CPU/磁盘成本；用户启动后进入统一任务中心，完成刷新现有字幕列表，不自动发付费分析。
+- [x] UI 测试覆盖缺组件、明确选择、旧库结果忽略、取消与新字幕载入；StrictMode 下刷新不留陈旧 busy 锁。Task14 的真实模型识别、DPI/跨屏仍未执行。
+
+8.6b/c 本地代码检查点：定向后端17项、组件10项通过；完整 Rust418通过/2既有忽略，前端365通过，生产构建0。证据 `docs/evidence/merge/task8-transcription-runtime.md`。未执行真实 Whisper 识别、下载安装模型或覆盖用户安装；Task8 原个案回执和 Task14 门槛不据此勾为完成。
 
 8.6 自审裁定：这是主 Task8 已批准的可选转录 seam；沿用顺序执行，不再询问方案。先离线验证边界，再接实际任务与显式安装入口；当前没有模型，不声称真转写通过，也不默默拉取约148/488MB模型。

@@ -3,11 +3,21 @@ import {beforeEach,expect,it,vi} from "vitest";
 import {TranscriptPanel} from "./TranscriptPanel";
 import {learningApi} from "./api";
 import type {TranscriptCue} from "./types";
-vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),transcriptPage:vi.fn(),importSubtitle:vi.fn(),loadSubtitle:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),transcriptPage:vi.fn(),importSubtitle:vi.fn(),loadSubtitle:vi.fn(),transcriptionComponents:vi.fn()}}));
+vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([])}}));
 vi.mock("@tauri-apps/plugin-dialog",()=>({open:vi.fn().mockResolvedValue(null)}));
 const subtitle={id:"subtitle",courseId:"course",name:"中文字幕.srt",format:"srt" as const,sha256:"a".repeat(64),cueCount:55};
 const cues:TranscriptCue[]=Array.from({length:55},(_,n)=>({id:`cue-${n}`,subtitleId:"subtitle",startMs:n*1000+125,endMs:n*1000+875,text:`完整中文🧑🏽‍🎨 ${n}\n第二行`}));
 beforeEach(()=>{vi.clearAllMocks();vi.mocked(learningApi.listSubtitles).mockResolvedValue([subtitle]);vi.mocked(learningApi.transcriptPage).mockImplementation(async(_lib,_course,_id,offset=0)=>({items:cues.slice(offset,offset+50),total:55,offset,limit:50}));});
+it("exposes optional local transcription without automatically installing components",async()=>{
+  vi.mocked(learningApi.transcriptionComponents).mockResolvedValue({version:"1.9.1",modelRevision:"fixed",toolReady:false,toolMessage:"工具未安装",models:[]});
+  render(<TranscriptPanel libraryId="lib" courseId="course" onSeek={vi.fn()}/>);
+  await screen.findByText(/完整中文.* 0/);
+  expect(learningApi.transcriptionComponents).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button",{name:"本地转写"}));
+  expect(await screen.findByRole("region",{name:"本地语音转写"})).toBeInTheDocument();
+  expect(await screen.findByText("工具未安装")).toBeInTheDocument();
+});
 it("pages through all cues, seeks real time and retains complete selections across pages",async()=>{
   const onSeek=vi.fn(),onSelection=vi.fn();render(<TranscriptPanel libraryId="lib" courseId="course" sessionId="session" onSeek={onSeek} onSelection={onSelection}/>);
   expect(await screen.findByText(/完整中文.* 0/)).toHaveTextContent("第二行");

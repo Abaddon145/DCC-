@@ -65,6 +65,14 @@ pub fn spawn_owned(
     exe: &Path,
     args: &[String],
 ) -> Result<(OwnedProcess, std::fs::File, std::fs::File), String> {
+    spawn_owned_in(exe, args, None)
+}
+#[cfg(windows)]
+pub fn spawn_owned_in(
+    exe: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<(OwnedProcess, std::fs::File, std::fs::File), String> {
     use std::{
         fs::File,
         os::windows::{
@@ -105,6 +113,16 @@ pub fn spawn_owned(
     if args.iter().any(|a| a.contains('\0')) {
         return Err("参数包含无效字符".into());
     }
+    if let Some(path) = cwd {
+        if !path.is_absolute()
+            || !path.is_dir()
+            || path.as_os_str().to_string_lossy().contains('\0')
+        {
+            return Err("子进程工作目录无效".into());
+        }
+        crate::media_access::reject_links(path)?;
+    }
+    let directory = cwd.map(|path| wide(path.as_os_str()));
     let (process, job, stdout, stderr) = unsafe {
         let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if handle.is_null() {
@@ -180,7 +198,9 @@ pub fn spawn_owned(
                 1,
                 CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
                 std::ptr::null(),
-                std::ptr::null(),
+                directory
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
                 &startup.StartupInfo,
                 &mut info,
             ) == 0
@@ -214,12 +234,26 @@ pub fn capture(
     stop: &dyn Fn() -> bool,
     line: &mut dyn FnMut(&str),
 ) -> Result<String, String> {
+    capture_in(exe, args, None, timeout, stop, line)
+}
+#[cfg(windows)]
+pub fn capture_in(
+    exe: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+    line: &mut dyn FnMut(&str),
+) -> Result<String, String> {
     use std::{fs::File, io::Read, os::windows::io::AsRawHandle};
     use windows_sys::Win32::System::{
         JobObjects::TerminateJobObject,
         Threading::{GetExitCodeProcess, WaitForSingleObject},
     };
-    let (owned, stdout, stderr) = spawn_owned(exe, args)?;
+    if stop() {
+        return Err("子进程在启动前已取消".into());
+    }
+    let (owned, stdout, stderr) = spawn_owned_in(exe, args, cwd)?;
     let process = &owned.process;
     let job = &owned.job;
     // Drain both pipes continuously, with bounded retained data and no unbounded lines.
@@ -314,6 +348,17 @@ pub fn capture(
     Ok(output)
 }
 #[cfg(not(windows))]
+pub fn capture_in(
+    _: &Path,
+    _: &[String],
+    _: Option<&Path>,
+    _: Duration,
+    _: &dyn Fn() -> bool,
+    _: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    Err("本地处理暂仅支持 Windows".into())
+}
+#[cfg(not(windows))]
 pub fn capture(
     _: &Path,
     _: &[String],
@@ -327,6 +372,67 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn learning_transcription_process_preserves_unicode_cwd_and_precancel() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("转写目录");
+        std::fs::create_dir(&cwd).unwrap();
+        let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+        let marker = format!("marker-{}.txt", uuid::Uuid::new_v4());
+        std::fs::write(cwd.join(&marker), b"scoped").unwrap();
+        let out = capture_in(
+            exe,
+            &[
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!("if (!(Test-Path -LiteralPath '{marker}')) {{ exit 71 }}"),
+            ],
+            Some(&cwd),
+            Duration::from_secs(5),
+            &|| false,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.trim().is_empty());
+        let cancelled = cwd.join("cancelled.txt");
+        assert!(capture_in(
+            exe,
+            &[
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!(
+                    "Set-Content -LiteralPath '{}' -Value wrong",
+                    cancelled.display().to_string().replace('\'', "''")
+                )
+            ],
+            Some(&cwd),
+            Duration::from_secs(5),
+            &|| true,
+            &mut |_| {}
+        )
+        .is_err());
+        assert!(!cwd.join("cancelled.txt").exists());
+    }
+    #[test]
+    fn learning_transcription_process_timeout_does_not_wait_for_sleeping_child() {
+        let root = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+        let result = capture_in(
+            exe,
+            &[
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 30".into(),
+            ],
+            Some(root.path()),
+            Duration::from_millis(400),
+            &|| false,
+            &mut |_| {},
+        );
+        assert!(result.unwrap_err().contains("超时"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
     #[test]
     fn learning_native_process_drop_reaps_owned_tree() {
         use std::io::{BufRead, BufReader};

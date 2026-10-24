@@ -5,6 +5,9 @@ import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,Co
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  transcriptionComponents:(expectedLibraryId:string)=>invoke<import("./types").WhisperComponentStatus>("get_learning_transcription_components",{expectedLibraryId}),
+  importTranscriptionModel:(expectedLibraryId:string,modelId:string,selectedPath:string)=>invoke<import("./types").WhisperComponentStatus>("import_learning_transcription_model",{expectedLibraryId,modelId,selectedPath}),
+  installTranscriptionTools:(expectedLibraryId:string,selectedResourceRoot:string)=>invoke<import("./types").WhisperComponentStatus>("install_learning_transcription_tools",{expectedLibraryId,selectedResourceRoot}),
   listCourseAnalyses:(expectedLibraryId:string,courseId:string,offset=0,limit=50)=>invoke<Page<CourseAnalysisHistoryItem>>("list_course_analyses",{expectedLibraryId,courseId,offset,limit}),
   getCourseAnalysis:(expectedLibraryId:string,courseId:string,analysisId:string,stageKey:string|null=null,offset=0,limit=50)=>invoke<CourseAnalysisDetail>("get_course_analysis",{expectedLibraryId,courseId,analysisId,stageKey,offset,limit}),
   prepareCourseAnalysis:(expectedLibraryId:string,courseId:string,options:CourseAnalysisOptions)=>invoke<CourseAnalysisPreview>("prepare_course_analysis",{expectedLibraryId,courseId,options}),

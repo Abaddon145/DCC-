@@ -24,6 +24,18 @@
       "license": "MIT"
     }
   ],
+  "licenseHashes": {"whisper-MIT.txt":"94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"},
+  "mediaHashes": {
+    "ffmpeg.exe":"08dd3b1c2e9b8c9b2489ac2e1265bb21fb57941b930b1a82adcc5d662784472b",
+    "ffprobe.exe":"1b61d47afd7f629bece8035f4f5b44c8d3ee937dda63e334e8f8a1205550d2f5",
+    "avcodec-63.dll":"e5bb21e6e8e0f8de6fcf1597f6484bce0b970ffa02e0cab08b5b9412686532a2",
+    "avdevice-63.dll":"aec6d2d6cca83b215740fa39792613b56a237dc07299b7319f41a6bc5176a336",
+    "avfilter-12.dll":"6f1b99910727462ccad0dee07db258358280397c33fc5c0e27e0966b49d71be6",
+    "avformat-63.dll":"562c324c7d5996cae8e75f84e7f14b33d38e360432c1bd758d92c5170a982497",
+    "avutil-61.dll":"94f9d395d5c80c5150ebbcc545d977e922a54da09ff870a1c22c548a2cb0bd69",
+    "swresample-7.dll":"0cd24a1750d9cacb02b9d063cc4983338811182fea8c3b820689c33899f58802",
+    "swscale-10.dll":"90674374b5b65e90de09ecc69c1d1b1f6ad5992029ddc2c6e6c6ee8cd7f66ade"
+  },
   "binaryHashes": {
     "whisper-cli.exe": "58245314fb73b30fbd0cf0542c5c172e23f02b6eb7cad7b51e792439cf5e1755",
     "whisper.dll": "b31690c12461517fe9774e61318ab63a69972b948151feed98b913be35f708b6",

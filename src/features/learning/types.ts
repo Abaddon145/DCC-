@@ -25,6 +25,9 @@ export interface ScopedPlaybackEvent {libraryId:string;sessionId:string;courseId
 export interface NativePointerEvent extends ScopedPlaybackEvent {kind:"click"|"doubleClick"|"wheelUp"|"wheelDown"|"context";doubleClickMs?:number}
 export interface LearningSubtitle {id:string;courseId:string;name:string;format:"srt"|"vtt";sha256:string;cueCount:number}
 export interface TranscriptCue {id:string;subtitleId:string;startMs:number;endMs:number;text:string}
+export interface CourseTranscriptionRequest {courseId:string;modelId:"base"|"small"}
+export interface WhisperModelStatus {id:"base"|"small";label:string;bytes:number;url:string;installed:boolean;message:string}
+export interface WhisperComponentStatus {version:string;modelRevision:string;toolReady:boolean;toolMessage:string;models:WhisperModelStatus[]}
 export interface CourseAnalysisOptions {subtitleId?:string|null;frameTimesMs:number[]}
 export interface CourseAnalysisRequest {courseId:string;previewId:string;stage:"segments"|"summary"}
 export interface CourseStagePreview {key:string;startMs:number;endMs:number;cached:boolean;tokensMax:number}
