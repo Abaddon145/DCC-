@@ -48,7 +48,7 @@ fn time(value: &str) -> Result<u64, String> {
     }
     Ok(((hours * 60 + minutes) * 60 + seconds) * 1000 + number(ms)?)
 }
-fn parse(
+pub(super) fn parse(
     bytes: &[u8],
     format: &str,
     id: &str,

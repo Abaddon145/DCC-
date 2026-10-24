@@ -44,6 +44,8 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 
 课程结果 DTO 与来源校验参考本地映流 video_downloader 的已提交修复 c866508（MIT，Copyright 2026 14582），适配到栈藏 learning 模块；完整许可见 `YINGLIU-LICENSE.txt`。未迁入源服务、数据库或凭据。
 
+可选本地转写的 GGML 头/Whisper JSON 边界及组件摘要参考同一冻结提交的 `ai/transcription.rs` 与 `ai-components.json`，按栈藏字幕与文件访问规则独立适配。`whisper-components.json` 仅登记 whisper.cpp 1.9.1 及固定模型 revision 的元数据；当前没有随包分发 Whisper 二进制、依赖或模型，也不自动下载。后续实际分发组件时必须附上该组件及依赖自身的许可证，不能以映流的 MIT 许可替代。
+
 ## Mind Elixir 5.15.1
 
 - 上游：https://github.com/SSShooter/mind-elixir-core

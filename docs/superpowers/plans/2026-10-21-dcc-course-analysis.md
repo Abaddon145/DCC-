@@ -91,3 +91,45 @@
 8.5检查点证据：docs/evidence/merge/task8-analysis-panel.md。完整Rust400通过/2既有忽略；提交前完整前端357通过、生产构建退出0、秘密扫描412文件0。真实桌面只验证本地读取/预览/播放器控制，付费链路仍为本地HTTP runner测试，不合并两类验收。Whisper工具/模型和自动转写尚未接入，不自动下载或制造字幕；本轮以已有字幕及明确采样实现分析闭环，不能据此宣称所有M3/Task14门槛已完成。
 
 自审：覆盖主Task8材料、任务、预算、缓存及部分失败；没有复用资产结果表或扩大资产四图限制。此细化沿用已批准顺序执行；范围内实现选择记入主ledger，不重新请求确认。
+
+### 8.6 可选本地转写（继续已批准 Task8，不扩大产品范围）
+
+**Goal:** 无现成字幕时允许用户选择已核验的本地 Whisper；转写仍进入现有字幕、课程任务和来源校验体系。
+
+**Architecture:** 固定 whisper.cpp 1.9.1 和模型 revision `5359861c739e955e79d9a303bcbc70fb988958b1`，使用 M0 冻结清单，不接收前端可执行文件路径、参数、下载地址或自报摘要。Whisper 放在独立工具目录，模型放在本机配置目录，不混入课程原件或素材库备份。优先已有字幕，不在解析课程或分析时自动安装/执行。
+
+**Spec:** 主计划 Task8、M0 source-map 的 transcription.rs/whisper_models.rs；源代码只读固定 c86650831aecb55ef7bec288df9ae7fb27c8d178，保留现有 YINGLIU-LICENSE.txt。
+
+**Review Focus:** 同大小篡改模型；缺失/替换 DLL；junction/ADS 越权；JSON 时间越界/截断；取消、切库、旧原件与重复结果。前四项由 8.6a 钉住，生命周期由 8.6b/c 钉住。
+
+#### 8.6a 离线工具/模型与结果边界
+
+**Files:** 新 `src-tauri/src/learning/transcription.rs`、`transcription_tests.rs`、`src-tauri/resources/whisper-components.json`；改 `learning/mod.rs`。
+
+**Interfaces:**
+- `component_specs() -> Result<WhisperManifest,String>` 只读取编译进程序的固定清单；模型只接受 base/small。
+- `verify_components(tool_root:&Path,model_root:&Path,model_id:&str,stop:&dyn Fn()->bool) -> Result<VerifiedTranscription,String>` 仅供后端：每个 exe/DLL 及所选模型完整 SHA256、模型精确长度与 GGML 头、普通文件与祖先无重解析点；返回路径与持有的只读锁，取消不返回成功。版本由固定字节身份确定，不把“文件存在”称为可运行。
+- `parse_whisper_json(bytes:&[u8],subtitle_id:&str,duration_ms:u64) -> Result<ParsedTranscript,String>`：JSON ≤32MiB，完整行 ≤200000，每行 ≤16000 UTF-8 字节，整数毫秒、非负、有序、`0 <= start < end <= duration`，时长已知且 ≤7天；空结果失败，不夹断时间、不丢弃坏行。`ParsedTranscript{language:Option<String>,cues:Vec<TranscriptCue>}` 复用既有 cue 身份。
+- `transcript_srt(&ParsedTranscript) -> Result<Vec<u8>,String>`：输出完整 SRT ≤8MiB，拒绝会破坏 SRT 分段的空行/控制字符，而不静默修改正文；通过既有字幕解析器验证 round-trip。
+
+- [x] 先写并运行行为失败测试：两段中文/emoji/多行保持原文与毫秒；负数/小数/越界/空/超限/坏行失败；工具缺 DLL、模型同大小篡改、取消、未知ID、junction/ADS 不可通过；锁存在时 Windows 写入被阻止。
+- [x] 最小实现；测试使用微型合成清单和文件，不能将其摘要加入产品允许清单；不执行 Whisper、不下载安装模型。
+- [x] 定向9项通过；提交前完整 Rust409通过/2既有忽略、前端357通过、生产构建0。证据 `docs/evidence/merge/task8-transcription-boundary.md`，保存独立本地接口检查点；不把它称为真实语音识别已验收。
+
+#### 8.6b 工具选择与同一任务系统
+
+**Files:** 后续细化 `learning/transcription.rs`、`runtime/process.rs`、`learning/commands.rs`、`tasks.rs`、现有准备工具脚本。
+
+- [ ] 用户明确选安装或导入固定模型才落盘；本阶段不后台下载。临时文件、磁盘检查、完整摘要、原子不覆盖发布、失败只清理本次文件。
+- [ ] 同一 TaskRegistry 的转写请求只含 courseId/modelId；原件 lease/完整hash、工具模型身份与版本组成缓存键，取消/超时/切库结束 Job 子树，独立缓存目录清理，保留现有成功字幕。
+- [ ] 固定 FFmpeg PCM16/16kHz/单声道与 Whisper CPU 参数；兼容中文路径，不开放 shell/cwd/自定义参数。输出经 8.6a 解析和既有字幕事务登记；同任务重试需重新验证原件及组件。
+- [ ] 本地 fake process/合成原件验证取消、超时、部分文件、源替换、幂等及字幕回滚；用户选择真实模型后才进行真实识别验收，不混淆两种证据。
+
+#### 8.6c 学习工作区入口
+
+**Files:** 后续细化 `TranscriptPanel.tsx`、learning API/types 及测试。
+
+- [ ] 显示未安装/校验失败/可用与模型大小，明确本地 CPU/磁盘成本；用户启动后进入统一任务中心，完成刷新现有字幕列表，不自动发付费分析。
+- [ ] UI 测试覆盖缺组件、明确选择、旧库结果忽略、取消与新字幕可定位；最后统一 Task14 的真实模型、DPI/跨屏验收。
+
+8.6 自审裁定：这是主 Task8 已批准的可选转录 seam；沿用顺序执行，不再询问方案。先离线验证边界，再接实际任务与显式安装入口；当前没有模型，不声称真转写通过，也不默默拉取约148/488MB模型。
