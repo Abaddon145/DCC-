@@ -38,6 +38,9 @@ pub mod native_window;
 pub mod note_archive;
 #[cfg(test)]
 mod note_archive_tests;
+pub mod note_conversion;
+#[cfg(test)]
+mod note_conversion_tests;
 pub mod note_nodes;
 #[cfg(test)]
 mod note_nodes_tests;

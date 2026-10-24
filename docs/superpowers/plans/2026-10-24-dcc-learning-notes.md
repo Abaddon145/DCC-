@@ -4,9 +4,9 @@
 
 **Goal:** 保留映流笔记的真实原字节，再转换到栈藏现有 `document_json`；特殊内容与时间引用不丢失。
 
-**Architecture:** 复用知识库编辑器、MarkdownManager、附件、revision、备份和任务。原字节只读归档是核对资料，不是另一套编辑正文；不引入第二套 Markdown 解析器或 Vault 同步。
+**Architecture:** 复用知识库编辑器、附件、revision、备份和任务。现有手动 Markdown 入口保留 MarkdownManager；后台迁入用固定版本 Rust CommonMark 解析器直接生成同一 `document_json`，不能依赖编辑器窗口运行。原字节归档只用于核对，不新增正文编辑系统或 Vault 同步。
 
-**Tech Stack:** 现有 Rust/rusqlite/tempfile/SHA-256，React/Tiptap MarkdownManager。
+**Tech Stack:** 现有 Rust/rusqlite/tempfile/SHA-256，React/Tiptap MarkdownManager；后台解析使用锁定的 pulldown-cmark 0.13.5（9.3a 决定）。
 
 **Spec:** `C:/Users/14582/Documents/ChatGPT/视频下载软件/docs/superpowers/specs/2026-10-21-stackdcc-yingliu-merge-design.md`，主计划 `2026-10-21-stackdcc-yingliu-merge.md` Task 9；已冻结来源 `94ee1e8` 的 `docs/integration/yingliu-migration-input-v1.md`。
 
@@ -23,7 +23,7 @@
 
 | 来源 | 目标与保护 |
 | --- | --- |
-| 标题/段落/标准列表/待办/表格/代码 | 复用 MarkdownManager 生成可编辑节点；代码中的 HTML 只是文本 |
+| 标题/段落/标准列表/待办/表格/代码 | 手动 MarkdownManager 与后台固定 Rust 解析器生成同一可编辑节点；共享 fixture 核对语义，代码中的 HTML 只是文本 |
 | 已发布的安全图片/附件 | 使用目标 noteId 所属附件 UUID；未成功发布则 pending，不能标完整 |
 | 有映射且时间有效的 yingliu 视频引用 | learningReference，保留多个非连续 range；身份与指纹后台核验 |
 | 未知课程/越界时间/缺附件 | 原字节归档 + 明确待处理/失效提示，不猜同名目标 |
@@ -49,7 +49,7 @@
 ## 后续顺序（进入各步前核对具体调用链与扩展接口）
 
 1. 9.2 两个 typed 节点：后端白名单/搜索/反链、归档项归属；编辑器/大纲/导图、移动/删除确认、安全粘贴。先全链路测试，不能先启用前端后让保存失败。
-2. 9.3 转换预览/提交：复用现有 lexer/MarkdownManager；后台原字节范围绑定、映射校验、pending 与 expectedLibraryId/revision 守卫，不直接信任前端正文/摘要。精确分段接口在阅读现有 lexer 实际 token 行为后固定，禁止自己写简陋 Markdown parser。
+2. 9.3 转换预览/提交：已验证现有 lexer/MarkdownManager 的能力与边界；后台转换不能依赖 WebView，使用固定版本 Rust 解析器。原字节范围绑定、映射校验、pending 与 expectedLibraryId/revision 守卫，不直接信任前端正文/摘要；禁止自行编写简陋 Markdown parser。
 3. 9.4 笔记包/显式 Markdown/HTML/TXT 导出与恢复：原字节/块引用随包复制，保留时间与来源；跨库引用不凭 UUID 假装可用；不修改旧 JSON。
 4. 全 Task 9 回归/600 KiB 实际编辑 I/O；IME/撤销/失败草稿/物理显示在真实测试中分别报告，不能以纯函数模拟冒充完成。
 
@@ -80,3 +80,26 @@
 - 特殊内容删除/包导出/剪贴板不能只保留一个悬空 UUID（9.2–9.4 端到端测试）。
 - UTF-8 字节偏移、BOM 与 CRLF 不可被 JS 字符索引悄悄改写（9.1 范围测试、9.3 跨语言 fixture）。
 - 切库、原件变化、未发布附件不可把旧预览提交给新库（9.3 守卫、Task 12 只读快照）。
+
+## 9.3a 后台纯转换器（BASE 0239e21）
+
+**Ruling（替代早期“只复用 JS parser”的内部选择）：** Task 12 是 Rust 后台迁入任务；依赖 WebView 执行 JS 转换会在窗口关闭/重启时失去必要能力。没有可复用 Rust Markdown 依赖，自写解析器更难保证格式与偏移。新增固定 `pulldown-cmark = {version="=0.13.5",default-features=false}`，锁定 Cargo.lock；不启用 HTML 渲染、CLI 或 SIMD，不新增编辑器。代价是 Rust/JS 两个导入入口需共享常用格式 fixture 验证语义，默认正文仍唯一为 document_json。
+
+**来源：** 官方仓库提交 `48a2767b5b8ab0a4893e80d942e510065889fc6b` 的 `pulldown-cmark/Cargo.toml` 与 `LICENSE` 已用 GitHub connector 核对，版本 0.13.5、MIT、最低 Rust 1.71.1。Cargo 配置镜像成功获取同版本（官方 crates HTTP 被拒绝后按正常 Cargo 源替换查询），不用无法打开的网页缓存冒充验证。实际依赖及所有新增传递依赖许可随资源打包。
+
+**Files:** 新 `learning/note_conversion.rs` / `note_conversion_tests.rs`；改 Cargo.toml/lock、learning/mod.rs、第三方声明及资源列表。该纯边界完成前不替换现有手动 MD 导入。
+
+**Interfaces：**
+- `AttachmentTarget {attachment_id:String, kind:Image|File}`；`AttachmentMap=HashMap<sourceKey,AttachmentTarget>`。只接受明确映射，不按文件名猜测；函数不读取路径或下载文件。
+- `MediaTarget {course_id,media_id,fingerprint,duration_ms}`；`MediaMap=HashMap<sourceItemId,MediaTarget>`。旧 `yingliu://video/<id>?t=<ms>` 映射明确的时间点为 `[t,t+1)`；越界/未知身份保留原文并 pending，不虚构连续片段。多 range 由已有 typed 节点/源记录适配，不合并成一个跨度。
+- `convert_source_note(bytes:&[u8], attachments:&AttachmentMap, media:&MediaMap)->Result<ConversionPreview,String>`，纯 CPU/内存，无文件/网络/数据库/付费调用。输入 <=5MiB；返回 `document:Option<Value>`, `archive_hash`, `warnings`, `unsupported:Vec<PreservedSpan>`, `pending:bool`。
+- `PreservedSpan {placeholder_id,start_byte,end_byte,label,reason}`：规范 UUID 仅为草案占位；范围直接来自解析器原始 UTF-8 字节偏移，包含原换行与特殊标记；9.3b 在已登记原件上创建实际片段并 remap。暂存 UUID 不能绕过现有 save_in 的归档登记校验。
+- 常用标题/段落/引用块/列表/任务/无特殊属性表格/代码/HTTP 链接直接转现有节点。图片/本地附件只有映射明确时产生托管 UUID 节点；缺附件保留块并 pending。Code 中 HTML 为普通代码，实际 HTML/注释/frontmatter/未支持 Wiki/公式/脚注等按完整最外层块保留，不能执行或静默删掉。
+- 原件摘要对全部原字节计算。BOM 与空白/源定义即使未成为编辑内容，也必须保留在原始归档；非空无法说明的解析间隙生成保留块。无效 UTF-8 返回 document=None/pending，允许调用方保留/导出原字节，不伪装转成字符串。
+- 输入超过5MiB直接拒绝；结构超过50,000行、100,000事件、64层或目标JSON超过4MiB时，以整段原文保留并 pending，不截断或无界构建。普通 600KiB 文本必须实际转换并通过知识文档校验。
+
+- [x] RED：标准格式/附件与课程映射、未知 HTML/Wiki/frontmatter/公式原始范围、BOM/CRLF/emoji、缺附件/越界课程、跨段引用定义、600KiB、无效编码与超限，转换桩 7 组全部失败；再添加链接规范化、嵌套与围栏属性边界，先失败再修复。
+- [x] GREEN：启用固定原生解析器 offset iterator，流式组装现有节点，保留未知整块；不调用 HTML renderer。9 组转换定向通过，4 组常用格式 fixture 在 Rust/JS 共用，前端 Markdown 10 项通过。结果经现有 inspect_document 校验，归档占位待 9.3b remap 后才能保存。
+- [x] 核对锁文件最小增量、第三方许可；定向测试、完整 Rust 446 / 前端 380 通过、生产构建成功。证据 `docs/evidence/merge/task9-note-conversion.md`，本地独立提交；此步未接通预览/提交或实际迁入。
+
+9.3b 再固定库/来源身份、预览快照、附件原子发布、目标 revision、幂等与状态报告接口，并在启用入口前测试取消/切库/失败恢复；不能把纯转换器的模拟通过当成真实迁入成功。

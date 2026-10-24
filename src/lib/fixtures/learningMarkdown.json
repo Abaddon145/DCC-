@@ -1,0 +1,22 @@
+[
+  {
+    "name": "headings and inline marks",
+    "markdown": "# UE5 学习\n\n正文 **粗体** *斜体* ~~删除~~ `code` [官方](https://example.com)\n",
+    "document": {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"UE5 学习"}]},{"type":"paragraph","content":[{"type":"text","text":"正文 "},{"type":"text","text":"粗体","marks":[{"type":"bold"}]},{"type":"text","text":" "},{"type":"text","text":"斜体","marks":[{"type":"italic"}]},{"type":"text","text":" "},{"type":"text","text":"删除","marks":[{"type":"strike"}]},{"type":"text","text":" "},{"type":"text","text":"code","marks":[{"type":"code"}]},{"type":"text","text":" "},{"type":"text","text":"官方","marks":[{"type":"link","attrs":{"href":"https://example.com"}}]}]}]}
+  },
+  {
+    "name": "nested lists and quotes",
+    "markdown": "> 学习目标\n\n- 材质\n  - 纹理\n\n3. 光照\n4. 渲染\n",
+    "document": {"type":"doc","content":[{"type":"blockquote","content":[{"type":"paragraph","content":[{"type":"text","text":"学习目标"}]}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"材质"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"纹理"}]}]}]}]}]},{"type":"orderedList","attrs":{"start":3},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"光照"}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"渲染"}]}]}]}]}
+  },
+  {
+    "name": "task list",
+    "markdown": "- [ ] 练习\n- [x] 完成\n",
+    "document": {"type":"doc","content":[{"type":"taskList","content":[{"type":"taskItem","attrs":{"checked":false},"content":[{"type":"paragraph","content":[{"type":"text","text":"练习"}]}]},{"type":"taskItem","attrs":{"checked":true},"content":[{"type":"paragraph","content":[{"type":"text","text":"完成"}]}]}]}]}
+  },
+  {
+    "name": "plain table",
+    "markdown": "| A | B |\n| --- | --- |\n| 内容 | **加粗** |\n",
+    "document": {"type":"doc","content":[{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"A"}]}]},{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"B"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"内容"}]}]},{"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"加粗","marks":[{"type":"bold"}]}]}]}]}]}]}
+  }
+]

@@ -55,4 +55,8 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 
 Markdown 解析使用 Marked 17.0.6（MIT，MarkedJS / Christopher Jeffrey），许可证见随包 `MARKED-LICENSE.md`。
 
+后台学习笔记迁入的纯转换器使用 pulldown-cmark 0.13.5（MIT，Copyright 2015 Google Inc.），固定上游提交 `48a2767b5b8ab0a4893e80d942e510065889fc6b`：https://github.com/pulldown-cmark/pulldown-cmark/tree/48a2767b5b8ab0a4893e80d942e510065889fc6b 。禁用默认 CLI/HTML 渲染与 SIMD，仅消费带原始字节偏移的解析事件；不替换现有手动导入与编辑器。随包 `PULLDOWN-CMARK-LICENSE.txt` 保留完整许可。
+
+该转换器新增传递依赖 unicase 2.10.0（MIT OR Apache-2.0，本应用选择 MIT），上游 https://github.com/seanmonstar/unicase ，Copyright (c) 2014-2026 Sean McArthur。随包 `UNICASE-LICENSE-MIT.txt` 保留完整许可；版本与摘要由 Cargo.lock 固定。
+
 知识库设计参考 Trilium、Joplin 和 Logseq 的产品交互，独立实现持久化、历史、附件和 AI；未复制其 GPL/AGPL 代码。
