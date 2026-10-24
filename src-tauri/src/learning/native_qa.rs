@@ -30,6 +30,10 @@ pub(crate) fn workspace_command_allowed(command: &str) -> bool {
             | "list_learning_courses"
             | "list_learning_subtitles"
             | "list_learning_series"
+            | "list_course_analyses"
+            | "get_course_analysis"
+            | "prepare_course_analysis"
+            | "prepare_course_summary"
             | "upsert_learning_series"
             | "set_learning_series_members"
             | "delete_learning_series"
@@ -113,6 +117,51 @@ pub fn run_workspace(root: PathBuf) -> Result<(), String> {
         super::store::set_series_members(db, &series.id, series.revision, &[course.id.clone()])?;
         Ok(())
     })?;
+    // Fixed local fixture, not an AI/network result. Paid task commands remain
+    // blocked by workspace_command_allowed throughout interactive acceptance.
+    let analysis_preview = super::analysis::prepare(
+        &state,
+        &library,
+        &course.id,
+        &super::analysis_models::CourseAnalysisOptions::default(),
+        None,
+    )?;
+    let analysis_input = super::analysis::load_confirmed(
+        &state,
+        &library,
+        &course.id,
+        &analysis_preview.preview_id,
+    )?;
+    let segment = analysis_input.segments.first().ok_or("QA缺少分析材料")?;
+    let cue = segment.cues.get(1).ok_or("QA缺少来源字幕")?;
+    let fixed = serde_json::json!({"contentType":"tutorial","oneSentenceSummary":"隔离合成课程分析（非 AI）","overview":"本机固定结果，仅用于核对界面、来源跳转与预览。未调用在线 AI。","chapters":[],"keyPoints":[{"timeMs":cue.start_ms,"title":"合成学习要点","content":"点击时间码应跳转到真实合成字幕位置。","importance":3,"sourceSegmentIds":[cue.id]}],"tutorialSteps":[],"terms":[],"actionItems":["核对字幕与分析面板切换"],"tags":["合成验收"],"sections":[{"id":"general","title":"用途","items":[{"title":"时间纠正示例","content":"应显示本机校验报告，不伪装为模型成功。","timeMs":0,"sourceSegmentIds":[cue.id],"keyframeIds":[]}]}],"warnings":["合成固定结果，非付费 AI 产物"]});
+    let analysis_result = super::analysis_result::parse_course_result(
+        &fixed.to_string(),
+        &super::analysis_models::CourseScope {
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            cues: &segment.cues,
+            frames: &segment.frames,
+        },
+    )?;
+    let analysis_id = state.with_library_mut(|db, base| {
+        let id = super::analysis_store::begin_analysis(
+            db,
+            base,
+            &analysis_input,
+            chrono::Utc::now().timestamp(),
+        )?;
+        super::analysis_store::record_stage(
+            db,
+            &analysis_input,
+            &id,
+            &segment.input_hash,
+            Ok(&analysis_result),
+            Some(0),
+        )?;
+        super::analysis_store::finish_analysis(db, &analysis_input, &id, "completed", "")?;
+        Ok(id)
+    })?;
     state.with_library(|db, _| {
         let mut preferences = crate::organization::load_library_preferences(db)?;
         preferences.startup_module = "videoLibrary".into();
@@ -123,7 +172,7 @@ pub fn run_workspace(root: PathBuf) -> Result<(), String> {
         crate::organization::save_library_preferences(db, preferences)?;
         Ok(())
     })?;
-    std::fs::write(root.join("workspace.json"),serde_json::to_vec_pretty(&serde_json::json!({"libraryId":library,"courseId":course.id,"mediaId":media,"videoSha256":preview.sha256,"kind":"isolated-real-workspace"})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    std::fs::write(root.join("workspace.json"),serde_json::to_vec_pretty(&serde_json::json!({"libraryId":library,"courseId":course.id,"mediaId":media,"videoSha256":preview.sha256,"analysisId":analysis_id,"analysisFixture":"local-fixed-not-ai","kind":"isolated-real-workspace"})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     let mut context = tauri::generate_context!();
     context.config_mut().app.windows.clear();
     crate::application_builder(state, Some(root))
@@ -140,6 +189,10 @@ mod workspace_qa_tests {
             "start_learning_playback",
             "get_workspace_context",
             "get_media_entry",
+            "list_course_analyses",
+            "get_course_analysis",
+            "prepare_course_analysis",
+            "prepare_course_summary",
         ] {
             assert!(super::workspace_command_allowed(command));
         }
@@ -152,6 +205,8 @@ mod workspace_qa_tests {
             "restore_backup",
             "save_global_preferences",
             "run",
+            "start_library_task",
+            "retry_library_task",
         ] {
             assert!(!super::workspace_command_allowed(command));
         }

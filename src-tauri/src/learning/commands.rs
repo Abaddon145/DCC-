@@ -3,6 +3,18 @@ use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
 #[tauri::command]
+pub fn list_course_analyses(
+    state: State<AppState>,
+    expected_library_id: String,
+    course_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<super::analysis_models::CourseAnalysisHistoryItem>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::analysis_store::list_history(db, &course_id, offset, limit)
+    }))
+}
+#[tauri::command]
 pub async fn prepare_course_summary(
     app: tauri::AppHandle,
     expected_library_id: String,

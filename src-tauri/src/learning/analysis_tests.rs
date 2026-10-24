@@ -2,6 +2,42 @@ use super::{analysis_models::*, analysis_result::parse_course_result, models::Tr
 use serde_json::{json, Value};
 
 #[test]
+fn learning_analysis_history_list_pages_metadata_without_loading_results_or_other_courses() {
+    let (dir, mut db, input) = stored_fixture();
+    for n in 0..3 {
+        let mut preview = input.clone();
+        preview.preview.preview_id = uuid::Uuid::new_v4().to_string();
+        preview.preview.created_at = 1000 + n;
+        preview.preview.expires_at = 87400 + n;
+        super::analysis_store::save_preview(&db, dir.path(), &preview).unwrap();
+        let id =
+            super::analysis_store::begin_analysis(&mut db, dir.path(), &preview, 1000 + n).unwrap();
+        db.execute("UPDATE learning_analyses SET result_json=zeroblob(1048577),prompt_version=?1 WHERE id=?2",rusqlite::params![if n==2 { super::analysis_summary::PROMPT_VERSION }else{ super::analysis_store::PROMPT_VERSION },id]).unwrap();
+    }
+    let page = super::analysis_store::list_history(&db, &input.preview.course_id, 0, 2).unwrap();
+    assert_eq!(page.total, 3);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].stage, CourseAnalysisPhase::Summary);
+    assert_eq!(
+        (page.items[0].completed_stages, page.items[0].total_stages),
+        (0, 1)
+    );
+    assert_eq!(page.items[0].created_at, 1002);
+    assert!(serde_json::to_value(&page).unwrap()["items"][0]
+        .get("result")
+        .is_none());
+    let last = super::analysis_store::list_history(&db, &input.preview.course_id, 2, 2).unwrap();
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].created_at, 1000);
+    assert!(
+        super::analysis_store::list_history(&db, &uuid::Uuid::new_v4().to_string(), 0, 50).is_err()
+    );
+    let bounded =
+        super::analysis_store::list_history(&db, &input.preview.course_id, -10, 5000).unwrap();
+    assert_eq!((bounded.offset, bounded.limit), (0, 50));
+}
+
+#[test]
 fn learning_analysis_history_remains_readable_without_reusing_expired_consent() {
     let (dir, mut db, input) = stored_fixture();
     let video = dir.path().join("fixture.mp4");

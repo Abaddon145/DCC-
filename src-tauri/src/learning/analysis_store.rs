@@ -12,6 +12,35 @@ pub const FORMAT_VERSION: i64 = 1;
 pub const TEMPLATE_VERSION: i64 = 1;
 pub const TEMPLATE_ID: &str = "general";
 pub const PROMPT_VERSION: &str = "dcc-course-v1";
+
+pub(crate) fn list_history(
+    db: &Connection,
+    course: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<crate::models::Page<CourseAnalysisHistoryItem>, String> {
+    uuid(course)?;
+    super::store::course(db, course)?;
+    let offset = offset.max(0);
+    let limit = limit.clamp(1, 50);
+    let total = db
+        .query_row(
+            "SELECT count(*) FROM learning_analyses WHERE course_id=?1",
+            [course],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let items=db.prepare("SELECT a.id,a.prompt_version,a.status,substr(a.error,1,2000),a.created_at,(SELECT count(*) FROM learning_analysis_stages s WHERE s.analysis_id=a.id),(SELECT count(*) FROM learning_analysis_stages s WHERE s.analysis_id=a.id AND s.status='completed') FROM learning_analyses a WHERE a.course_id=?1 ORDER BY a.created_at DESC,a.id DESC LIMIT ?2 OFFSET ?3").map_err(|e|e.to_string())?.query_map(params![course,limit,offset],|r| {
+        let prompt:String=r.get(1)?;
+        Ok(CourseAnalysisHistoryItem { id:r.get(0)?,stage:if prompt==super::analysis_summary::PROMPT_VERSION {CourseAnalysisPhase::Summary}else{CourseAnalysisPhase::Segments},status:r.get(2)?,error:r.get(3)?,created_at:r.get(4)?,total_stages:r.get(5)?,completed_stages:r.get(6)? })
+    }).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(crate::models::Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
 // ponytail: one bounded immutable JSON snapshot; use separately streamed frame
 // files if real course previews need more than16MiB, never truncate sources.
 pub(crate) const MAX_SNAPSHOT: u64 = 16 * 1024 * 1024;
@@ -371,7 +400,7 @@ pub(crate) fn history(
     }
     super::store::course(db, course)?;
     let mut detail = db.query_row("SELECT preview_id,source_fingerprint,substr(model,1,200),status,substr(error,1,2000),created_at,updated_at FROM learning_analyses WHERE id=?1 AND course_id=?2", params![id,course], |r| Ok(CourseAnalysisDetail {
-        id: id.into(), course_id: course.into(), preview_id:r.get(0)?, source_fingerprint:r.get(1)?, model:r.get(2)?, status:r.get(3)?, error:r.get(4)?, created_at:r.get(5)?, updated_at:r.get(6)?, stale_reasons: vec![],
+        id: id.into(), course_id: course.into(), preview_id:r.get(0)?, source_fingerprint:r.get(1)?, model:r.get(2)?, parent_analysis_id:None, status:r.get(3)?, error:r.get(4)?, created_at:r.get(5)?, updated_at:r.get(6)?, stale_reasons: vec![],
         stages: crate::models::Page { items:vec![], total:0, offset:offset.max(0), limit:limit.clamp(1,50) }, selected_stage_key:stage.map(str::to_owned), result:None,
     })).map_err(|_| "此课程没有该分析记录")?;
     detail.stages.total = db
@@ -404,6 +433,7 @@ pub(crate) fn history(
         }
     };
     if let Some(input) = &snapshot {
+        detail.parent_analysis_id = input.summary.as_ref().map(|s| s.parent_analysis_id.clone());
         let (cues, frames, start_ms, end_ms) = if let Some(key) = stage {
             let segment = stage_material(input, key)?;
             (

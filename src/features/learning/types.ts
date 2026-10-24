@@ -45,8 +45,13 @@ export interface CourseAnalysisResult {
   sectionValidation:{stage:string;scopeStartMs:number;scopeEndMs:number;sectionId:string;itemIndex:number;itemTitle:string;disposition:string;reason:string}[];
 }
 export interface CourseAnalysisStage {key:string;startMs:number;endMs:number;status:"pending"|"completed"|"failed";tokensUsed:number|null;error:string}
+export interface CourseAnalysisHistoryItem {
+  id:string;stage:CourseAnalysisRequest["stage"];status:CourseAnalysisDetail["status"];
+  completedStages:number;totalStages:number;error:string;createdAt:number;
+}
 export interface CourseAnalysisDetail {
   id:string;courseId:string;previewId:string;sourceFingerprint:string;model:string;
+  parentAnalysisId:string|null;
   status:"queued"|"running"|"partial"|"completed"|"failed"|"cancelled";
   error:string;createdAt:number;updatedAt:number;staleReasons:string[];
   stages:import("../../types").Page<CourseAnalysisStage>;selectedStageKey:string|null;result:CourseAnalysisResult|null;

@@ -197,6 +197,18 @@ pub struct CourseAnalysisStage {
     pub error: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CourseAnalysisHistoryItem {
+    pub id: String,
+    pub stage: CourseAnalysisPhase,
+    pub status: String,
+    pub completed_stages: u64,
+    pub total_stages: u64,
+    pub error: String,
+    pub created_at: i64,
+}
+
 /// Stage metadata is paged; only the explicitly selected result is loaded.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +218,7 @@ pub struct CourseAnalysisDetail {
     pub preview_id: String,
     pub source_fingerprint: String,
     pub model: String,
+    pub parent_analysis_id: Option<String>,
     pub status: String,
     pub error: String,
     pub created_at: i64,

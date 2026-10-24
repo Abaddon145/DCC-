@@ -1,10 +1,11 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
 import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
-import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail} from "./types";
+import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem} from "./types";
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  listCourseAnalyses:(expectedLibraryId:string,courseId:string,offset=0,limit=50)=>invoke<Page<CourseAnalysisHistoryItem>>("list_course_analyses",{expectedLibraryId,courseId,offset,limit}),
   getCourseAnalysis:(expectedLibraryId:string,courseId:string,analysisId:string,stageKey:string|null=null,offset=0,limit=50)=>invoke<CourseAnalysisDetail>("get_course_analysis",{expectedLibraryId,courseId,analysisId,stageKey,offset,limit}),
   prepareCourseAnalysis:(expectedLibraryId:string,courseId:string,options:CourseAnalysisOptions)=>invoke<CourseAnalysisPreview>("prepare_course_analysis",{expectedLibraryId,courseId,options}),
   prepareCourseSummary:(expectedLibraryId:string,courseId:string,parentAnalysisId:string)=>invoke<CourseAnalysisPreview>("prepare_course_summary",{expectedLibraryId,courseId,parentAnalysisId}),

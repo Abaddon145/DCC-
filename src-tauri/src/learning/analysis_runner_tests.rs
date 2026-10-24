@@ -242,6 +242,11 @@ fn learning_analysis_runner_summary_uses_its_own_consent_and_retries_only_missin
         "one terminal group is published as the full summary result"
     );
     assert_eq!(detail.status, "completed");
+    assert_eq!(
+        detail.parent_analysis_id.as_deref(),
+        completed["analysisId"].as_str(),
+        "a summary retry must derive its actual parent, not reuse the partial summary as parent"
+    );
     assert!(detail.stale_reasons.is_empty());
     assert_eq!(server.join().unwrap(), vec![0, 900000, 900000, 0]);
     assert_eq!(

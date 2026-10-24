@@ -13,6 +13,7 @@ import {NativeLearningSurface,hasLearningOverlay} from "./NativeLearningSurface"
 import {LearningControls} from "./LearningControls";
 import {TranscriptPanel} from "./TranscriptPanel";
 import {LearningSeries} from "./LearningSeries";
+import {CourseAnalysisPanel} from "./CourseAnalysisPanel";
 import type {PlaybackAction,PlaybackSnapshot,ScopedPlaybackEvent,NativePointerEvent} from "./types";
 import "./LearningWorkspace.css";
 
@@ -21,6 +22,7 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
   const [courseId,setCourseId]=useState(initialCourseId),[title,setTitle]=useState("学习视频"),[snapshot,setSnapshot]=useState<PlaybackSnapshot|null>(null),[error,setError]=useState(""),[retry,setRetry]=useState(0),[leaving,setLeaving]=useState(false);
   const [focus,setFocus]=useState<"learning"|"editor">("learning"),[blocked,setBlocked]=useState(false),[composing,setComposing]=useState(false),[menu,setMenu]=useState<{x:number;y:number}|null>(null),[help,setHelp]=useState(false);
   const [transcript,setTranscript]=useState(false);
+  const [analysis,setAnalysis]=useState(false);
   const [completed,setCompleted]=useState(false);
   const [seriesPanel,setSeriesPanel]=useState(false),seriesOrder=useRef<string[]>([]);
   useEffect(()=>{seriesOrder.current=[];},[libraryId]);
@@ -149,11 +151,15 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
     <header className="learning-header"><button className="secondary-button" disabled={leaving} onClick={()=>void back()}><ArrowLeft size={16}/>{projectId?"返回项目":"返回视频详情"}</button><div><span className="eyebrow">LEARNING WORKSPACE</span><h1>{title}</h1></div><button ref={helpButton} className="secondary-button" onClick={()=>setHelp(value=>!value)} aria-expanded={help}><Keyboard size={16}/>快捷键</button></header>
     {failure&&<div className="learning-error" role="alert"><span>{failure}</span><button className="secondary-button" disabled={leaving} onClick={()=>{setError("");setRetry(value=>value+1);}}>重试播放</button></div>}
     {!snapshot&&!failure&&<LoadFeedback label="正在启动原生播放器…" skeleton/>}
-    <div className="learning-workspace-actions"><button className="secondary-button learning-transcript-toggle" aria-expanded={transcript} onClick={()=>setTranscript(value=>!value)}>{transcript?"收起课程字幕":"课程字幕"}</button>
+    <div className="learning-workspace-actions"><button className="secondary-button learning-transcript-toggle" aria-expanded={transcript} onClick={()=>{setTranscript(value=>!value);setAnalysis(false);}}>{transcript?"收起课程字幕":"课程字幕"}</button>
+    <button className="secondary-button learning-transcript-toggle" aria-expanded={analysis} onClick={()=>{setAnalysis(value=>!value);setTranscript(false);}}>{analysis?"收起课程分析":"课程分析"}</button>
     <button className="secondary-button learning-transcript-toggle" aria-expanded={seriesPanel} onClick={()=>setSeriesPanel(value=>!value)}>{seriesPanel?"收起课程系列":"课程系列"}</button>
     <button className="secondary-button learning-transcript-toggle" disabled={!snapshot?.ready||leaving} aria-pressed={completed} onClick={()=>control({type:"completed",completed:!completed})}>{completed?"已完成 · 恢复学习":"标记课程完成"}</button></div>
     {seriesPanel&&<aside className="learning-series-panel"><LearningSeries libraryId={libraryId} courseId={courseId} onOrderChange={ids=>{seriesOrder.current=ids;}} onOpen={async id=>{if(busy.current)return;const ticket=adjacentGate.begin();await flushWorkspaceEdits();if(adjacentGate.isCurrent(ticket))setCourseId(id);}}/></aside>}
-    {snapshot&&<><div className="learning-stage-row"><div className="learning-video-stage"><NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>{!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>{transcript&&<aside className="learning-side-panel"><TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})}/></aside>}</div><LearningControls key={snapshot.sessionId} snapshot={snapshot} disabled={!snapshot.ready||!!snapshot.error||leaving} onAction={control}/></>}
+    <div className="learning-stage-row"><div className="learning-video-stage">{snapshot&&<NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>} {snapshot&&!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>
+    {analysis&&<aside className="learning-side-panel"><CourseAnalysisPanel libraryId={libraryId} courseId={courseId} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/></aside>}
+    {transcript&&<aside className="learning-side-panel"><TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})}/></aside>}</div>
+    {snapshot&&<LearningControls key={snapshot.sessionId} snapshot={snapshot} disabled={!snapshot.ready||!!snapshot.error||leaving} onAction={control}/>}
     {help&&<div ref={helpDialog} className="learning-shortcut-help" data-native-overlay role="dialog" aria-modal="true" aria-label="播放器快捷键"><header><h2>播放器快捷键</h2><button className="secondary-button" autoFocus onClick={()=>{setHelp(false);helpButton.current?.focus();}}>关闭</button></header><p>编辑输入、中文输入法和弹窗优先。单击播放/暂停，双击全屏，视频区域滚轮调整音量。</p><dl>{defaultLearningBindings.map(binding=><div key={binding.id}><dt>{learningBindingLabels[binding.id]}</dt><dd><kbd>{binding.shortcut}</kbd></dd></div>)}</dl></div>}
     {menu&&<ContextMenu {...menu} title="播放控制" onClose={()=>setMenu(null)} items={[{label:snapshot?.paused?"播放":"暂停",run:()=>actionRef.current("player.toggle")},{label:"后退 5 秒",run:()=>actionRef.current("player.seek-back")},{label:"前进 5 秒",run:()=>actionRef.current("player.seek-forward")},{label:"切换全屏",run:()=>actionRef.current("player.fullscreen")},{label:"快捷键说明",run:()=>setHelp(true)}]}/>}
   </section>;

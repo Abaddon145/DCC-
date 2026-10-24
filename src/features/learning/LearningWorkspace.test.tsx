@@ -6,10 +6,12 @@ import {learningApi} from "./api";
 import type {PlaybackSnapshot} from "./types";
 import {flushWorkspaceEdits,registerNoteSaveGuard} from "../../lib/noteSaveGuard";
 import {NativeLearningSurface} from "./NativeLearningSurface";
+import type {CourseAnalysisDetail} from "./types";
 
 const events=vi.hoisted(()=>new Map<string,(event:{payload:any})=>void>());
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,handler:(event:{payload:any})=>void)=>{events.set(name,handler);return ()=>events.delete(name);})}));
-vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn(),listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn()}}));
+vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([])}}));
 const initial:PlaybackSnapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:1500,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[{id:1,kind:"audio",label:"中文"},{id:2,kind:"sub",label:"中文字幕"}],audioId:1,subtitleId:null,fullscreen:false,error:null,saveError:null};
 const props={libraryId:"lib",courseId:"course",onBack:vi.fn(),notify:vi.fn()};
 beforeEach(()=>{
@@ -20,6 +22,25 @@ beforeEach(()=>{
   vi.mocked(learningApi.getPlayback).mockResolvedValue(initial);
   vi.mocked(learningApi.stopPlayback).mockResolvedValue(undefined);
   vi.mocked(learningApi.controlPlayback).mockImplementation(async(_lib,_sid,action)=>({...initial,...(action.type==="fullscreen"?{fullscreen:action.enabled}:action.type==="pause"?{paused:action.paused}:action.type==="volume"?{volume:action.volume}:{})}));
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);
+  vi.mocked(learningApi.listCourseAnalyses).mockResolvedValue({items:[{id:"analysis",stage:"segments",status:"completed",completedStages:1,totalStages:1,error:"",createdAt:1000}],total:1,offset:0,limit:50});
+  const saved:CourseAnalysisDetail={id:"analysis",courseId:"course",previewId:"preview",sourceFingerprint:"a".repeat(64),model:"deepseek-chat",parentAnalysisId:null,status:"completed",error:"",createdAt:1000,updatedAt:1000,staleReasons:[],stages:{items:[],total:0,offset:0,limit:50},selectedStageKey:null,result:{contentType:"tutorial",oneSentenceSummary:"课程要点",overview:"保存的课程说明",chapters:[],keyPoints:[{timeMs:11500,title:"材质参数",content:"学习参数",importance:3,sourceSegmentIds:["cue"]}],tutorialSteps:[],terms:[],actionItems:[],tags:[],warnings:[],sections:[],sectionValidation:[]}};
+  vi.mocked(learningApi.getCourseAnalysis).mockResolvedValue(saved);
+});
+it("opens analysis beside the native viewport and reuses protected playback seeking",async()=>{
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
+  fireEvent.click(await screen.findByRole("button",{name:/00:11 · 材质参数/}));
+  await waitFor(()=>expect(learningApi.controlPlayback).toHaveBeenCalledWith("lib","session",{type:"seek",positionMs:11500}));
+  fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
+  expect(screen.queryByRole("region",{name:"课程分析"})).toBeNull();
+  expect(await screen.findByRole("region",{name:"课程字幕"})).toBeInTheDocument();
+});
+it("keeps analysis history available when the native playback tool is missing",async()=>{
+  vi.mocked(learningApi.startPlayback).mockRejectedValueOnce(new Error("固定 mpv 工具缺失"));
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
+  expect(await screen.findByRole("button",{name:/00:11 · 材质参数/})).toBeDisabled();
 });
 it("shows missing-tool failure with retry, not an empty player",async()=>{
   vi.mocked(learningApi.startPlayback).mockRejectedValueOnce(new Error("固定 mpv 工具缺失"));
