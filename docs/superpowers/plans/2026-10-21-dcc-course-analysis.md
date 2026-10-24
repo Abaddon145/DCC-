@@ -71,6 +71,8 @@
 
 分段检查点已实现并验证：真实TaskRegistry日志+localhost HTTP驱动生产runner，3成功/1失败→新preview只发送第4段，全缓存0新请求；391项Rust/345项前端及生产构建通过。证据docs/evidence/merge/task8-runner.md。整课汇总分组/费用预览和桌面实际调度仍未完成，不能把本检查点称为8.4全部完成。
 
+汇总分组检查点：已实现完整结果流式读取/组装、实际转义字节预算、8层/64请求边界、最终合并余量及材料指纹；4项RED→GREEN，完整Rust395通过/2既有忽略、构建0。证据docs/evidence/merge/task8-summary-plan.md。新汇总批准/谱系/执行/历史接口尚未接入，Summary任务仍明确拒绝；不得将离线计划称为已批准或已生成全片汇总。
+
 - [ ] mock HTTP真调用链：4段中3成功1失败，重新确认preview后仅重发第4段；取消/切库/超额/陈旧preview不误写。汇总超限分组不截断成功段。
 - [x] 分段CourseAnalysis进入TaskRegistry与全局ai::acquire_request；取消监控和网络后再次验源，逐段事务提交。通用retry对课程返回需重新预览，不重放已消费preview；汇总在独立预览实现前明确拒绝。
 - [x] TaskCenter保留全部活动/失败/需操作项，完成历史200条、逐项结果沿用分页；只有真实阶段总量才显示计数。
