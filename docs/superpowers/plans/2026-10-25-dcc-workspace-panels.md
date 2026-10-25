@@ -69,3 +69,16 @@
 - [x] RED：真实学习组件面板切换/外点/专注、保留分析输入和原生同一session；迟到偏好不覆盖操作；持久化只closed/pinned且键learning；后端先拒绝learning context。
 - [x] GREEN：接入；splitter重复消费已处理快捷键先失败再修复，补布局读取失败/错库重试检查，后台播放继续。
 - [x] 全Rust471/前端410通过、生产构建成功、凭据扫描及本地提交随阶段保存。证据 `docs/evidence/merge/task10-learning-panels.md`。知识库10c-K仍单独接入，真实原生/DPI仍Task14。
+
+## 10c-K1 知识导航真实过滤（BASE 6df1966）
+
+复杂接缝只读核查由6.1 Sol high完成；主线程核对实际SQL/前端客户端后裁定：左侧一个面板保留导航+列表两列与笔记拖入笔记本；宽度沿用全局navigationWidth/listWidth，外侧调宽只改变listWidth。右侧信息区留在NoteEditor内的稳定兄弟位置，不上提/重建editor。具体UI修改在数据边界通过后再固定。
+
+**本步Files/接口：** `knowledge.rs` / 其既有tests、`knowledge_commands.rs`、`src/lib/knowledge.ts`。无schema/新关系表。
+- `NoteNavigation<'a> {unfiled_only:bool,project_id:Option<&'a str>}`，Default为false/None。
+- `search_navigated(db,query,notebook,trash,favorite,offset,limit,manual,navigation)` 是共享查询；原search/search_ordered原签名及所有现有排序调用仍保留，向新函数传Default。FTS/LIKE、排序、分页和count都复用同一WHERE，不把当前页做前端过滤。
+- 收件箱=未分笔记本：增加 `n.notebook_id IS NULL`；项目笔记=正文直接引用该项目：EXISTS knowledge_references(kind=project,targetId)。项目ID必须规范UUID且当前库projects中存在；无匹配/错库不扩大结果，不从项目素材关系猜归属。多个同项目引用不重复计数。
+- 仅新unfiled/project视图禁用手动排序；后台manual=true时明确拒绝，已有All/笔记本/收藏排序不改。最近=最近更新，沿现有非手动updated_at排序，不虚构最近打开记录。
+- search_notes命令新增可选unfiledOnly/projectId，旧调用默认值完全兼容；前端NoteSearch同名可选字段，仍绑定客户端libraryId。
+- [x] RED→GREEN：真实数据库收件箱与分类/关键词/收藏/回收站/分页count组合；真实项目直接引用、多个引用不重计、与未分类和收藏组合；非法/未知项目及新视图手动排序拒绝；All/旧排序仍通过。
+- [x] 定向及完整Rust473/前端410通过、生产构建成功、凭据扫描与本地提交随阶段保存。证据 `docs/evidence/merge/task10-knowledge-navigation-query.md`；接下来才接知识库真实导航，原Task10仍未完成。

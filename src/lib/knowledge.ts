@@ -11,7 +11,7 @@ export type NoteInput = Pick<KnowledgeNote, "notebookId" | "title" | "document" 
 export interface KnowledgeNotebook { id: string; parentId: string | null; name: string; sortOrder: number }
 export interface NoteRevision { id: string; noteId: string; snapshot: KnowledgeNote; pinned: boolean; createdAt: string }
 export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string};
-export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean }
+export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean;unfiledOnly?:boolean;projectId?:string|null }
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt"|"color">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
 export interface RecoveryDraft { input:NoteInput; savedAt:string }

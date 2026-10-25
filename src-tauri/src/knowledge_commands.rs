@@ -618,9 +618,11 @@ pub fn search_notes(
     offset: u32,
     limit: u32,
     manual_order: Option<bool>,
+    unfiled_only: Option<bool>,
+    project_id: Option<String>,
 ) -> Result<NotePage, String> {
     active(state.with_library_if_id(&library_id, |db, _| {
-        knowledge::search_ordered(
+        knowledge::search_navigated(
             db,
             &query,
             notebook_id.as_deref(),
@@ -629,6 +631,10 @@ pub fn search_notes(
             offset,
             limit,
             manual_order.unwrap_or(false),
+            knowledge::NoteNavigation {
+                unfiled_only: unfiled_only.unwrap_or(false),
+                project_id: project_id.as_deref(),
+            },
         )
     })?)
 }
