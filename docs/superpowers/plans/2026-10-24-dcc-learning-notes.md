@@ -124,3 +124,19 @@
 - [x] 定向 39 项、完整 Rust 457 / 前端 380 通过、生产构建成功，凭据扫描与本地阶段提交。证据 `docs/evidence/merge/task9-note-preview-core.md`。真实迁入、命令/UI激活、旧历史浏览/计数仍后续完成。
 
 **9.3b2 接续前核对：** 原子 AppState 库/位置/维护最终门，耗时 IO 的可取消上下文；前端只给归档/附件 UUID，不开放路径；保留注册附件原文件名；重复请求/并发提交重读持久回执；未发布图片须使用受控预览读取能力，不能把占位 UUID 当已登记附件；恢复/迁移后的历史原文浏览与重新预览入口独立于旧批准。
+
+## 9.3b2 受控命令与运行时守卫（BASE 1b20617）
+
+**Files:** 新 `learning/note_preview_runtime.rs` / `note_preview_runtime_tests.rs`，修改 core 的取消上下文与来源显示名、mod/lib 命令注册；`src/features/learning/types.ts` / `api.ts` 及 API 路由测试。暂不开放编辑器预览页面，受控预览图片读取与历史 UI 在后续完成后再激活。
+
+**Interfaces：**
+- `RegisteredAttachment {sourceKey,attachmentId}`、`PrepareNotePreviewRequest {archiveId,destination,attachments,courses}` 严格 camelCase/deny_unknown_fields。前端只能提供本库登记 UUID；后台查询真实 attachment path/hash/原文件名，不接受 raw path、document 或 fingerprint。
+- Runtime `prepare/get/commit/cancel_in_library(state,expectedLibraryId,...)` 先绑定库目录，再用现有 worker connection 在全局锁外执行 IO。提交最终门在 `with_library_if_id` 短锁中核对同一目录、连接和维护状态，再 commit 工作连接事务。返回时沿用前端库作用域守卫，不将旧库结果展示到新库。
+- Core prepare/commit 增加显式 `stop:&dyn Fn()->bool`，课程完整摘要复用 open_for_analysis(stop)，源附件分块复制及逐项导入前后检查停止，确认前再检查；Task12 可组合任务取消信号，Runtime 组合库/位置/维护变化。原 b1 测试通过薄 fixture helper 显式给 false，不跳过真实实现。
+- `AttachmentSource.filename:Option<String>` 仅后台显示名，已登记附件用数据库原文件名，普通已批准来源用 path basename；扩展名/读路径仍由实际受控文件决定。名称不作为文件位置使用。
+- 并发重复 prepare 在唯一身份冲突时复用已登记快照；并发 commit 的阶段性读失败先重读持久回执，不能再写正文或删除已提交附件。取消不伪装撤销已提交内容。
+- Tauri 命令：`prepare_note_conversion_preview`、`get_note_conversion_preview`、`commit_note_preview`、`cancel_note_conversion_preview`。不新增操作系统文件打开或任意命令执行能力。
+
+- [x] RED：真实 AppState 临时库中从注册附件准备/提交，显示名与图片字节保留；严格拒绝路径/多余字段/其他库 ID；切库/维护阻止写入；并发准备和重复提交仅一份正文/同一回执；受控停止不产生成功正文或遗留暂存文件。
+- [x] GREEN：接通 UUID-only 命令、可取消内核和实际原子最终门，薄前端 API 路由保持 expectedLibraryId。
+- [x] 定向/完整 Rust/前端/构建/凭据扫描；阶段本地提交随本记录保存。完整 Rust 463 通过、2 既有忽略，前端 384 项通过，生产构建成功。证据 `docs/evidence/merge/task9-note-preview-runtime.md`；尚不宣称实际 AppHandle/GUI/双应用联调或 Task9 完成。

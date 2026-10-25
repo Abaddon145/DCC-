@@ -8,6 +8,126 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
 
+// Most fixtures exercise a stable library; cancellation has a separate real-core test.
+#[test]
+fn learning_note_runtime_cancelled_commit_keeps_preview_and_never_saves_body() {
+    let (root, mut db, grants) = fixture();
+    let raw = archive(&db, root.path(), b"do not save\n");
+    let preview = prepare_note_preview(
+        &db,
+        root.path(),
+        LIB,
+        &raw,
+        dest(),
+        &[],
+        &CourseMap::new(),
+        &grants,
+    )
+    .unwrap();
+    assert!(super::note_preview::commit_note_preview(
+        &mut db,
+        root.path(),
+        LIB,
+        &preview.id,
+        &grants,
+        |tx| tx.commit().map_err(|e| e.to_string()),
+        &|| true
+    )
+    .is_err());
+    assert_eq!(
+        super::note_preview::read_note_preview(&db, root.path(), LIB, &preview.id)
+            .unwrap()
+            .status,
+        "ready"
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM knowledge_notes", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+fn prepare_note_preview(
+    db: &Connection,
+    base: &std::path::Path,
+    library: &str,
+    archive: &str,
+    destination: Destination,
+    sources: &[AttachmentSource],
+    courses: &CourseMap,
+    grants: &crate::media_access::LocalMediaGrants,
+) -> Result<StoredNotePreview, String> {
+    super::note_preview::prepare_note_preview(
+        db,
+        base,
+        library,
+        archive,
+        destination,
+        sources,
+        courses,
+        grants,
+        &|| false,
+    )
+}
+fn commit_note_preview(
+    db: &mut Connection,
+    base: &std::path::Path,
+    library: &str,
+    id: &str,
+    grants: &crate::media_access::LocalMediaGrants,
+    finalize: impl FnOnce(rusqlite::Transaction<'_>) -> Result<(), String>,
+) -> Result<NoteCommitReceipt, String> {
+    super::note_preview::commit_note_preview(db, base, library, id, grants, finalize, &|| false)
+}
+
+#[test]
+fn learning_note_runtime_cancelled_copy_never_publishes_preview_or_body() {
+    let (root, db, grants) = fixture();
+    let raw = archive(&db, root.path(), b"[data](data.txt)\n");
+    let bytes = vec![b'x'; 300 * 1024];
+    let path = root.path().join("data.txt");
+    fs::write(&path, &bytes).unwrap();
+    let sources = vec![AttachmentSource {
+        source_key: "data.txt".into(),
+        path,
+        sha256: hash(&bytes),
+        filename: None,
+    }];
+    let calls = std::cell::Cell::new(0);
+    let stop = || {
+        let value = calls.get() + 1;
+        calls.set(value);
+        value >= 6
+    };
+    assert!(super::note_preview::prepare_note_preview(
+        &db,
+        root.path(),
+        LIB,
+        &raw,
+        dest(),
+        &sources,
+        &CourseMap::new(),
+        &grants,
+        &stop
+    )
+    .is_err());
+    assert!(calls.get() >= 6);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM learning_note_previews", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        walkdir::WalkDir::new(root.path().join("learning-data/note-previews"))
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .count(),
+        0
+    );
+}
+
 #[test]
 fn learning_note_preview_backup_restores_bytes_but_revokes_old_approvals() {
     let source_root = tempfile::tempdir().unwrap();
@@ -128,6 +248,7 @@ fn learning_note_preview_rejects_tampered_snapshots_sources_and_staging_without_
     image::RgbaImage::new(2, 2).save(&source).unwrap();
     let original = fs::read(&source).unwrap();
     let mut sources = vec![AttachmentSource {
+        filename: None,
         source_key: "a.png".into(),
         path: source.clone(),
         sha256: hash(b"wrong"),
@@ -515,6 +636,7 @@ fn learning_note_preview_attachments_are_snapshots_and_failed_commit_cleans_only
     image::RgbaImage::new(2, 2).save(&file).unwrap();
     let sha = hash(fs::read(&file).unwrap());
     let sources = vec![AttachmentSource {
+        filename: None,
         source_key: "image.png".into(),
         path: file.clone(),
         sha256: sha,
@@ -639,6 +761,7 @@ fn learning_note_preview_lost_ack_keeps_committed_attachments_and_returns_saved_
     let source = root.path().join("image.png");
     image::RgbaImage::new(2, 2).save(&source).unwrap();
     let sources = vec![AttachmentSource {
+        filename: None,
         source_key: "image.png".into(),
         path: source.clone(),
         sha256: hash(fs::read(source).unwrap()),
@@ -687,6 +810,7 @@ fn learning_note_preview_checks_image_bytes_before_presenting_an_importable_prev
     let path = root.path().join("bad.png");
     fs::write(&path, b"not an image").unwrap();
     let sources = vec![AttachmentSource {
+        filename: None,
         source_key: "bad.png".into(),
         path,
         sha256: hash(b"not an image"),

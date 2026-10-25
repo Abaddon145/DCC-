@@ -2,6 +2,17 @@ export interface Course {
   id: string; mediaId: string; title: string; positionMs: number;
   durationMs: number | null; rate: number; completed: boolean; progressRevision: number;
 }
+export type NotePreviewDestination={kind:"new";title:string;notebookId:string|null}|{kind:"replace";noteId:string;expectedRevision:number};
+export interface NotePreviewRequest {
+  archiveId:string;destination:NotePreviewDestination;
+  attachments:{sourceKey:string;attachmentId:string}[];courses:Record<string,string>;
+}
+export interface NoteCommitReceipt {noteId:string;revision:number;pending:boolean;warnings:string[]}
+export interface StoredNotePreview {
+  id:string;status:"ready"|"committed"|"cancelled";
+  conversion:{document:import("@tiptap/react").JSONContent|null;archiveHash:string;warnings:string[];pending:boolean;unsupported:{placeholderId:string;startByte:number;endByte:number;label:string;reason:string}[]};
+  receipt:NoteCommitReceipt|null;
+}
 export interface Series {id:string;name:string;description:string;revision:number;orderedCourseIds:string[]}
 export interface SeriesInput {id?:string;name:string;description:string;expectedRevision?:number}
 export interface ProgressInput {positionMs:number;durationMs:number|null;rate:number;completed:boolean}

@@ -39,6 +39,7 @@ pub struct AttachmentSource {
     pub source_key: String,
     pub path: PathBuf,
     pub sha256: String,
+    pub filename: Option<String>,
 }
 pub type CourseMap = HashMap<String, String>;
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,6 +91,24 @@ fn valid_hash(value: &str) -> bool {
 fn valid_key(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
 }
+fn check_stop(stop: &dyn Fn() -> bool) -> Result<(), String> {
+    if stop() {
+        Err("笔记操作已停止、素材库已切换或正在维护，原文保留".into())
+    } else {
+        Ok(())
+    }
+}
+fn source_name(source: &AttachmentSource) -> Result<String, String> {
+    let name = source
+        .filename
+        .as_deref()
+        .or_else(|| source.path.file_name().and_then(|v| v.to_str()))
+        .ok_or("附件名称无效")?;
+    if name.is_empty() || name.len() > 1000 || name.chars().any(char::is_control) {
+        return Err("附件名称过长或含控制字符".into());
+    }
+    Ok(name.into())
+}
 fn identity(base: &Path, library: &str) -> Result<String, String> {
     uuid(library)?;
     let (actual, root) = super::analysis_store::library_identity(base)?;
@@ -135,6 +154,7 @@ fn media_map(
     base: &Path,
     courses: &CourseMap,
     grants: &crate::media_access::LocalMediaGrants,
+    stop: &dyn Fn() -> bool,
 ) -> Result<(MediaMap, Vec<Binding>), String> {
     if courses.len() > 256 {
         return Err("课程映射过多".into());
@@ -143,6 +163,7 @@ fn media_map(
     let mut by_course: HashMap<String, MediaTarget> = HashMap::new();
     let mut map = MediaMap::new();
     for (key, id) in courses {
+        check_stop(stop)?;
         if !valid_key(key) {
             return Err("课程来源键无效".into());
         }
@@ -161,7 +182,7 @@ fn media_map(
                 )
                 .map_err(error)?;
             let prepared = crate::media_access::prepare_media_file(db, base, &file, grants)?;
-            let (lease, fingerprint) = prepared.open_for_analysis(&|| false)?;
+            let (lease, fingerprint) = prepared.open_for_analysis(stop)?;
             by_course.insert(
                 id.clone(),
                 MediaTarget {
@@ -305,17 +326,11 @@ fn stage_source(
     base: &Path,
     id: &str,
     source: &AttachmentSource,
+    stop: &dyn Fn() -> bool,
 ) -> Result<StagedAttachment, String> {
+    check_stop(stop)?;
     crate::media_access::reject_links(&source.path)?;
-    let filename = source
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("附件名称无效")?
-        .to_owned();
-    if filename.len() > 1000 || filename.chars().any(char::is_control) {
-        return Err("附件名称过长或含控制字符".into());
-    }
+    let filename = source_name(source)?;
     let extension = source
         .path
         .extension()
@@ -334,7 +349,20 @@ fn stage_source(
         return Err("附件必须为普通文件".into());
     }
     let mut temp = tempfile::NamedTempFile::new_in(&dir).map_err(error)?;
-    let actual = std::io::copy(&mut (&mut input).take(MAX_FILE + 1), &mut temp).map_err(error)?;
+    let mut actual = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_stop(stop)?;
+        let n = input.read(&mut buffer).map_err(error)?;
+        if n == 0 {
+            break;
+        }
+        actual = actual
+            .checked_add(n as u64)
+            .filter(|v| *v <= MAX_FILE)
+            .ok_or("附件复制过程中超过上限")?;
+        temp.write_all(&buffer[..n]).map_err(error)?;
+    }
     if actual != size || actual > MAX_FILE {
         return Err("附件复制过程中发生变化或超过上限".into());
     }
@@ -347,6 +375,7 @@ fn stage_source(
     if mime.starts_with("image/") {
         crate::knowledge_files::validate_image(temp.path())?;
     }
+    check_stop(stop)?;
     let placeholder = uuid::Uuid::new_v4().to_string();
     let relative = format!("learning-data/note-previews/{id}/{placeholder}.{extension}");
     temp.persist_noclobber(base.join(&relative))
@@ -435,14 +464,16 @@ pub fn prepare_note_preview(
     sources: &[AttachmentSource],
     courses: &CourseMap,
     grants: &crate::media_access::LocalMediaGrants,
+    stop: &dyn Fn() -> bool,
 ) -> Result<StoredNotePreview, String> {
+    check_stop(stop)?;
     if !db.is_autocommit() {
         return Err("请在独立预览操作中发布快照".into());
     }
     let root = identity(base, library)?;
     let bytes = note_archive::read_archive(db, base, archive)?;
     let input = destination_input(db, &destination)?;
-    let (media, bindings) = media_map(db, base, courses, grants)?;
+    let (media, bindings) = media_map(db, base, courses, grants, stop)?;
     if sources.len() > 1000 {
         return Err("附件超过1000个".into());
     }
@@ -451,17 +482,7 @@ pub fn prepare_note_preview(
         if !valid_key(&source.source_key)
             || !valid_hash(&source.sha256)
             || specs
-                .insert(
-                    &source.source_key,
-                    (
-                        &source.sha256,
-                        source
-                            .path
-                            .file_name()
-                            .and_then(|v| v.to_str())
-                            .ok_or("附件名称无效")?,
-                    ),
-                )
+                .insert(&source.source_key, (&source.sha256, source_name(source)?))
                 .is_some()
         {
             return Err("附件来源键、摘要或重复映射无效".into());
@@ -500,12 +521,13 @@ pub fn prepare_note_preview(
     let result = (|| {
         let mut total = 0u64;
         for source in sources {
+            check_stop(stop)?;
             let size = fs::metadata(&source.path).map_err(error)?.len();
             total = total
                 .checked_add(size)
                 .filter(|v| *v <= MAX_TOTAL)
                 .ok_or("附件总量超过1GiB")?;
-            files.push(stage_source(base, &id, source)?);
+            files.push(stage_source(base, &id, source, stop)?);
         }
         let attachments = files
             .iter()
@@ -520,6 +542,7 @@ pub fn prepare_note_preview(
             })
             .collect::<AttachmentMap>();
         let conversion = note_conversion::convert_source_note(&bytes, &attachments, &media)?;
+        check_stop(stop)?;
         check_bindings(db, base, &bindings, grants)?;
         if identity(base, library)? != root {
             return Err("素材库位置已变化".into());
@@ -543,6 +566,10 @@ pub fn prepare_note_preview(
         if let Err(e) = stored {
             return Err(error(e));
         }
+        if stop() {
+            db.execute("UPDATE learning_note_previews SET status='cancelled' WHERE id=?1 AND status='ready'",[&id]).map_err(error)?;
+            return Err("笔记预览已停止，原文保留".into());
+        }
         Ok(StoredNotePreview {
             id: id.clone(),
             status: "ready".into(),
@@ -552,12 +579,23 @@ pub fn prepare_note_preview(
     })();
     if result.is_err() {
         let _ = cleanup(base, &files);
+        if !stop() {
+            let existing:Option<String>=db.query_row("SELECT id FROM learning_note_previews WHERE identity_key=?1 AND status!='cancelled'",[&identity_key],|row|row.get(0)).optional().map_err(error)?;
+            if let Some(id) = existing {
+                return read_note_preview(db, base, library, &id);
+            }
+        }
     }
     result
 }
-fn checked_staging(base: &Path, files: &[StagedAttachment]) -> Result<Vec<fs::File>, String> {
+fn checked_staging(
+    base: &Path,
+    files: &[StagedAttachment],
+    stop: &dyn Fn() -> bool,
+) -> Result<Vec<fs::File>, String> {
     let mut leases = Vec::new();
     for file in files {
+        check_stop(stop)?;
         let path = super::files::learning_file(base, &file.relative)?;
         let mut options = fs::OpenOptions::new();
         options.read(true);
@@ -618,6 +656,7 @@ pub fn commit_note_preview(
     id: &str,
     grants: &crate::media_access::LocalMediaGrants,
     finalize: impl FnOnce(Transaction<'_>) -> Result<(), String>,
+    stop: &dyn Fn() -> bool,
 ) -> Result<NoteCommitReceipt, String> {
     let (snapshot, status, receipt) = load(db, base, library, id)?;
     if let Some(receipt) = receipt {
@@ -627,6 +666,7 @@ pub fn commit_note_preview(
     if status != "ready" {
         return Err("转换预览已取消".into());
     }
+    check_stop(stop)?;
     let mut document = snapshot
         .conversion
         .document
@@ -637,11 +677,11 @@ pub fn commit_note_preview(
     {
         return Err("原件摘要与预览不一致".into());
     }
-    let (media, bindings) = media_map(db, base, &snapshot.courses, grants)?;
+    let (media, bindings) = media_map(db, base, &snapshot.courses, grants, stop)?;
     if media != snapshot.media {
         return Err("课程原件、时长或身份已变化，请重新预览".into());
     }
-    let leases = checked_staging(base, &snapshot.files)?;
+    let leases = checked_staging(base, &snapshot.files, stop)?;
     crate::runtime::tools::ensure_space(
         base,
         snapshot.files.iter().map(|file| file.size).sum::<u64>() + 1024 * 1024,
@@ -693,6 +733,7 @@ pub fn commit_note_preview(
         // ponytail: one note transaction uses the existing bounded attachment copier;
         // split file publication only if real imports show write contention.
         for file in &snapshot.files {
+            check_stop(stop)?;
             let source = super::files::learning_file(base, &file.relative)?;
             let imported = crate::knowledge_files::import(&tx, base, &note_id, &source)?;
             let (path, _) = crate::knowledge_files::path(&tx, base, &imported.id)?;
@@ -733,6 +774,7 @@ pub fn commit_note_preview(
             warnings: snapshot.conversion.warnings.clone(),
         };
         tx.execute("UPDATE learning_note_previews SET status='committed',receipt_json=?1,committed_at=?2 WHERE id=?3 AND status='ready'",params![serde_json::to_string(&receipt).map_err(error)?,chrono::Utc::now().to_rfc3339(),id]).map_err(error)?;
+        check_stop(stop)?;
         finalize(tx)?;
         Ok(receipt)
     })();
@@ -766,6 +808,20 @@ pub fn commit_note_preview(
         }
         Err(e) => Err(e),
     }
+}
+pub fn read_note_preview(
+    db: &Connection,
+    base: &Path,
+    library: &str,
+    id: &str,
+) -> Result<StoredNotePreview, String> {
+    let (snapshot, status, receipt) = load(db, base, library, id)?;
+    Ok(StoredNotePreview {
+        id: id.into(),
+        status,
+        conversion: snapshot.conversion,
+        receipt,
+    })
 }
 pub fn cancel_note_preview(
     db: &Connection,

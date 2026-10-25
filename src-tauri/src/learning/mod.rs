@@ -47,6 +47,9 @@ pub mod note_nodes;
 #[cfg(test)]
 mod note_nodes_tests;
 pub mod note_preview;
+pub mod note_preview_runtime;
+#[cfg(test)]
+mod note_preview_runtime_tests;
 #[cfg(test)]
 mod note_preview_tests;
 pub mod store;

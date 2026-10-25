@@ -329,6 +329,10 @@ fn application_builder(
                 Box::new(tauri::generate_handler![
                     commands::preview_external_video,
                     learning::commands::start_learning_playback,
+                    learning::note_preview_runtime::prepare_note_conversion_preview,
+                    learning::note_preview_runtime::get_note_conversion_preview,
+                    learning::note_preview_runtime::commit_note_preview,
+                    learning::note_preview_runtime::cancel_note_conversion_preview,
                     learning::commands::control_learning_playback,
                     learning::commands::get_learning_playback,
                     learning::commands::set_learning_viewport,

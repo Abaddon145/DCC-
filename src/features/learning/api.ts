@@ -2,9 +2,14 @@ import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
 import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
 import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem} from "./types";
+import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./types";
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  prepareNotePreview:(expectedLibraryId:string,request:NotePreviewRequest)=>invoke<StoredNotePreview>("prepare_note_conversion_preview",{expectedLibraryId,request}),
+  getNotePreview:(expectedLibraryId:string,previewId:string)=>invoke<StoredNotePreview>("get_note_conversion_preview",{expectedLibraryId,previewId}),
+  commitNotePreview:(expectedLibraryId:string,previewId:string)=>invoke<NoteCommitReceipt>("commit_note_preview",{expectedLibraryId,previewId}),
+  cancelNotePreview:(expectedLibraryId:string,previewId:string)=>invoke<string[]>("cancel_note_conversion_preview",{expectedLibraryId,previewId}),
   prepareNoteJump:(expectedLibraryId:string,reference:import("../../lib/learningNoteNodes").LearningReferenceData,rangeIndex:number)=>invoke<{courseId:string;mediaId:string;positionMs:number;endMs:number}>("prepare_learning_note_jump",{expectedLibraryId,reference,rangeIndex}),
   transcriptionComponents:(expectedLibraryId:string)=>invoke<import("./types").WhisperComponentStatus>("get_learning_transcription_components",{expectedLibraryId}),
   importTranscriptionModel:(expectedLibraryId:string,modelId:string,selectedPath:string)=>invoke<import("./types").WhisperComponentStatus>("import_learning_transcription_model",{expectedLibraryId,modelId,selectedPath}),
