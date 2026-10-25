@@ -18,10 +18,11 @@ export function WorkspacePanel({label,side,state,limits,tabs,onChange}:Workspace
     if(state.mode!=="peek")return;
     let composing=false;
     const modal=()=>hasWorkspaceOverlay("[role=dialog][aria-modal=true],[role=alertdialog],[role=menu],dialog[open],.modal-backdrop");
+    const dragging=()=>document.body.classList.contains("library-pointer-dragging");
     const start=()=>{composing=true;},end=()=>{composing=false;};
-    const outside=(event:PointerEvent)=>{if(!composing&&!event.defaultPrevented&&!modal()&&!host.current?.contains(event.target as Node))dispatch({type:"dismiss"});};
+    const outside=(event:PointerEvent)=>{if(!composing&&!dragging()&&!event.defaultPrevented&&!modal()&&!host.current?.contains(event.target as Node))dispatch({type:"dismiss"});};
     const key=(event:KeyboardEvent)=>{
-      if(event.key!=="Escape"||event.defaultPrevented||event.isComposing||composing||modal()||(event.target instanceof Element&&event.target.closest("input,textarea,select,[contenteditable=true]")))return;
+      if(event.key!=="Escape"||event.defaultPrevented||event.isComposing||composing||dragging()||modal()||(event.target instanceof Element&&event.target.closest("input,textarea,select,[contenteditable=true]")))return;
       if(event.target instanceof Element&&event.target.closest(".workspace-panel")&&!host.current?.contains(event.target))return;
       event.preventDefault();event.stopPropagation();dispatch({type:"dismiss"});returnFocus();
     };

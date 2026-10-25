@@ -7,6 +7,7 @@ import MindElixir from "mind-elixir";
 import App from "../App";
 import { StrictMode } from "react";
 import {defaultGlobalPreferences,defaultLibraryPreferences} from "../lib/personalization";
+import {defaultNoteAppearance} from "../lib/noteWorkspace";
 
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),notify:vi.fn()}));
 Object.defineProperty(window,"matchMedia",{configurable:true,value:()=>({matches:false,addEventListener:()=>{},removeEventListener:()=>{}})});
@@ -19,6 +20,7 @@ vi.mock("@tauri-apps/plugin-dialog",()=>({open:vi.fn().mockResolvedValue(null),s
 const note:KnowledgeNote={id:"11111111-1111-4111-8111-111111111111",notebookId:null,title:"UE 学习笔记",document:templateDocument("tutorial"),plainText:"学习目标",tags:[],favorite:false,revision:1,journalDate:null,deletedAt:null,createdAt:"2026-09-30T00:00:00Z",updatedAt:"2026-09-30T00:00:00Z"};
 beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.mockImplementation(async(command:string,args?:Record<string,unknown>)=>{
   if(command==="get_workspace_context")return {libraryId:"test-library",enabled:true,value:null};
+  if(command==="save_workspace_context")return true;
   if(command==="search_notes")return {items:[note],total:1};
   if(command==="list_notebooks")return [];
   if(command==="get_note_backlinks")return [];
@@ -31,6 +33,135 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 describe("knowledge editing",()=>{
+  it("filters unfiled and directly project-referenced notes before paging without changing their bodies",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    const projectId="33333333-3333-4333-8333-333333333333";
+    mocks.invoke.mockImplementation((command,args)=>command==="search_note_reference_targets"?Promise.resolve([{kind:"project",targetId:projectId,label:"沙漠场景",available:true}]):original(command,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    await screen.findByRole("button",{name:/UE 学习笔记/});
+    fireEvent.change(screen.getByRole("combobox",{name:"笔记排序"}),{target:{value:"manual"}});
+    fireEvent.click(screen.getByRole("button",{name:"收件箱"}));
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("search_notes",expect.objectContaining({unfiledOnly:true,manualOrder:false,offset:0})));
+    expect(screen.getByRole("combobox",{name:"笔记排序"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button",{name:"最近更新"}));
+    await waitFor(()=>expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="search_notes").at(-1)?.[1]).toEqual(expect.objectContaining({manualOrder:false})));
+    fireEvent.click(screen.getByRole("button",{name:"项目笔记…"}));
+    expect(await screen.findByRole("dialog",{name:"选择项目"})).toHaveTextContent("直接引用");
+    fireEvent.click(await screen.findByRole("button",{name:"沙漠场景"}));
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("search_notes",expect.objectContaining({projectId,manualOrder:false,libraryId:"test-library"})));
+    expect(screen.getByText(/不会自动关联新笔记/)).toBeVisible();
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note")).toBe(false);
+    fireEvent.click(screen.getByRole("button",{name:"全部笔记"}));
+    await waitFor(()=>{
+      const args=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="search_notes").at(-1)?.[1];
+      expect(args).toEqual(expect.objectContaining({manualOrder:true}));expect(args).not.toHaveProperty("projectId");expect(args).not.toHaveProperty("unfiledOnly");
+    });
+  });
+  it("keeps the same editor, selection, undo and draft while closing, pinning and focusing navigation",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    const body=document.querySelector<HTMLElement>(".knowledge-editor .tiptap")!;
+    const editor=(body as HTMLElement & {editor:import("@tiptap/react").Editor}).editor;
+    act(()=>{editor.commands.setTextSelection(1);editor.commands.insertContent("保留草稿");});
+    const position=editor.state.selection.from,content=editor.getJSON();
+    fireEvent.click(screen.getByRole("button",{name:"收起知识导航"}));
+    fireEvent.click(screen.getByRole("button",{name:"笔记导航"}));
+    fireEvent.click(screen.getByRole("button",{name:"固定知识导航"}));
+    fireEvent.click(screen.getByRole("button",{name:"专注"}));
+    expect(screen.queryByRole("complementary",{name:"知识导航"})).toBeNull();
+    fireEvent.click(screen.getByRole("button",{name:"专注"}));
+    expect(screen.getByRole("complementary",{name:"知识导航"})).toBeVisible();
+    expect(document.querySelector(".knowledge-editor .tiptap")).toBe(body);
+    expect(editor.getJSON()).toEqual(content);expect(editor.state.selection.from).toBe(position);
+    act(()=>{editor.commands.undo();});expect(editor.getText()).not.toContain("保留草稿");
+  });
+  it("saves only list width on resize and never persists a cancelled appearance preview",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    const appearance={...defaultNoteAppearance,navigationWidth:240,listWidth:300,accent:"#7CACCB"};
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_note_appearance"?Promise.resolve(appearance):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    const splitter=await screen.findByRole("separator",{name:"知识导航宽度"});
+    await waitFor(()=>expect(splitter).toHaveAttribute("aria-valuenow","540"));
+    fireEvent.keyDown(splitter,{key:"ArrowRight"});
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_note_appearance",{value:{...appearance,listWidth:310}}));
+    const saves=mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note_appearance").length;
+    fireEvent.click(screen.getByRole("button",{name:"外观"}));
+    fireEvent.change(screen.getByRole("slider",{name:/^笔记列表宽度/}),{target:{value:"400"}});
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,450));});
+    fireEvent.click(screen.getByRole("button",{name:"取消"}));
+    expect(splitter).toHaveAttribute("aria-valuenow","550");
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,450));});
+    expect(mocks.invoke.mock.calls.filter(([cmd])=>cmd==="save_note_appearance")).toHaveLength(saves);
+  });
+  it("does not overwrite unread appearance settings and can retry without blocking notes",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let fail=true;
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_note_appearance"?(fail?Promise.reject("设置暂不可读"):Promise.resolve({...defaultNoteAppearance,listWidth:330})):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    expect(document.querySelector(".knowledge-workspace")).toHaveClass("knowledge-appearance-pending");
+    fireEvent.keyDown(screen.getByRole("separator",{name:"知识导航宽度"}),{key:"ArrowRight"});
+    expect(screen.getByRole("button",{name:"外观"})).toBeDisabled();
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_note_appearance")).toBe(false);
+    fail=false;fireEvent.click(screen.getByRole("button",{name:"重新读取外观"}));
+    await waitFor(()=>expect(screen.getByRole("separator",{name:"知识导航宽度"})).toHaveAttribute("aria-valuenow","530"));
+  });
+  it("keeps early note and panel actions when saved context arrives late, preserving unknown fields",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let calls=0,finish!:(v:unknown)=>void;
+    const otherId="22222222-2222-4222-8222-222222222222";
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_workspace_context"&&++calls===2?new Promise(resolve=>{finish=resolve;}):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.change(title,{target:{value:"未保存的选择"}});
+    fireEvent.click(screen.getByRole("button",{name:"收起知识导航"}));
+    await act(async()=>finish({libraryId:"test-library",enabled:true,value:{futureFlag:42,activeId:otherId,tabs:[{id:otherId,title:"旧标签"}],panels:{left:{mode:"pinned",tab:"navigation",width:700}}}}));
+    expect(title).toHaveValue("未保存的选择");expect(screen.queryByRole("complementary",{name:"知识导航"})).toBeNull();
+    expect(mocks.invoke.mock.calls.some(([cmd,args])=>cmd==="get_note"&&args?.id===otherId)).toBe(false);
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_workspace_context",expect.objectContaining({value:expect.objectContaining({futureFlag:42,activeId:note.id,panels:expect.objectContaining({left:expect.objectContaining({mode:"closed"})})})})));
+  });
+  it("never writes default layout after a failed context read and retries while preserving an explicit collapse",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let reads=0,fail=true;
+    mocks.invoke.mockImplementation((cmd,args)=>{
+      if(cmd==="get_workspace_context"&&++reads>1)return fail?Promise.reject("布局不可读"):Promise.resolve({libraryId:"test-library",enabled:true,value:{futureFlag:7}});
+      return original(cmd,args);
+    });
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:"收起知识导航"}));
+    expect(await screen.findByRole("button",{name:"重新读取布局"})).toBeEnabled();
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,450));});
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="save_workspace_context")).toBe(false);
+    fail=false;fireEvent.click(screen.getByRole("button",{name:"重新读取布局"}));
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_workspace_context",expect.objectContaining({value:expect.objectContaining({futureFlag:7,panels:expect.objectContaining({left:expect.objectContaining({mode:"closed"})})})})));
+  });
+  it("ignores a restored active note response after the user opened another note",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let finish!:(v:unknown)=>void;
+    const other={...note,id:"22222222-2222-4222-8222-222222222222",title:"旧活动笔记"};
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_workspace_context"?Promise.resolve({libraryId:"test-library",enabled:true,value:{activeId:other.id,tabs:[{id:other.id,title:other.title}]}}):cmd==="get_note"&&args?.id===other.id?new Promise(resolve=>{finish=resolve;}):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    await waitFor(()=>expect(finish).toBeDefined());
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.change(title,{target:{value:"新选择的草稿"}});
+    await act(async()=>finish(other));
+    expect(title).toHaveValue("新选择的草稿");expect(title).toBeInTheDocument();
+  });
+  it("flushes a pending width once leaving and preserves navigation search and scroll while collapsed",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_note_appearance"?Promise.resolve(defaultNoteAppearance):original(cmd,args));
+    const {unmount}=render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    const search=await screen.findByRole("textbox",{name:"搜索笔记"});
+    fireEvent.change(search,{target:{value:"材质"}});
+    const list=document.querySelector(".knowledge-note-list")!;list.scrollTop=99;
+    fireEvent.click(screen.getByRole("button",{name:"收起知识导航"}));
+    fireEvent.click(screen.getByRole("button",{name:"笔记导航"}));
+    fireEvent.click(screen.getByRole("button",{name:"固定知识导航"}));
+    expect(screen.getByRole("textbox",{name:"搜索笔记"})).toBe(search);expect(search).toHaveValue("材质");expect(list.scrollTop).toBe(99);
+    fireEvent.keyDown(screen.getByRole("separator",{name:"知识导航宽度"}),{key:"ArrowRight"});
+    unmount();
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_note_appearance",{value:{...defaultNoteAppearance,listWidth:290}}));
+  });
   it("offers a read-only source archive entry without opening or changing a note",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);
     expect(await screen.findByRole("button",{name:"原文归档"})).toBeEnabled();

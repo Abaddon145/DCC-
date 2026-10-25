@@ -82,3 +82,16 @@
 - search_notes命令新增可选unfiledOnly/projectId，旧调用默认值完全兼容；前端NoteSearch同名可选字段，仍绑定客户端libraryId。
 - [x] RED→GREEN：真实数据库收件箱与分类/关键词/收藏/回收站/分页count组合；真实项目直接引用、多个引用不重计、与未分类和收藏组合；非法/未知项目及新视图手动排序拒绝；All/旧排序仍通过。
 - [x] 定向及完整Rust473/前端410通过、生产构建成功、凭据扫描与本地提交随阶段保存。证据 `docs/evidence/merge/task10-knowledge-navigation-query.md`；接下来才接知识库真实导航，原Task10仍未完成。
+
+## 10c-K2 左侧知识导航与宽度/布局接入（BASE fb9c22b）
+
+**Files:** KnowledgeWorkspace.tsx / knowledge.css / KnowledgeWorkspace.test.tsx；NoteReferencePicker.tsx（增加projectFilter用途，旧插入默认不变）；WorkspacePanel.tsx/.test/.css仅补真实拖动优先及可收窄flex布局。此步不移动NoteEditor正文或右侧历史，下一步K3处理信息区。
+
+- 左侧WorkspacePanel默认pinned、唯一tab=navigation，原导航+列表原样保留同一content中；折叠不卸载。总固定宽度镜像全局navigationWidth+listWidth，分隔线仅更新listWidth（220–440），默认复位280；不让库context里的旧width覆盖全局外观。
+- 外观读取成功前不接受自动宽度保存；失败可重读，不用默认值覆盖未读配置。宽度自动保存400ms合并/串行并卸载flush；外观弹窗仍只预览，取消不写入，显式应用与拖宽走同一保存序列。保留所有颜色/字号/导航宽度字段。
+- 知识库同一context加载/保存扩展panels，保留未知字段、tabs/activeId/manualOrder；peek/focus按既有persistPanels保存，晚到恢复不覆盖已操作面板/排序。读取失败不写默认布局；显式笔记操作后迟到activeId不替换编辑器。
+- 导航新增收件箱（未分笔记本）、最近更新、项目笔记筛选，调用K1实际接口。项目由已有NoteReferencePicker的projectFilter模式选择，始终使用本库项目UUID；文案明确只筛直接引用，不自动关联/改写新笔记。新视图禁用手动排序并保留All原排序偏好；拖入笔记本仍可用。新筛选保持当前挂载状态，不额外新增跨重启筛选状态。
+- 全局专注使用PanelLayout快照；当前仅左侧可见接入，right预留合法默认closed/outline，K3同一状态接通。缩窄显示用flex/max-width和媒体查询，保留全局固定宽度；工作区及内部导航都不加containment，因LearningReview/NoteRecovery的固定弹窗也在导航树内。
+- 复用drag模块body标志library-pointer-dragging，让拖动取消优先于peek收起；一次Escape只取消拖动，之后才能收起面板。
+- [x] RED→GREEN：真实入口请求unfiled/project/updated与排序约束；项目选择不写正文；切pane/专注/调宽保持同一editor、选区、undo与草稿；宽度只改list、预览取消不写入；布局/外观读失败及迟到恢复不覆盖操作；既有DnD/回收/历史回归。
+- [x] 全前端419项/77文件通过，生产构建成功，凭据扫描0命中；本地提交随阶段保存。后端未改不重复Rust，最新K1为473通过/2既有忽略。证据 `docs/evidence/merge/task10-knowledge-left-panel.md`。真实响应式/输入法/DPI仍Task14，主Task10未完成，下一步K3信息区。

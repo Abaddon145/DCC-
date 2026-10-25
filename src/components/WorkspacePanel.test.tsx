@@ -91,3 +91,13 @@ it("does not consume a splitter key already handled by its workspace",()=>{
   fireEvent.keyDown(splitter,{key:"ArrowRight"});
   expect(splitter).toHaveAttribute("aria-valuenow","200");
 });
+it("lets an active navigation drag consume Escape before dismissing its peek panel",()=>{
+  render(<Harness initial="peek"/>);
+  document.body.classList.add("library-pointer-dragging");
+  try {
+    fireEvent.pointerDown(document.body);fireEvent.keyDown(window,{key:"Escape"});
+    expect(screen.getByRole("complementary",{name:"工作面板"})).toBeVisible();
+  } finally {document.body.classList.remove("library-pointer-dragging");}
+  fireEvent.keyDown(window,{key:"Escape"});
+  expect(screen.queryByRole("complementary",{name:"工作面板"})).toBeNull();
+});

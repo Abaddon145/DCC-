@@ -55,7 +55,6 @@
 .knowledge-view-switch button[aria-pressed=true]{color:var(--note-accent);background:var(--accent-bg)}.knowledge-view-switch span{margin-left:auto;font-size:10px;opacity:.65}
 .knowledge-reading .knowledge-toolbar,.knowledge-reading .knowledge-editor-tools>label{display:none}.knowledge-reading .knowledge-metadata{display:none}.knowledge-reading .knowledge-title:disabled{opacity:1;color:var(--note-text);-webkit-text-fill-color:var(--note-text)}
 .knowledge-reading .knowledge-editor-heading{background:var(--note-background);color:var(--note-text)}
-.knowledge-focused>.knowledge-navigation,.knowledge-focused>.knowledge-list{display:none}
 .note-appearance-dialog{width:480px;max-width:90vw;max-height:90vh;overflow:auto;padding:24px}.note-appearance-dialog header p{font-size:12px;color:var(--text-muted)}.note-appearance-dialog label{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 0;font-size:12px}.note-appearance-dialog input[type=range]{flex:1;max-width:220px}.note-appearance-dialog footer,.note-presets{display:flex;gap:8px;margin-top:12px}.note-appearance-dialog output{width:44px;text-align:right}
 .knowledge-workspace button:focus-visible{outline:2px solid var(--note-accent,var(--accent));outline-offset:2px}
 .knowledge-navigation .drop-inside{outline:1px solid var(--note-accent);background:var(--accent-bg)}.knowledge-navigation .drop-before{box-shadow:0 -2px var(--note-accent)}.knowledge-navigation .drop-after{box-shadow:0 2px var(--note-accent)}.knowledge-navigation .drop-invalid{outline:1px solid #d57a72;cursor:not-allowed}.knowledge-move-undo{position:fixed;bottom:24px;right:24px;z-index:16;display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--accent);padding:10px 16px;border-radius:8px;font-size:12px;color:var(--text-primary)}
@@ -114,7 +113,15 @@
 .structure-tree .structure-row button:not(.structure-fold){white-space:normal;overflow-wrap:anywhere;line-height:1.75}
 .structure-inline-content{border-left:1px solid var(--border);padding:0 12px 8px;min-width:0}.structure-inline-content .knowledge-prose{min-height:0}.structure-inline-content .knowledge-prose>[data-topic-depth]{margin-left:0!important}.structure-inline-content .knowledge-editor-tools{margin-block:8px}
 .structure-image img{max-width:240px;max-height:160px;object-fit:contain}.note-structure header label{display:inline-flex;gap:6px;align-items:center;font-size:11px}.note-structure input[type=color]{width:26px;height:26px;padding:0;border:0}
-.knowledge-hide-navigation>.knowledge-navigation,.knowledge-hide-list>.knowledge-list{display:none}.knowledge-tabs>button[aria-pressed=true]{color:var(--note-accent)}
+.knowledge-tabs>button[aria-pressed=true]{color:var(--note-accent)}
+.knowledge-workspace>.workspace-panel.mode-pinned{max-width:max(44px,calc(100% - 260px))}
+.knowledge-workspace>.workspace-panel .workspace-panel-page{overflow:hidden}
+.knowledge-appearance-pending>.workspace-panel .workspace-panel-splitter{display:none}
+.knowledge-navigation-content{display:flex;height:100%;min-height:0;min-width:0}
+.knowledge-navigation-content>.knowledge-navigation{flex:0 1 var(--note-nav-width);min-width:110px;padding-top:14px}
+.knowledge-navigation-content>.knowledge-list{width:0;flex:1;min-width:0;padding-top:14px}
+.knowledge-preference-error{padding:8px 12px;color:var(--warning,var(--accent));font-size:var(--font-small);border-bottom:1px solid var(--border)}
+@media(max-width:1100px){.knowledge-navigation-content>.knowledge-navigation{padding-inline:4px}.knowledge-navigation-content>.knowledge-list{padding-inline:8px}.knowledge-navigation-content .knowledge-navigation header{padding-inline:4px}.knowledge-navigation-content .knowledge-list h2{font-size:var(--font-body)}}
 .knowledge-learning-atom{margin-block:14px;padding:14px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text);min-width:0;overflow-wrap:anywhere}
 .knowledge-learning-atom-heading{display:flex;align-items:center;gap:8px}.knowledge-learning-atom-heading strong{min-width:0}.knowledge-learning-atom-heading svg{flex-shrink:0}.knowledge-learning-atom [data-drag-handle]{display:inline-flex;cursor:grab;color:var(--text-muted)}
 .knowledge-learning-atom p{margin:8px 0;font-size:13px;line-height:1.6}.knowledge-learning-atom button{min-height:36px}.knowledge-learning-atom button:focus-visible,.knowledge-learning-atom textarea:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.knowledge-learning-atom [role=alert]{color:var(--text);border-inline-start:3px solid var(--accent);padding-inline-start:10px}
