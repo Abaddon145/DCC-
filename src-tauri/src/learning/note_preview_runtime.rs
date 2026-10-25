@@ -29,6 +29,79 @@ fn stopped(state: &AppState, library: &str, base: &Path) -> bool {
             .flatten()
             != Some(true)
 }
+pub fn list_archives_in_library(
+    state: &AppState,
+    library: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<super::note_archive_browser::ArchivePage, String> {
+    let base = base(state, library)?;
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+    let page = super::note_archive_browser::list_archives(&db, offset, limit)?;
+    if stopped(state, library, &base) {
+        return Err("素材库已切换，已丢弃旧原件列表".into());
+    }
+    Ok(page)
+}
+pub fn read_archive_in_library(
+    state: &AppState,
+    library: &str,
+    id: &str,
+) -> Result<super::note_archive_browser::ArchiveView, String> {
+    let base = base(state, library)?;
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+    let view = super::note_archive_browser::read_archive_view(&db, &base, id)?;
+    if stopped(state, library, &base) {
+        return Err("素材库已切换，已丢弃旧原件响应".into());
+    }
+    Ok(view)
+}
+pub fn export_archive_in_library(
+    state: &AppState,
+    library: &str,
+    id: &str,
+    path: &Path,
+) -> Result<(), String> {
+    use std::io::Write;
+    let base = base(state, library)?;
+    let extension = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !["md", "bin"].contains(&extension.as_str()) || path.exists() {
+        return Err("请选择尚不存在的 .md 或 .bin 文件，原件不会覆盖其他文件".into());
+    }
+    let parent = path.parent().ok_or("导出目录无效")?;
+    crate::media_access::reject_links(parent)?;
+    let parent = parent.canonicalize().map_err(|_| "导出目录不存在")?;
+    if parent.starts_with(base.canonicalize().map_err(|e| e.to_string())?) {
+        return Err("请将原文导出到当前素材库以外的目录".into());
+    }
+    let target = parent.join(path.file_name().ok_or("导出文件名无效")?);
+    crate::media_access::reject_links(&target)?;
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+    let bytes = super::note_archive::read_archive(&db, &base, id)?;
+    if stopped(state, library, &base) {
+        return Err("素材库已切换，未导出旧原件".into());
+    }
+    crate::runtime::tools::ensure_space(&parent, bytes.len() as u64 + 1024 * 1024)?;
+    let mut stage = tempfile::NamedTempFile::new_in(&parent).map_err(|e| e.to_string())?;
+    stage.write_all(&bytes).map_err(|e| e.to_string())?;
+    stage.as_file().sync_all().map_err(|e| e.to_string())?;
+    state
+        .with_library_if_id(library, |_, current| {
+            if current != base || state.tasks.maintenance().is_some() {
+                return Err("素材库位置或维护状态已变化，未导出".into());
+            }
+            crate::media_access::reject_links(&target)?;
+            stage
+                .persist_noclobber(&target)
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })?
+        .ok_or("素材库已切换，未导出".into())
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisteredAttachment {
@@ -202,6 +275,41 @@ where
     })
     .await
     .map_err(|_| "笔记预览工作线程中断，请在原库重新读取回执".to_owned())?
+}
+#[tauri::command]
+pub async fn list_learning_note_archives(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<super::note_archive_browser::ArchivePage, String> {
+    job(app, expected_library_id, move |state, library| {
+        list_archives_in_library(state, library, offset, limit)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn read_learning_note_archive(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    archive_id: String,
+) -> Result<super::note_archive_browser::ArchiveView, String> {
+    job(app, expected_library_id, move |state, library| {
+        read_archive_in_library(state, library, &archive_id)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn export_learning_note_archive(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    archive_id: String,
+    path: String,
+) -> Result<(), String> {
+    job(app, expected_library_id, move |state, library| {
+        export_archive_in_library(state, library, &archive_id, Path::new(&path))
+    })
+    .await
 }
 #[tauri::command]
 pub async fn read_note_conversion_block(

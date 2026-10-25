@@ -7,6 +7,14 @@ const library="596d257d-3e5c-46c4-a464-187cf180c6bd";
 const previewId="5804245d-e1d3-4297-b08c-053a123706bd";
 describe("library-scoped note preview API",()=>{
   beforeEach(()=>{mocks.invoke.mockReset();mocks.invoke.mockResolvedValue(undefined);});
+  it("keeps archive metadata, original reads and explicit exports scoped to the selected library",async()=>{
+    await learningApi.listNoteArchives(library,50,50);
+    expect(mocks.invoke).toHaveBeenLastCalledWith("list_learning_note_archives",{expectedLibraryId:library,offset:50,limit:50});
+    await learningApi.readNoteArchive(library,previewId);
+    expect(mocks.invoke).toHaveBeenLastCalledWith("read_learning_note_archive",{expectedLibraryId:library,archiveId:previewId});
+    await learningApi.exportNoteArchive(library,previewId,"C:/exports/original.md");
+    expect(mocks.invoke).toHaveBeenLastCalledWith("export_learning_note_archive",{expectedLibraryId:library,archiveId:previewId,path:"C:/exports/original.md"});
+  });
   it("reads preserved bytes by library, immutable preview and placeholder IDs",async()=>{
     mocks.invoke.mockResolvedValue("<section>\r\nraw\r\n</section>\r\n");
     expect(await learningApi.readNotePreviewBlock(library,previewId,previewId)).toBe("<section>\r\nraw\r\n</section>\r\n");

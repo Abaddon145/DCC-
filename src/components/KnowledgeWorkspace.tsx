@@ -34,6 +34,7 @@ import { LoadFeedback, ReadFailure } from "./LoadFeedback";
 import { recordDiagnostic } from "../lib/diagnostics";
 import {mapFromHeadings,normalizeNoteMap,type NoteMapData} from "../lib/noteMindMap";
 const NoteMindMapDialog=lazy(()=>import("./NoteMindMapDialog"));
+const NoteArchiveBrowser=lazy(()=>import("../features/learning/NoteArchiveBrowser"));
 const NoteStructureView=lazy(()=>import("./NoteStructureView"));
 
 interface Props { onLearnReference?:(reference:LearningReferenceData,index:number,noteId:string)=>Promise<void>; onOpenProject?:(id:string)=>void; initialNoteId?: string | null; notify: (message: string, error?: boolean) => void }
@@ -48,6 +49,7 @@ export default function KnowledgeWorkspace({ notify, initialNoteId,onOpenProject
 function Workspace({ libraryId, notify, initialNoteId,onOpenProject,onLearnReference }: Props & { libraryId: string }) {
   const client = useMemo(() => knowledgeApi(libraryId), [libraryId]);
   const [navigationHidden,setNavigationHidden]=useState(false);const [listHidden,setListHidden]=useState(false);
+  const [archiveOpen,setArchiveOpen]=useState(false);
   const [notebooks, setNotebooks] = useState<KnowledgeNotebook[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(new Set<string>());
@@ -195,6 +197,8 @@ function Workspace({ libraryId, notify, initialNoteId,onOpenProject,onLearnRefer
       <NoteRecovery libraryId={libraryId} notify={notify} onOpen={id=>run(async()=>{await flush.current();setCurrent(await client.get(id));})}/>
       <button data-notebook-drop="" className={`${!folder && !favorite && !trash ? "active" : ""} ${dropTarget&&dropTarget.id===null?"drop-inside":""}`} onClick={() => { setFolder(null); setFavorite(false); setTrash(false); setPage(0); }}>全部笔记</button>
       <button className={favorite ? "active" : ""} onClick={() => { setFolder(null); setFavorite(true); setTrash(false); setPage(0); }}><Star size={15}/>收藏笔记</button>
+      <button onClick={()=>setArchiveOpen(true)}><History size={15}/>原文归档</button>
+      {archiveOpen&&<Suspense fallback={<LoadFeedback label="正在打开原文归档…"/>}><NoteArchiveBrowser libraryId={libraryId} onClose={()=>setArchiveOpen(false)}/></Suspense>}
       <div className="knowledge-section"><span>笔记本</span><button title="新建笔记本" onClick={() => setFolderForm({ parent: null, name: "" })}><FolderPlus size={16}/></button></div>{tree(null)}
       <button className={`knowledge-trash ${trash ? "active" : ""}`} onClick={() => { setFolder(null); setFavorite(false); setTrash(true); setPage(0); }}><Trash2 size={15}/>笔记回收站</button>
     </aside>

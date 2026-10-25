@@ -2,6 +2,9 @@ export interface Course {
   id: string; mediaId: string; title: string; positionMs: number;
   durationMs: number | null; rate: number; completed: boolean; progressRevision: number;
 }
+export interface NoteArchiveVersion {id:string;profileId:string;sourceKey:string;versionKey:string;sha256:string;size:number;createdAt:string;conversionState:"unconverted"|"partial"|"converted"}
+export interface NoteArchivePage {versions:import("../../types").Page<NoteArchiveVersion>;unconvertedCount:number;partialCount:number}
+export interface NoteArchiveView {archiveId:string;sha256:string;size:number;text:string|null}
 export type NotePreviewDestination={kind:"new";title:string;notebookId:string|null}|{kind:"replace";noteId:string;expectedRevision:number};
 export interface NotePreviewRequest {
   archiveId:string;destination:NotePreviewDestination;

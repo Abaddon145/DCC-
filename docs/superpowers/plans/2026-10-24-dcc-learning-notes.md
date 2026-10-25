@@ -153,3 +153,16 @@
 - [x] RED：真实 AppState 临时库验证图片响应及中文显示名不影响路径，另预览占位ID/路径/其他库拒绝、篡改及取消拒绝、原文字节 CRLF/HTML 精确且不执行；读取不增加附件、笔记或片段。
 - [x] GREEN：最小实现受控读取边界与路由，已有笔记图片协议保持不变。
 - [x] 定向、完整回归和生产构建、证据、本地提交随阶段保存。完整 Rust 467 / 前端 385 通过、构建成功；证据 `docs/evidence/merge/task9-note-preview-content.md`。未转换历史列表/导出/计数及实际预览页面随后实施，不标 Task9 完成。
+
+## 9.4a 原件版本浏览、导出与计数（BASE 18fc88b）
+
+复用 schema27/28 登记，不再建历史表或改旧正文。浏览当前库所有原件版本；未完整转换计数包含未提交和已提交但仍 pending 的版本，文案明确“转换记录”不等同现存笔记。历史读取独立于旧预览批准，恢复后仍可核对原件。
+
+**Files / Interfaces：**
+- 新 `learning/note_archive_browser.rs` 与 tests：`list_archives(db,offset,limit)->ArchivePage {versions:Page<ArchiveVersion>,unconvertedCount,partialCount}`，每页1–50，稳定created_at/id排序；conversionState=unconverted/partial/converted，由持久提交回执推导，缺字段/损坏JSON不当完整成功。只返回来源身份、时间、摘要、大小和状态，不返回磁盘路径。
+- `read_archive_view(db,base,id)->ArchiveView {archiveId,sha256,size,text:Option<String>}`，复用已登记UUID全字节校验，非法UTF-8不替换编码。原字节导出仍读取完整文件，不从textarea重建。
+- 现有 `note_preview_runtime.rs` 加 `list/read/export_archive_in_library` 与三条对应 `list_learning_note_archives/read_learning_note_archive/export_learning_note_archive` 命令。只读操作锁外IO，返回前重新核对库；显式导出只接受用户选择的 .md/.bin 新文件，拒绝链接目录和库内写入，fsync+persist_noclobber在短最终库门发布，禁止覆盖已有文件。
+- 新 `src/features/learning/NoteArchiveBrowser.tsx` 与 tests；现有知识库导航加懒加载“原文归档”。使用原生dialog焦点限制与Escape/外部点击关闭、主题tokens、既有LoadFeedback/重试，50项分页、按需读取、UTF8只读文本、无效编码提示及原字节导出。只读浏览不触发付费AI、正文保存或重新转换。
+- [x] RED：合成真实库的完整/部分/未转换三种计数、稳定分页、无效UTF8/原件篡改、备份恢复后读取、原字节导出完全一致与禁止覆盖/库内写入/错库；UI按需加载、错误重试、迟到旧库结果丢弃、显示纯文本而非HTML、导出取消不写文件。
+- [x] GREEN：实现边界、三条typed API与导航入口；不激活转换提交页面，不按来源名称合并。
+- [x] 完整Rust 470 / 前端392通过、生产构建成功、凭据扫描与本地提交随阶段保存。证据 `docs/evidence/merge/task9-note-archive-browser.md`；真实源迁入/IME/物理DPI仍留主计划，不把此步当全部Task9完成。

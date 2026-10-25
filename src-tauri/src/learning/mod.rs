@@ -38,6 +38,9 @@ pub mod native_qa;
 #[cfg(windows)]
 pub mod native_window;
 pub mod note_archive;
+pub mod note_archive_browser;
+#[cfg(test)]
+mod note_archive_browser_tests;
 #[cfg(test)]
 mod note_archive_tests;
 pub mod note_conversion;

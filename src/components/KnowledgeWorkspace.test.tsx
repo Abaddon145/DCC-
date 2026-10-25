@@ -31,6 +31,11 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 describe("knowledge editing",()=>{
+  it("offers a read-only source archive entry without opening or changing a note",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    expect(await screen.findByRole("button",{name:"原文归档"})).toBeEnabled();
+    expect(mocks.invoke.mock.calls.some(([command])=>command==="save_note")).toBe(false);
+  });
   it("asks once when deleting a protected outline block and keeps both editors aligned on rejection",async()=>{
     const original=mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command,args)=>command==="get_note"?Promise.resolve({...note,document:{type:"doc",content:[{type:"preservedMarkdown",attrs:{archiveItemId:"59f222de-82c9-4e8e-8352-17142811caa7",label:"保护段落"}}]}}):original(command,args));
