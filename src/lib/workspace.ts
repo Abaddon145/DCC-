@@ -11,6 +11,17 @@ export class RequestGate {
   isCurrent(version: number) { return this.version === version; }
 }
 
+/** Visible overlays take precedence over editor/player input; hidden retained tabs do not. */
+export function hasWorkspaceOverlay(selector="[role=dialog][aria-modal=true],[role=alertdialog],[role=menu],.modal-backdrop,.lightbox,.command-backdrop,.core-detail,[data-native-overlay]") {
+  return [...document.querySelectorAll<HTMLElement>(selector)].some(node=>{
+    for(let current:HTMLElement|null=node;current;current=current.parentElement){
+      const style=getComputedStyle(current);
+      if(current.hidden||current.getAttribute("aria-hidden")==="true"||style.display==="none"||style.visibility==="hidden")return false;
+    }
+    return true;
+  });
+}
+
 /** Restore a distant position through bounded backend pages; never rely on an oversized limit. */
 export async function readContextPage<T,R extends {offset:number;limit:number}>(fetchPage:(request:R)=>Promise<Page<T>>,request:R,wanted:number,stillCurrent:()=>boolean=()=>true):Promise<Page<T>> {
   const first=await fetchPage(request);const items=[...first.items];let offset=request.offset+first.items.length;

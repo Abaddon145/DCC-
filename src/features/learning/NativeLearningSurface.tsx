@@ -2,16 +2,9 @@ import {useLayoutEffect,useRef} from "react";
 import {learningApi} from "./api";
 import type {PlaybackSnapshot,NativeViewport} from "./types";
 import type {VideoPointer} from "./playerInteraction";
+import {hasWorkspaceOverlay} from "../../lib/workspace";
 
-export function hasLearningOverlay(){
-  return [...document.querySelectorAll<HTMLElement>("[role=dialog][aria-modal=true],[role=alertdialog],[role=menu],.modal-backdrop,.lightbox,.command-backdrop,.core-detail,[data-native-overlay]")].some(node=>{
-    for(let current:HTMLElement|null=node;current;current=current.parentElement){
-      const style=getComputedStyle(current);
-      if(current.hidden||current.getAttribute("aria-hidden")==="true"||style.display==="none"||style.visibility==="hidden")return false;
-    }
-    return true;
-  });
-}
+export const hasLearningOverlay=hasWorkspaceOverlay;
 
 export function NativeLearningSurface({snapshot,hidden,onBlockedChange,onPointer,onError}:{snapshot:PlaybackSnapshot;hidden:boolean;onBlockedChange:(value:boolean)=>void;onPointer:(event:VideoPointer)=>void;onError:(error:string)=>void}){
   const surface=useRef<HTMLDivElement>(null);
