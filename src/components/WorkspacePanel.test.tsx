@@ -85,3 +85,9 @@ it.each(["left","right"] as const)("resizes the %s fixed panel with pointer and 
   fireEvent.keyDown(splitter,{key:"Home"});
   expect(splitter).toHaveAttribute("aria-valuenow","200");
 });
+it("does not consume a splitter key already handled by its workspace",()=>{
+  render(<div onKeyDownCapture={event=>event.preventDefault()}><Harness initial="pinned"/></div>);
+  const splitter=screen.getByRole("separator",{name:"工作面板宽度"});
+  fireEvent.keyDown(splitter,{key:"ArrowRight"});
+  expect(splitter).toHaveAttribute("aria-valuenow","200");
+});

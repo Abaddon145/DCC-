@@ -56,3 +56,16 @@
 - 固定面板有宽度separator，pointer capture跟踪横向增量，按左右侧处理方向；方向键每次10px，Home/双击复位，明确辅助说明和aria-valuemin/max/now。小窗口只CSS夹宽，不回写state。
 - [x] RED→GREEN：未访问内容不挂载；切tab/收起保留搜索与滚动；peek外点/Esc、固定不收起、IME/输入/对话框优先；左右拖宽/越界/键盘/双击；原生overlay标记仅peek。追加关闭后焦点恢复、两侧Escape焦点优先先失败再修复。
 - [x] 状态与组件连同现有学习区/偏好33项定向通过，完整前端404项/77文件通过，生产构建成功。只前端变更不重复Rust回归。证据 `docs/evidence/merge/task10-panel-foundation.md`；本步仍不替换真实工作区调用，10c再按现有保存/播放生命周期接入。
+
+## 10c-L 学习区真实接入（BASE 0e2ea39）
+
+**Files:** LearningWorkspace.tsx / .css / .test.tsx；commands.rs现有workspace白名单及其现有测试模块。共享面板不改变playback start/stop effect依赖或session key。
+
+- 独立workspace context键 `learning`，显式加入后端白名单，避免用video键覆盖媒体筛选。当前库scope/remember_workspace仍由既有服务控制，JSON仍原131072上限。
+- 左侧系列：默认closed、tab=series、固定宽300、限制220–440；右侧字幕/分析：默认closed、tab=transcript、宽340、限制260–560，保留现有默认阅读宽度。
+- 用本组件替换临时boolean和上方重复toggle，保留原有课程完成、播放控制、帮助/返回守卫。左/右内容首次访问后保活；onOpen仍flushWorkspaceEdits再换course，面板变化不成为原生启动依赖。
+- prefs加载/保存复用api.get/saveWorkspaceContext；保留learning context未知字段，迟到恢复不覆盖已操作布局。仅remember启用且读取到相同库ID才500ms保存或卸载flush；persistPanels不保存peek/专注临时收起。未知/损坏tab退回白名单，恢复的peek按closed处理。
+- 专注按钮使用togglePanelFocus/setLayoutPanel；退出原样恢复，专注时明确打开入口则恢复另一侧并退出专注。前端仅CSS收窄显示，不改固定width。
+- [x] RED：真实学习组件面板切换/外点/专注、保留分析输入和原生同一session；迟到偏好不覆盖操作；持久化只closed/pinned且键learning；后端先拒绝learning context。
+- [x] GREEN：接入；splitter重复消费已处理快捷键先失败再修复，补布局读取失败/错库重试检查，后台播放继续。
+- [x] 全Rust471/前端410通过、生产构建成功、凭据扫描及本地提交随阶段保存。证据 `docs/evidence/merge/task10-learning-panels.md`。知识库10c-K仍单独接入，真实原生/DPI仍Task14。

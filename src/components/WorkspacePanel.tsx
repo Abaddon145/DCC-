@@ -34,7 +34,7 @@ export function WorkspacePanel({label,side,state,limits,tabs,onChange}:Workspace
       <header><strong>{tabs.find(tab=>tab.id===state.tab)?.label||label}</strong><button type="button" className="icon-button" aria-label={`${state.mode==="pinned"?"取消固定":"固定"}${label}`} aria-pressed={state.mode==="pinned"} onClick={()=>dispatch({type:"pin"})}>{state.mode==="pinned"?<PinOff size={16}/>:<Pin size={16}/>}</button><button type="button" className="icon-button" aria-label={`收起${label}`} onClick={close}><X size={16}/></button></header>
       {tabs.map(tab=>(visited.includes(tab.id)||open&&state.tab===tab.id)&&<div className="workspace-panel-page" id={`${id}-${tab.id}`} key={tab.id} role="tabpanel" aria-label={tab.label} hidden={!open||state.tab!==tab.id}>{tab.content}</div>)}
       {state.mode==="pinned"&&<div className="workspace-panel-splitter" role="separator" tabIndex={0} aria-label={`${label}宽度`} aria-orientation="vertical" aria-valuemin={limits.min} aria-valuemax={limits.max} aria-valuenow={state.width} aria-describedby={`${id}-resize-help`} onDoubleClick={()=>dispatch({type:"resetWidth"})} onKeyDown={event=>{
-        if(event.nativeEvent.isComposing)return;
+        if(event.defaultPrevented||event.nativeEvent.isComposing)return;
         if(event.key==="Home"){event.preventDefault();dispatch({type:"resetWidth"});}
         else if(event.key==="ArrowLeft"||event.key==="ArrowRight"){event.preventDefault();dispatch({type:"resize",width:state.width+(event.key==="ArrowRight"?1:-1)*(side==="left"?1:-1)*10});}
       }} onPointerDown={event=>{if(event.button!==0)return;event.preventDefault();drag.current={id:event.pointerId,x:event.clientX,width:state.width};event.currentTarget.setPointerCapture?.(event.pointerId);}} onPointerMove={event=>{

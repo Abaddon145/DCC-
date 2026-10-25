@@ -3,6 +3,7 @@ import {beforeEach,it,expect,vi} from "vitest";
 import {StrictMode} from "react";
 import {LearningWorkspace} from "./LearningWorkspace";
 import {learningApi} from "./api";
+import {api} from "../../lib/api";
 import type {PlaybackSnapshot} from "./types";
 import {flushWorkspaceEdits,registerNoteSaveGuard} from "../../lib/noteSaveGuard";
 import {NativeLearningSurface} from "./NativeLearningSurface";
@@ -11,11 +12,13 @@ import type {CourseAnalysisDetail} from "./types";
 const events=vi.hoisted(()=>new Map<string,(event:{payload:any})=>void>());
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,handler:(event:{payload:any})=>void)=>{events.set(name,handler);return ()=>events.delete(name);})}));
 vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn(),listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn()}}));
-vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([])}}));
+vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([]),getWorkspaceContext:vi.fn(),saveWorkspaceContext:vi.fn()}}));
 const initial:PlaybackSnapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:1500,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[{id:1,kind:"audio",label:"中文"},{id:2,kind:"sub",label:"中文字幕"}],audioId:1,subtitleId:null,fullscreen:false,error:null,saveError:null};
 const props={libraryId:"lib",courseId:"course",onBack:vi.fn(),notify:vi.fn()};
 beforeEach(()=>{
   vi.clearAllMocks();events.clear();
+  vi.mocked(api.getWorkspaceContext).mockResolvedValue({libraryId:"lib",enabled:false,value:null});
+  vi.mocked(api.saveWorkspaceContext).mockResolvedValue(true);
   vi.stubGlobal("ResizeObserver",class{observe(){}disconnect(){}});
   vi.mocked(learningApi.getCourse).mockResolvedValue({id:"course",mediaId:"media",title:"学习视频",positionMs:1500,durationMs:60000,rate:1,completed:false,progressRevision:1});
   vi.mocked(learningApi.startPlayback).mockResolvedValue(initial);
@@ -26,6 +29,60 @@ beforeEach(()=>{
   vi.mocked(learningApi.listCourseAnalyses).mockResolvedValue({items:[{id:"analysis",stage:"segments",status:"completed",completedStages:1,totalStages:1,error:"",createdAt:1000}],total:1,offset:0,limit:50});
   const saved:CourseAnalysisDetail={id:"analysis",courseId:"course",previewId:"preview",sourceFingerprint:"a".repeat(64),model:"deepseek-chat",parentAnalysisId:null,status:"completed",error:"",createdAt:1000,updatedAt:1000,staleReasons:[],stages:{items:[],total:0,offset:0,limit:50},selectedStageKey:null,result:{contentType:"tutorial",oneSentenceSummary:"课程要点",overview:"保存的课程说明",chapters:[],keyPoints:[{timeMs:11500,title:"材质参数",content:"学习参数",importance:3,sourceSegmentIds:["cue"]}],tutorialSteps:[],terms:[],actionItems:[],tags:[],warnings:[],sections:[],sectionValidation:[]}};
   vi.mocked(learningApi.getCourseAnalysis).mockResolvedValue(saved);
+});
+it("retains panel input across tabs and focus changes without restarting playback",async()=>{
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
+  const sampling=await screen.findByRole("textbox",{name:"采样时间（秒）"});
+  fireEvent.change(sampling,{target:{value:"12.5, 30"}});
+  fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
+  await screen.findByRole("region",{name:"课程字幕"});
+  fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
+  expect(await screen.findByRole("textbox",{name:"采样时间（秒）"})).toHaveValue("12.5, 30");
+  fireEvent.click(screen.getByRole("button",{name:"固定学习资料"}));
+  fireEvent.click(screen.getByRole("button",{name:"专注学习"}));
+  expect(screen.queryByRole("region",{name:"课程分析"})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"恢复面板布局"}));
+  expect(screen.getByRole("textbox",{name:"采样时间（秒）"})).toHaveValue("12.5, 30");
+  expect(learningApi.startPlayback).toHaveBeenCalledTimes(1);
+  expect(learningApi.stopPlayback).not.toHaveBeenCalled();
+});
+it("persists only stable learning panel settings without overwriting video browsing context",async()=>{
+  vi.mocked(api.getWorkspaceContext).mockResolvedValue({libraryId:"lib",enabled:true,value:{otherField:"keep"}});
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
+  await screen.findByRole("region",{name:"课程字幕"});
+  await waitFor(()=>expect(api.saveWorkspaceContext).toHaveBeenCalledWith("lib","learning",expect.objectContaining({otherField:"keep",panels:expect.objectContaining({right:expect.objectContaining({mode:"closed",tab:"transcript"})})})));
+  fireEvent.click(screen.getByRole("button",{name:"固定学习资料"}));
+  await waitFor(()=>expect(api.saveWorkspaceContext).toHaveBeenLastCalledWith("lib","learning",expect.objectContaining({panels:expect.objectContaining({right:expect.objectContaining({mode:"pinned",width:340})})})));
+  fireEvent.click(screen.getByRole("button",{name:"专注学习"}));
+  await waitFor(()=>expect(api.saveWorkspaceContext).toHaveBeenLastCalledWith("lib","learning",expect.objectContaining({panels:expect.objectContaining({right:expect.objectContaining({mode:"pinned",width:340})})})));
+  expect(vi.mocked(api.saveWorkspaceContext).mock.calls.every(call=>call[1]==="learning")).toBe(true);
+});
+it("does not replace an early panel action with a late restored layout",async()=>{
+  let restore!:(value:Awaited<ReturnType<typeof api.getWorkspaceContext>>)=>void;
+  vi.mocked(api.getWorkspaceContext).mockReturnValueOnce(new Promise(resolve=>{restore=resolve;}));
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
+  await screen.findByRole("region",{name:"课程字幕"});
+  await act(async()=>restore({libraryId:"lib",enabled:true,value:{panels:{right:{mode:"pinned",width:500,tab:"analysis"}}}}));
+  expect(screen.getByRole("region",{name:"课程字幕"})).toBeVisible();
+  expect(screen.queryByRole("region",{name:"课程分析"})).toBeNull();
+  await waitFor(()=>expect(api.saveWorkspaceContext).toHaveBeenCalledWith("lib","learning",expect.objectContaining({panels:expect.objectContaining({right:expect.objectContaining({mode:"closed",tab:"transcript",width:340})})})));
+});
+it.each(["read failure","other library"])("keeps playback available after a layout %s and retries without writing stale settings",async reason=>{
+  if(reason==="read failure")vi.mocked(api.getWorkspaceContext).mockRejectedValueOnce(new Error("layout unavailable"));
+  else vi.mocked(api.getWorkspaceContext).mockResolvedValueOnce({libraryId:"other",enabled:true,value:{panels:{right:{mode:"pinned",width:500,tab:"analysis"}}}});
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
+  expect(await screen.findByRole("alert")).toHaveTextContent("布局读取失败");
+  expect(screen.queryByRole("region",{name:"课程分析"})).toBeNull();
+  expect(api.saveWorkspaceContext).not.toHaveBeenCalled();
+  vi.mocked(api.getWorkspaceContext).mockResolvedValueOnce({libraryId:"lib",enabled:true,value:{panels:{right:{mode:"pinned",width:420,tab:"analysis"}}}});
+  fireEvent.click(screen.getByRole("button",{name:"重新读取布局"}));
+  expect(await screen.findByRole("region",{name:"课程分析"})).toBeVisible();
+  expect(screen.getByRole("separator",{name:"学习资料宽度"})).toHaveAttribute("aria-valuenow","420");
+  expect(learningApi.startPlayback).toHaveBeenCalledTimes(1);
+  expect(learningApi.stopPlayback).not.toHaveBeenCalled();
 });
 it("waits for readiness, pauses and seeks a note target once without resetting later manual seeks",async()=>{
   let current={...initial,ready:false};
@@ -161,6 +218,16 @@ it("next-course shortcut follows the selected series rather than library update 
   fireEvent.click(screen.getByRole("button",{name:"课程系列"}));
   await screen.findByRole("option",{name:"UE制作"});
   await waitFor(()=>expect(screen.getByLabelText("当前系列")).toHaveValue("series"));
+  // Temporary overlays defer playback shortcuts; pin the series before testing its order.
+  await waitFor(()=>{
+    const action=vi.mocked(learningApi.controlPlayback).mock.calls.filter(call=>call[2].type==="shortcuts").at(-1)?.[2];
+    expect(action).toMatchObject({type:"shortcuts",bindings:[]});
+  });
+  fireEvent.click(screen.getByRole("button",{name:"固定课程导航"}));
+  await waitFor(()=>{
+    const action=vi.mocked(learningApi.controlPlayback).mock.calls.filter(call=>call[2].type==="shortcuts").at(-1)?.[2];
+    expect(action?.type==="shortcuts"&&action.bindings.length>0).toBe(true);
+  });
   fireEvent.keyDown(screen.getByRole("region",{name:"学习播放器"}),{key:"n"});
   await waitFor(()=>expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","series-next"));
   expect(learningApi.listCourses).not.toHaveBeenCalled();

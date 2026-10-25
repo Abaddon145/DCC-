@@ -698,6 +698,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "video",
         "projects",
         "knowledge",
+        "learning",
         "browserCapture",
         "downloader",
     ]
@@ -3199,6 +3200,12 @@ mod tests {
     #[test]
     fn browser_capture_workspace_context_is_a_registered_browsing_module() {
         assert_eq!(validate_workspace_module("browserCapture"), Ok(()));
+    }
+    #[test]
+    fn learning_workspace_context_is_registered_without_replacing_video() {
+        assert_eq!(validate_workspace_module("learning"), Ok(()));
+        assert_eq!(validate_workspace_module("video"), Ok(()));
+        assert!(validate_workspace_module("learning/../../video").is_err());
     }
     #[test]
     fn parses_baidu_share_text() {

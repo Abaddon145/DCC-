@@ -1,6 +1,9 @@
 import {useCallback,useEffect,useRef,useState} from "react";
 import {listen} from "@tauri-apps/api/event";
-import {ArrowLeft,Keyboard} from "lucide-react";
+import {ArrowLeft,Keyboard,Captions,ListVideo,Sparkles} from "lucide-react";
+import {WorkspacePanel} from "../../components/WorkspacePanel";
+import {api} from "../../lib/api";
+import {normalizePanel,persistPanels,setLayoutPanel,togglePanelFocus,type PanelLayout} from "../../lib/workspacePanels";
 import {ContextMenu} from "../../components/ContextMenu";
 import {LoadFeedback} from "../../components/LoadFeedback";
 import {flushWorkspaceEdits,registerWorkspaceLeaveGuard} from "../../lib/noteSaveGuard";
@@ -18,13 +21,47 @@ import type {PlaybackAction,PlaybackSnapshot,ScopedPlaybackEvent,NativePointerEv
 import "./LearningWorkspace.css";
 
 export interface LearningWorkspaceProps {libraryId:string;courseId:string;projectId?:string;initialPositionMs?:number;sourceFingerprint?:string;backLabel?:string;onBack:()=>void;notify:(message:string,error?:boolean)=>void}
+const seriesLimits={min:220,max:440,defaultWidth:300},detailLimits={min:260,max:560,defaultWidth:340};
+const initialPanels=():PanelLayout=>({left:{mode:"closed",width:300,tab:"series"},right:{mode:"closed",width:340,tab:"transcript"},focusSnapshot:null});
+function restoredPanels(raw:unknown):PanelLayout {
+  const value=(raw&&typeof raw==="object"?raw:{}) as Record<string,unknown>;
+  const fallback=initialPanels();
+  const panels={left:normalizePanel(value.left,fallback.left,seriesLimits,["series"]),right:normalizePanel(value.right,fallback.right,detailLimits,["transcript","analysis"]),focusSnapshot:null};
+  return {...persistPanels(panels),focusSnapshot:null};
+}
 export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,initialPositionMs,sourceFingerprint,backLabel,onBack,notify}:LearningWorkspaceProps){
   const [courseId,setCourseId]=useState(initialCourseId),[title,setTitle]=useState("学习视频"),[snapshot,setSnapshot]=useState<PlaybackSnapshot|null>(null),[error,setError]=useState(""),[retry,setRetry]=useState(0),[leaving,setLeaving]=useState(false);
   const [focus,setFocus]=useState<"learning"|"editor">("learning"),[blocked,setBlocked]=useState(false),[composing,setComposing]=useState(false),[menu,setMenu]=useState<{x:number;y:number}|null>(null),[help,setHelp]=useState(false);
-  const [transcript,setTranscript]=useState(false);
-  const [analysis,setAnalysis]=useState(false);
+  const [panels,setPanels]=useState(initialPanels),[panelReady,setPanelReady]=useState(false),[panelError,setPanelError]=useState(""),[panelRead,setPanelRead]=useState(0);
+  const panelRef=useRef(panels);panelRef.current=panels;
+  const panelDirty=useRef(false),panelWrites=useRef(Promise.resolve());
+  const panelScope=useRef<{libraryId:string;enabled:boolean;value:Record<string,unknown>}|null>(null);
+  const changePanels=(change:(value:PanelLayout)=>PanelLayout)=>{panelDirty.current=true;setPanels(change);};
+  useEffect(()=>{panelDirty.current=false;panelScope.current=null;setPanelReady(false);setPanelError("");setPanels(initialPanels());},[libraryId]);
+  useEffect(()=>{
+    let active=true;setPanelReady(false);setPanelError("");panelScope.current=null;
+    void api.getWorkspaceContext("learning").then(context=>{
+      if(!active)return;
+      if(context.libraryId!==libraryId)throw new Error("素材库已切换，未恢复其他库的布局");
+      const value=(context.value&&typeof context.value==="object"?context.value:{}) as Record<string,unknown>;
+      panelScope.current={libraryId,enabled:context.enabled,value};
+      if(!panelDirty.current)setPanels(restoredPanels(value.panels));
+      setPanelReady(true);
+    }).catch(reason=>{if(active)setPanelError(`布局读取失败：${String(reason)}；当前操作保留，尚未覆盖布局设置。`);});
+    return()=>{active=false;};
+  },[libraryId,panelRead]);
+  const savePanels=useCallback((layout:PanelLayout)=>{
+    const scope=panelScope.current;if(!scope?.enabled||scope.libraryId!==libraryId)return;
+    const value={...scope.value,panels:persistPanels(layout)};
+    panelWrites.current=panelWrites.current.then(async()=>{
+      if(!await api.saveWorkspaceContext(libraryId,"learning",value))throw new Error("素材库已切换");
+      if(panelScope.current===scope)setPanelError("");
+    }).catch(reason=>{if(panelScope.current===scope)setPanelError(`布局保存失败：${String(reason)}；可重新读取后重试。`);});
+  },[libraryId]);
+  useEffect(()=>{if(!panelReady)return;const timer=window.setTimeout(()=>savePanels(panels),500);return()=>window.clearTimeout(timer);},[panels,panelReady,savePanels]);
+  useEffect(()=>()=>{savePanels(panelRef.current);panelScope.current=null;},[savePanels]);
   const [completed,setCompleted]=useState(false);
-  const [seriesPanel,setSeriesPanel]=useState(false),seriesOrder=useRef<string[]>([]);
+  const seriesOrder=useRef<string[]>([]);
   useEffect(()=>{seriesOrder.current=[];},[libraryId]);
   const root=useRef<HTMLElement>(null),current=useRef(snapshot),busy=useRef(false),stopped=useRef(false),click=useRef<ReturnType<typeof setTimeout>|null>(null),queue=useRef(Promise.resolve());current.current=snapshot;
   const gate=useRequestGate(),adjacentGate=useRequestGate();
@@ -159,14 +196,17 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
     <header className="learning-header"><button className="secondary-button" disabled={leaving} onClick={()=>void back()}><ArrowLeft size={16}/>{backLabel||(projectId?"返回项目":"返回视频详情")}</button><div><span className="eyebrow">LEARNING WORKSPACE</span><h1>{title}</h1></div><button ref={helpButton} className="secondary-button" onClick={()=>setHelp(value=>!value)} aria-expanded={help}><Keyboard size={16}/>快捷键</button></header>
     {failure&&<div className="learning-error" role="alert"><span>{failure}</span><button className="secondary-button" disabled={leaving} onClick={()=>{setError("");setRetry(value=>value+1);}}>重试播放</button></div>}
     {!snapshot&&!failure&&<LoadFeedback label="正在启动原生播放器…" skeleton/>}
-    <div className="learning-workspace-actions"><button className="secondary-button learning-transcript-toggle" aria-expanded={transcript} onClick={()=>{setTranscript(value=>!value);setAnalysis(false);}}>{transcript?"收起课程字幕":"课程字幕"}</button>
-    <button className="secondary-button learning-transcript-toggle" aria-expanded={analysis} onClick={()=>{setAnalysis(value=>!value);setTranscript(false);}}>{analysis?"收起课程分析":"课程分析"}</button>
-    <button className="secondary-button learning-transcript-toggle" aria-expanded={seriesPanel} onClick={()=>setSeriesPanel(value=>!value)}>{seriesPanel?"收起课程系列":"课程系列"}</button>
-    <button className="secondary-button learning-transcript-toggle" disabled={!snapshot?.ready||leaving} aria-pressed={completed} onClick={()=>control({type:"completed",completed:!completed})}>{completed?"已完成 · 恢复学习":"标记课程完成"}</button></div>
-    {seriesPanel&&<aside className="learning-series-panel"><LearningSeries libraryId={libraryId} courseId={courseId} onOrderChange={ids=>{seriesOrder.current=ids;}} onOpen={async id=>{if(busy.current)return;const ticket=adjacentGate.begin();await flushWorkspaceEdits();if(adjacentGate.isCurrent(ticket))setCourseId(id);}}/></aside>}
-    <div className="learning-stage-row"><div className="learning-video-stage">{snapshot&&<NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>} {snapshot&&!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>
-    {analysis&&<aside className="learning-side-panel"><CourseAnalysisPanel libraryId={libraryId} courseId={courseId} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/></aside>}
-    {transcript&&<aside className="learning-side-panel"><TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})}/></aside>}</div>
+    {panelError&&<div className="learning-error" role="alert"><span>{panelError}</span><button className="secondary-button" onClick={()=>setPanelRead(value=>value+1)}>重新读取布局</button></div>}
+    <div className="learning-workspace-actions"><button className="secondary-button" aria-pressed={!!panels.focusSnapshot} onClick={()=>changePanels(togglePanelFocus)}>{panels.focusSnapshot?"恢复面板布局":"专注学习"}</button>
+    <button className="secondary-button" disabled={!snapshot?.ready||leaving} aria-pressed={completed} onClick={()=>control({type:"completed",completed:!completed})}>{completed?"已完成 · 恢复学习":"标记课程完成"}</button></div>
+    <div className="learning-stage-row">
+      <WorkspacePanel label="课程导航" side="left" state={panels.left} limits={seriesLimits} onChange={next=>changePanels(value=>setLayoutPanel(value,"left",next))} tabs={[{id:"series",label:"课程系列",icon:<ListVideo size={18}/>,content:<LearningSeries libraryId={libraryId} courseId={courseId} onOrderChange={ids=>{seriesOrder.current=ids;}} onOpen={async id=>{if(busy.current)return;const ticket=adjacentGate.begin();await flushWorkspaceEdits();if(adjacentGate.isCurrent(ticket))setCourseId(id);}}/>}]}/>
+      <div className="learning-video-stage">{snapshot&&<NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>} {snapshot&&!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>
+      <WorkspacePanel label="学习资料" side="right" state={panels.right} limits={detailLimits} onChange={next=>changePanels(value=>setLayoutPanel(value,"right",next))} tabs={[
+        {id:"transcript",label:"课程字幕",icon:<Captions size={18}/>,content:<TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})}/>},
+        {id:"analysis",label:"课程分析",icon:<Sparkles size={18}/>,content:<CourseAnalysisPanel libraryId={libraryId} courseId={courseId} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/>},
+      ]}/>
+    </div>
     {snapshot&&<LearningControls key={snapshot.sessionId} snapshot={snapshot} disabled={!snapshot.ready||!!snapshot.error||leaving} onAction={control}/>}
     {help&&<div ref={helpDialog} className="learning-shortcut-help" data-native-overlay role="dialog" aria-modal="true" aria-label="播放器快捷键"><header><h2>播放器快捷键</h2><button className="secondary-button" autoFocus onClick={()=>{setHelp(false);helpButton.current?.focus();}}>关闭</button></header><p>编辑输入、中文输入法和弹窗优先。单击播放/暂停，双击全屏，视频区域滚轮调整音量。</p><dl>{defaultLearningBindings.map(binding=><div key={binding.id}><dt>{learningBindingLabels[binding.id]}</dt><dd><kbd>{binding.shortcut}</kbd></dd></div>)}</dl></div>}
     {menu&&<ContextMenu {...menu} title="播放控制" onClose={()=>setMenu(null)} items={[{label:snapshot?.paused?"播放":"暂停",run:()=>actionRef.current("player.toggle")},{label:"后退 5 秒",run:()=>actionRef.current("player.seek-back")},{label:"前进 5 秒",run:()=>actionRef.current("player.seek-forward")},{label:"切换全屏",run:()=>actionRef.current("player.fullscreen")},{label:"快捷键说明",run:()=>setHelp(true)}]}/>}
