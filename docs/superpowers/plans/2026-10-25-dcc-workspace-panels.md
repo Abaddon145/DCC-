@@ -95,3 +95,12 @@
 - 复用drag模块body标志library-pointer-dragging，让拖动取消优先于peek收起；一次Escape只取消拖动，之后才能收起面板。
 - [x] RED→GREEN：真实入口请求unfiled/project/updated与排序约束；项目选择不写正文；切pane/专注/调宽保持同一editor、选区、undo与草稿；宽度只改list、预览取消不写入；布局/外观读失败及迟到恢复不覆盖操作；既有DnD/回收/历史回归。
 - [x] 全前端419项/77文件通过，生产构建成功，凭据扫描0命中；本地提交随阶段保存。后端未改不重复Rust，最新K1为473通过/2既有忽略。证据 `docs/evidence/merge/task10-knowledge-left-panel.md`。真实响应式/输入法/DPI仍Task14，主Task10未完成，下一步K3信息区。
+
+## 10c-K3 右侧知识信息区（BASE 3037e4b）
+
+- 同一 PanelLayout 的 right 传入现有 NoteEditor，在正文的稳定兄弟位置挂 WorkspacePanel；默认 closed/outline/320，范围260–480。四页为标题大纲、来源与反链、标签、历史。固定/临时/专注恢复和上下文写入沿用已验证共享逻辑。
+- 从 NoteEditorTools 提取单一标题导航，原独立调用仍可展开本地大纲，主编辑器改用右侧入口；保留原格式和右键功能。正文仍使用同一个 Tiptap 与 NoteSaveQueue。
+- 标签复用现有 tagsText/change，不建立第二份草稿；阅读、历史预览、回收站、保存屏障期间禁止编辑。来源/反链按首次访问加载、失败显式重试，使用真实引用ID，不猜课程或时间码。
+- 历史移入共享面板，删除旧文档外点/Escape监听；关闭或切页返回当前草稿，保留异步 generation 防护。历史打开仍先 flush，失败显示并重试；不自动恢复版本。旧工具栏重复历史入口由右侧入口替代。
+- RED→GREEN覆盖同一editor/草稿、标签同步、来源读失败重试、历史预览切页及迟到响应；回归原历史和大纲用例。全前端/构建/扫描及独立本地提交；真实窗口、IME、DPI仍Task14。
+- [x] 三项新行为先失败，接入后定向55项通过；完整前端424项/77文件通过，生产构建成功。证据 `docs/evidence/merge/task10-knowledge-information-panel.md`。Task10代码接入完成，真实窗口/IME/DPI及最终全分支审查仍由Task14验收，不宣称已完成真实双应用联调。

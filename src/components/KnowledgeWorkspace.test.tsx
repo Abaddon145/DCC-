@@ -33,6 +33,73 @@ beforeEach(()=>{mocks.invoke.mockReset();mocks.notify.mockReset();mocks.invoke.m
 });});
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 describe("knowledge editing",()=>{
+  it("keeps one editor and shared tag draft across pinned information pages and focus",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    const body=document.querySelector(".knowledge-editor .tiptap");
+    fireEvent.change(title,{target:{value:"信息区草稿"}});
+    fireEvent.click(screen.getByRole("button",{name:"标签信息"}));
+    fireEvent.click(screen.getByRole("button",{name:"固定知识信息"}));
+    fireEvent.change(screen.getByRole("textbox",{name:"信息区标签"}),{target:{value:"UE;材质"}});
+    expect(screen.getByRole("textbox",{name:"笔记标签"})).toHaveValue("UE;材质");
+    fireEvent.click(screen.getByRole("button",{name:"标题大纲"}));
+    expect(await screen.findByRole("navigation",{name:"笔记大纲"})).toHaveTextContent("学习目标");
+    fireEvent.click(screen.getByRole("button",{name:"专注"}));fireEvent.click(screen.getByRole("button",{name:"专注"}));
+    expect(screen.getByRole("complementary",{name:"知识信息"})).toBeVisible();
+    expect(document.querySelector(".knowledge-editor .tiptap")).toBe(body);expect(title).toHaveValue("信息区草稿");
+    fireEvent.click(screen.getByRole("button",{name:"标签信息"}));expect(screen.getByRole("textbox",{name:"信息区标签"})).toHaveValue("UE;材质");
+    fireEvent.click(screen.getByRole("button",{name:"阅读"}));await waitFor(()=>expect(screen.getByRole("textbox",{name:"信息区标签"})).toBeDisabled());
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_note",expect.objectContaining({input:expect.objectContaining({title:"信息区草稿",tags:["UE","材质"]})})));
+  });
+  it("loads scoped sources on demand and exposes a retry rather than silently dropping read errors",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let fail=true;
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_note_references"?(fail?Promise.reject("来源读取失败"):Promise.resolve([{kind:"media",targetId:"media-id",label:"不可用课程",available:false}])):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    await waitFor(()=>expect(screen.getByRole("textbox",{name:"笔记标题"})).toBeEnabled());
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="get_note_references")).toBe(false);
+    fireEvent.click(screen.getByRole("button",{name:"来源与反链"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("来源读取失败");
+    fail=false;fireEvent.click(screen.getByRole("button",{name:"重新读取来源"}));
+    expect(await screen.findByText(/不可用课程/)).toHaveTextContent("不可用");
+    expect(mocks.invoke).toHaveBeenCalledWith("get_note_references",{libraryId:"test-library",id:note.id});
+  });
+  it("leaves a historical preview for the current draft when switching information pages",async()=>{
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.change(title,{target:{value:"当前信息草稿"}});fireEvent.click(screen.getByRole("button",{name:"历史"}));
+    fireEvent.click(await screen.findByRole("button",{name:/旧版标题/}));await waitFor(()=>expect(title).toHaveValue("旧版标题"));
+    fireEvent.click(screen.getByRole("button",{name:"标签信息"}));
+    await waitFor(()=>expect(title).toHaveValue("当前信息草稿"));expect(title).toBeEnabled();
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="restore_note_revision")).toBe(false);
+  });
+  it("retains a failed draft when history admission cannot save and allows retry",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;let fail=true;
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="save_note"&&fail?Promise.reject("磁盘空间不足"):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
+    const title=await screen.findByRole("textbox",{name:"笔记标题"});await waitFor(()=>expect(title).toBeEnabled());
+    fireEvent.change(title,{target:{value:"历史前的失败草稿"}});fireEvent.click(screen.getByRole("button",{name:"历史"}));
+    const retry=await screen.findByRole("button",{name:"重新读取历史"});
+    expect(title).toHaveValue("历史前的失败草稿");expect(title).toBeEnabled();
+    expect(mocks.invoke.mock.calls.some(([cmd])=>cmd==="list_note_revisions")).toBe(false);
+    fail=false;fireEvent.click(retry);expect(await screen.findByRole("button",{name:/旧版标题/})).toBeEnabled();
+    expect(title).toHaveValue("历史前的失败草稿");
+  });
+  it("restores and resizes the information panel and persists its fixed layout while focused",async()=>{
+    const original=mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((cmd,args)=>cmd==="get_workspace_context"?Promise.resolve({libraryId:"test-library",enabled:true,value:{activeId:note.id,tabs:[{id:note.id,title:note.title}],panels:{right:{mode:"pinned",width:390,tab:"tags"}}}}):original(cmd,args));
+    render(<KnowledgeWorkspace notify={mocks.notify}/>);
+    expect(await screen.findByRole("textbox",{name:"信息区标签"})).toBeVisible();
+    const splitter=screen.getByRole("separator",{name:"知识信息宽度"});expect(splitter).toHaveAttribute("aria-valuenow","390");
+    fireEvent.keyDown(splitter,{key:"ArrowLeft"});expect(splitter).toHaveAttribute("aria-valuenow","400");
+    fireEvent.click(screen.getByRole("button",{name:"专注"}));
+    expect(screen.queryByRole("complementary",{name:"知识信息"})).toBeNull();
+    await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith("save_workspace_context",expect.objectContaining({value:expect.objectContaining({panels:expect.objectContaining({right:{mode:"pinned",width:400,tab:"tags"}})})})));
+    fireEvent.click(screen.getByRole("button",{name:"专注"}));expect(splitter).toHaveAttribute("aria-valuenow","400");
+  });
   it("filters unfiled and directly project-referenced notes before paging without changing their bodies",async()=>{
     const original=mocks.invoke.getMockImplementation()!;
     const projectId="33333333-3333-4333-8333-333333333333";
@@ -346,7 +413,7 @@ describe("knowledge editing",()=>{
   it("keeps history open for inside interactions but closes on the history button",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.click(await screen.findByRole("button",{name:/UE 学习笔记/}));
     fireEvent.click(await screen.findByRole("button",{name:"历史"}));const panel=await screen.findByRole("complementary",{name:"历史版本"});fireEvent.pointerDown(panel);
-    expect(panel).toBeInTheDocument();fireEvent.click(screen.getByRole("button",{name:"历史"}));expect(panel).not.toBeInTheDocument();
+    expect(panel).toBeVisible();fireEvent.click(screen.getByRole("button",{name:"历史"}));expect(panel).not.toBeVisible();
   });
   it("renames the right-clicked note without requiring it to be opened",async()=>{
     render(<KnowledgeWorkspace notify={mocks.notify}/>);fireEvent.contextMenu(await screen.findByRole("button",{name:/UE 学习笔记/}),{clientX:400,clientY:200});
