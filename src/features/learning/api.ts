@@ -6,6 +6,7 @@ import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./typ
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  readNotePreviewBlock:(expectedLibraryId:string,previewId:string,placeholderId:string)=>invoke<string>("read_note_conversion_block",{expectedLibraryId,previewId,placeholderId}),
   prepareNotePreview:(expectedLibraryId:string,request:NotePreviewRequest)=>invoke<StoredNotePreview>("prepare_note_conversion_preview",{expectedLibraryId,request}),
   getNotePreview:(expectedLibraryId:string,previewId:string)=>invoke<StoredNotePreview>("get_note_conversion_preview",{expectedLibraryId,previewId}),
   commitNotePreview:(expectedLibraryId:string,previewId:string)=>invoke<NoteCommitReceipt>("commit_note_preview",{expectedLibraryId,previewId}),

@@ -169,25 +169,33 @@ fn application_builder(
                     .body("素材库正在安全维护".as_bytes().to_vec())
                     .unwrap();
             }
-            match state.with_library(|connection, base_dir| {
-                if id == "note" {
-                    knowledge_files::response(connection, base_dir, variant)
-                } else if id == "library" && variant == "file" {
-                    media_library::protocol_response(
-                        connection,
-                        base_dir,
-                        parts.next().unwrap_or_default(),
-                        range,
-                    )
-                } else if id == "library" && variant == "bundle" {
-                    let entry_id = parts.next().unwrap_or_default();
-                    let raw = parts.collect::<Vec<_>>().join("/");
-                    let logical = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy();
-                    media_library::bundle_response(connection, base_dir, entry_id, &logical, range)
-                } else {
-                    media::protocol_response(connection, base_dir, id, variant, range)
-                }
-            }) {
+            let response = if id == "note-preview" {
+                learning::note_preview_runtime::image_route(&state, path)
+            } else {
+                state.with_library(|connection, base_dir| {
+                    if id == "note" {
+                        knowledge_files::response(connection, base_dir, variant)
+                    } else if id == "library" && variant == "file" {
+                        media_library::protocol_response(
+                            connection,
+                            base_dir,
+                            parts.next().unwrap_or_default(),
+                            range,
+                        )
+                    } else if id == "library" && variant == "bundle" {
+                        let entry_id = parts.next().unwrap_or_default();
+                        let raw = parts.collect::<Vec<_>>().join("/");
+                        let logical =
+                            percent_encoding::percent_decode_str(&raw).decode_utf8_lossy();
+                        media_library::bundle_response(
+                            connection, base_dir, entry_id, &logical, range,
+                        )
+                    } else {
+                        media::protocol_response(connection, base_dir, id, variant, range)
+                    }
+                })
+            };
+            match response {
                 Ok(response) => response,
                 Err(error) => tauri::http::Response::builder()
                     .status(404)
@@ -330,6 +338,7 @@ fn application_builder(
                     commands::preview_external_video,
                     learning::commands::start_learning_playback,
                     learning::note_preview_runtime::prepare_note_conversion_preview,
+                    learning::note_preview_runtime::read_note_conversion_block,
                     learning::note_preview_runtime::get_note_conversion_preview,
                     learning::note_preview_runtime::commit_note_preview,
                     learning::note_preview_runtime::cancel_note_conversion_preview,

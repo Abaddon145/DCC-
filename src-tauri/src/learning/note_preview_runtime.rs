@@ -150,6 +150,47 @@ pub fn cancel_in_library(state: &AppState, library: &str, id: &str) -> Result<Ve
     note_preview::cancel_note_preview(&db, &base, library, id)
 }
 
+pub fn image_in_library(
+    state: &AppState,
+    library: &str,
+    preview: &str,
+    placeholder: &str,
+) -> Result<tauri::http::Response<Vec<u8>>, String> {
+    let base = base(state, library)?;
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+    let response =
+        note_preview::preview_image_response(&db, &base, library, preview, placeholder, &|| {
+            stopped(state, library, &base)
+        })?;
+    if stopped(state, library, &base) {
+        return Err("素材库已切换，已丢弃旧预览图片".into());
+    }
+    Ok(response)
+}
+pub fn image_route(state: &AppState, path: &str) -> Result<tauri::http::Response<Vec<u8>>, String> {
+    let parts = path.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["note-preview", library, preview, placeholder] => {
+            image_in_library(state, library, preview, placeholder)
+        }
+        _ => Err("预览图片地址无效".into()),
+    }
+}
+pub fn block_in_library(
+    state: &AppState,
+    library: &str,
+    preview: &str,
+    placeholder: &str,
+) -> Result<String, String> {
+    let base = base(state, library)?;
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+    let text = note_preview::read_preview_block(&db, &base, library, preview, placeholder)?;
+    if stopped(state, library, &base) {
+        return Err("素材库已切换，已丢弃旧原文响应".into());
+    }
+    Ok(text)
+}
+
 async fn job<T, F>(app: tauri::AppHandle, library: String, work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -161,6 +202,18 @@ where
     })
     .await
     .map_err(|_| "笔记预览工作线程中断，请在原库重新读取回执".to_owned())?
+}
+#[tauri::command]
+pub async fn read_note_conversion_block(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    preview_id: String,
+    placeholder_id: String,
+) -> Result<String, String> {
+    job(app, expected_library_id, move |state, library| {
+        block_in_library(state, library, &preview_id, &placeholder_id)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn prepare_note_conversion_preview(

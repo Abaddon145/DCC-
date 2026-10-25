@@ -7,6 +7,232 @@ use crate::{knowledge::NoteInput, state::AppState};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+fn preview_image_id(preview: &super::note_preview::StoredNotePreview) -> String {
+    preview.conversion.document.as_ref().unwrap()["content"][1]["attrs"]["src"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn learning_note_preview_content_images_are_scoped_checked_and_read_only() {
+    let (root, state, library, archive, attachment) = fixture();
+    let preview = prepare_in_library(&state, &library, request(&archive, &attachment)).unwrap();
+    let placeholder = preview_image_id(&preview);
+    let route = format!("note-preview/{library}/{}/{placeholder}", preview.id);
+    let response = image_route(&state, &route).unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["Content-Type"], "image/png");
+    assert_eq!(response.headers()["Cache-Control"], "no-store");
+    assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+    assert_eq!(
+        *response.body(),
+        std::fs::read(root.path().join("学习示例.png")).unwrap()
+    );
+    assert!(image_in_library(&state, &library, &preview.id, &attachment).is_err());
+    assert!(image_in_library(&state, &library, &preview.id, "../secret.png").is_err());
+    assert!(image_route(&state, &format!("{route}/extra")).is_err());
+    assert!(image_route(&state, &route.replace(&placeholder, "%2e%2e")).is_err());
+    assert!(image_in_library(
+        &state,
+        "596d257d-3e5c-46c4-a464-187cf180c6bd",
+        &preview.id,
+        &placeholder
+    )
+    .is_err());
+    let mut other = request(&archive, &attachment);
+    other.destination = Destination::New {
+        title: "different".into(),
+        notebook_id: None,
+    };
+    let other = prepare_in_library(&state, &library, other).unwrap();
+    assert!(image_in_library(&state, &library, &other.id, &placeholder).is_err());
+    state.with_library(|db, _| {
+        let counts:(i64,i64,i64) = db.query_row("SELECT (SELECT count(*) FROM knowledge_notes),(SELECT count(*) FROM knowledge_attachments),(SELECT count(*) FROM learning_note_archive_items)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(counts,(1,1,0));
+        Ok(())
+    }).unwrap();
+    let connection = state
+        .with_active_mut(|active| Ok(active.connection.take()))
+        .unwrap();
+    assert!(image_route(&state, &route).is_err());
+    state
+        .with_active_mut(|active| {
+            active.connection = connection;
+            Ok(())
+        })
+        .unwrap();
+    cancel_in_library(&state, &library, &preview.id).unwrap();
+    assert!(image_in_library(&state, &library, &preview.id, &placeholder).is_err());
+    let other_placeholder = preview_image_id(&other);
+    commit_in_library(&state, &library, &other.id).unwrap();
+    assert!(image_in_library(&state, &library, &other.id, &other_placeholder).is_err());
+}
+
+#[test]
+fn learning_note_preview_content_never_serves_text_attachments_as_images() {
+    let (root, state, library, archive, _attachment) = fixture();
+    let path = root.path().join("data.txt");
+    std::fs::write(&path, b"<script>alert(1)</script>").unwrap();
+    state
+        .with_library(|db, base| {
+            let note: String = db
+                .query_row("SELECT id FROM knowledge_notes LIMIT 1", [], |r| r.get(0))
+                .unwrap();
+            let attachment = crate::knowledge_files::import(db, base, &note, &path)?;
+            let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
+            let preview = super::note_preview::prepare_note_preview(
+                db,
+                base,
+                &library,
+                &archive,
+                Destination::New {
+                    title: "text attachment".into(),
+                    notebook_id: None,
+                },
+                &[super::note_preview::AttachmentSource {
+                    source_key: "source.txt".into(),
+                    path: crate::knowledge_files::path(db, base, &attachment.id)?.0,
+                    sha256: format!("{:x}", Sha256::digest(b"<script>alert(1)</script>")),
+                    filename: Some("data.txt".into()),
+                }],
+                &CourseMap::new(),
+                &grants,
+                &|| false,
+            )?;
+            let raw: String = db
+                .query_row(
+                    "SELECT payload_json FROM learning_note_previews WHERE id=?1",
+                    [&preview.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let placeholder = snapshot["files"][0]["placeholder"].as_str().unwrap();
+            assert!(super::note_preview::preview_image_response(
+                db,
+                base,
+                &library,
+                &preview.id,
+                placeholder,
+                &|| false
+            )
+            .is_err());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_note_preview_content_rejects_changed_image_and_switched_library() {
+    let (_root, state, library, archive, attachment) = fixture();
+    let preview = prepare_in_library(&state, &library, request(&archive, &attachment)).unwrap();
+    let placeholder = preview_image_id(&preview);
+    assert!(image_in_library(&state, &library, &preview.id, &placeholder).is_ok());
+    state
+        .with_active_mut(|active| {
+            active.marker.library_id = uuid::Uuid::new_v4().to_string();
+            Ok(())
+        })
+        .unwrap();
+    assert!(image_in_library(&state, &library, &preview.id, &placeholder).is_err());
+    state
+        .with_active_mut(|active| {
+            active.marker.library_id = library.clone();
+            Ok(())
+        })
+        .unwrap();
+    state
+        .with_library(|db, base| {
+            let raw: String = db
+                .query_row(
+                    "SELECT payload_json FROM learning_note_previews WHERE id=?1",
+                    [&preview.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let snapshot: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let relative = snapshot["files"][0]["relative"].as_str().unwrap();
+            std::fs::write(base.join(relative), b"changed").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(image_in_library(&state, &library, &preview.id, &placeholder).is_err());
+}
+
+#[test]
+fn learning_note_preview_content_reads_exact_raw_block_without_publishing_it() {
+    let (_root, state, library, _archive, _attachment) = fixture();
+    let bytes = b"# title\r\n\r\n<section>\r\nraw\r\n</section>\r\n";
+    let archive = state
+        .with_library(|db, base| {
+            note_archive::archive_bytes(
+                db,
+                base,
+                &ArchiveSource {
+                    profile_id: &library,
+                    source_key: "raw.md",
+                    version_key: "current",
+                },
+                bytes,
+                &format!("{:x}", Sha256::digest(bytes)),
+            )
+        })
+        .unwrap()
+        .id;
+    let preview = prepare_in_library(
+        &state,
+        &library,
+        PrepareNotePreviewRequest {
+            archive_id: archive.clone(),
+            destination: Destination::New {
+                title: "raw".into(),
+                notebook_id: None,
+            },
+            attachments: vec![],
+            courses: CourseMap::new(),
+        },
+    )
+    .unwrap();
+    let placeholder = &preview.conversion.unsupported[0].placeholder_id;
+    assert_eq!(
+        block_in_library(&state, &library, &preview.id, placeholder).unwrap(),
+        "<section>\r\nraw\r\n</section>\r\n"
+    );
+    assert!(block_in_library(&state, &library, &preview.id, &archive).is_err());
+    cancel_in_library(&state, &library, &preview.id).unwrap();
+    assert_eq!(
+        block_in_library(&state, &library, &preview.id, placeholder).unwrap(),
+        "<section>\r\nraw\r\n</section>\r\n"
+    );
+    state
+        .with_library(|db, base| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_note_archive_items",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            let relative: String = db
+                .query_row(
+                    "SELECT relative_path FROM learning_note_archives WHERE id=?1",
+                    [&archive],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            std::fs::write(base.join(relative), b"tampered").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(block_in_library(&state, &library, &preview.id, placeholder).is_err());
+}
+
 #[test]
 fn learning_note_runtime_closed_maintenance_connection_blocks_submission() {
     let (_root, state, library, archive, attachment) = fixture();

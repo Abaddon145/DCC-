@@ -809,6 +809,87 @@ pub fn commit_note_preview(
         Err(e) => Err(e),
     }
 }
+pub fn preview_image_response(
+    db: &Connection,
+    base: &Path,
+    library: &str,
+    id: &str,
+    placeholder: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<tauri::http::Response<Vec<u8>>, String> {
+    check_stop(stop)?;
+    uuid(placeholder)?;
+    let (snapshot, status, _) = load(db, base, library, id)?;
+    if status != "ready" {
+        return Err("预览已取消或提交，请重新预览或打开已保存笔记".into());
+    }
+    let file = snapshot
+        .files
+        .iter()
+        .find(|file| file.placeholder == placeholder)
+        .filter(|file| matches!(file.kind, AttachmentKind::Image))
+        .ok_or("图片不属于此预览")?;
+    let extension = Path::new(&file.relative)
+        .extension()
+        .and_then(|v| v.to_str())
+        .ok_or("图片格式无效")?;
+    let mime = crate::knowledge_files::content_type(extension)
+        .filter(|mime| mime.starts_with("image/"))
+        .ok_or("非图片附件不能内嵌预览")?;
+    let mut leases = checked_staging(base, std::slice::from_ref(file), stop)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_stop(stop)?;
+        let count = leases[0].read(&mut buffer).map_err(error)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() as u64 + count as u64 > file.size {
+            return Err("图片副本读取过程中发生变化".into());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    if bytes.len() as u64 != file.size || hash(&bytes) != file.sha256 {
+        return Err("图片副本摘要不匹配".into());
+    }
+    check_stop(stop)?;
+    tauri::http::Response::builder()
+        .header("Content-Type", mime)
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(bytes)
+        .map_err(error)
+}
+
+pub fn read_preview_block(
+    db: &Connection,
+    base: &Path,
+    library: &str,
+    id: &str,
+    placeholder: &str,
+) -> Result<String, String> {
+    uuid(placeholder)?;
+    let (snapshot, _, _) = load(db, base, library, id)?;
+    let span = snapshot
+        .conversion
+        .unsupported
+        .iter()
+        .find(|span| span.placeholder_id == placeholder)
+        .ok_or("原文块不属于此预览")?;
+    let bytes = note_archive::read_archive(db, base, &snapshot.archive)?;
+    if hash(&bytes) != snapshot.conversion.archive_hash {
+        return Err("预览原件摘要不匹配".into());
+    }
+    let bytes = bytes
+        .get(span.start_byte..span.end_byte)
+        .ok_or("原文块范围无效")?;
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| "原文块不是有效 UTF-8".into())
+}
+
 pub fn read_note_preview(
     db: &Connection,
     base: &Path,

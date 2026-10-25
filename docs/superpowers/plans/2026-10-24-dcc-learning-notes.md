@@ -140,3 +140,16 @@
 - [x] RED：真实 AppState 临时库中从注册附件准备/提交，显示名与图片字节保留；严格拒绝路径/多余字段/其他库 ID；切库/维护阻止写入；并发准备和重复提交仅一份正文/同一回执；受控停止不产生成功正文或遗留暂存文件。
 - [x] GREEN：接通 UUID-only 命令、可取消内核和实际原子最终门，薄前端 API 路由保持 expectedLibraryId。
 - [x] 定向/完整 Rust/前端/构建/凭据扫描；阶段本地提交随本记录保存。完整 Rust 463 通过、2 既有忽略，前端 384 项通过，生产构建成功。证据 `docs/evidence/merge/task9-note-preview-runtime.md`；尚不宣称实际 AppHandle/GUI/双应用联调或 Task9 完成。
+
+## 9.3b3 受控预览内容读取（BASE d943661）
+
+假设：本步只补齐展示所需读取能力，不提前激活迁入 UI；原文归档和预览副本已由前两步登记。复用现有 dcc-media 协议、worker connection 和原件读取，不新增协议或通用文件服务。
+
+**Files / Interfaces：**
+- `note_preview.rs`：`preview_image_response(db,base,library,previewId,placeholderId,stop)` 返回现有 HTTP 图片响应，仅 ready 快照中属于该预览的图片；检查快照/位置/副本摘要，保留只读句柄、限定100MiB，返回 no-store/nosniff。不把占位ID当普通附件读取，不开放 PDF/文本/远程文件。
+- 同文件 `read_preview_block(db,base,library,previewId,placeholderId)->String`：只读该快照 unsupported 清单对应原字节范围，重新校验归档全摘要与 UTF-8；不注册片段、不写正文。
+- `note_preview_runtime.rs`：复用当前库绑定、维护/位置检查，图片响应与原文读取均在锁外 IO，返回前丢弃旧库响应。
+- `lib.rs`：现有协议增加固定 `note-preview/<library UUID>/<preview UUID>/<placeholder UUID>` 路由；原文新增 `read_note_conversion_block` UUID 命令。前端 typed API 添加原文读取，预览图片地址待只读页面接入时生成，不能写回唯一正文。
+- [x] RED：真实 AppState 临时库验证图片响应及中文显示名不影响路径，另预览占位ID/路径/其他库拒绝、篡改及取消拒绝、原文字节 CRLF/HTML 精确且不执行；读取不增加附件、笔记或片段。
+- [x] GREEN：最小实现受控读取边界与路由，已有笔记图片协议保持不变。
+- [x] 定向、完整回归和生产构建、证据、本地提交随阶段保存。完整 Rust 467 / 前端 385 通过、构建成功；证据 `docs/evidence/merge/task9-note-preview-content.md`。未转换历史列表/导出/计数及实际预览页面随后实施，不标 Task9 完成。

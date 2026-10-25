@@ -7,6 +7,11 @@ const library="596d257d-3e5c-46c4-a464-187cf180c6bd";
 const previewId="5804245d-e1d3-4297-b08c-053a123706bd";
 describe("library-scoped note preview API",()=>{
   beforeEach(()=>{mocks.invoke.mockReset();mocks.invoke.mockResolvedValue(undefined);});
+  it("reads preserved bytes by library, immutable preview and placeholder IDs",async()=>{
+    mocks.invoke.mockResolvedValue("<section>\r\nraw\r\n</section>\r\n");
+    expect(await learningApi.readNotePreviewBlock(library,previewId,previewId)).toBe("<section>\r\nraw\r\n</section>\r\n");
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("read_note_conversion_block",{expectedLibraryId:library,previewId,placeholderId:previewId});
+  });
   it("prepares from registered UUIDs without filesystem paths or frontend documents",async()=>{
     const request:NotePreviewRequest={archiveId:previewId,destination:{kind:"new",title:"学习",notebookId:null},attachments:[{sourceKey:"source.png",attachmentId:previewId}],courses:{}};
     await learningApi.prepareNotePreview(library,request);
