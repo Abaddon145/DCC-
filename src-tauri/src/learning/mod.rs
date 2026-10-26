@@ -28,6 +28,9 @@ mod analysis_summary_tests;
 #[cfg(test)]
 mod analysis_tests;
 pub mod commands;
+#[cfg(test)]
+mod excerpt_tests;
+pub mod excerpts;
 pub mod files;
 pub mod models;
 #[cfg(windows)]
