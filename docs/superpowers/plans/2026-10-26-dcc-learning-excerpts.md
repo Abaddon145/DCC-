@@ -59,3 +59,18 @@
 此步不生成“已保存摘录”回执、不发布目标附件；11b2b实现带清单的笔记/项目/板原子发布后再接UI。
 
 - [x] 初始5项行为RED后实现；存储6项、全部摘录21项通过。完整Rust494通过/2既有忽略，生产前端构建成功，源码扫描476文件/0命中。证据 `docs/evidence/merge/task11-excerpt-store.md`。无前端改动，不重复上阶段424项界面回归。
+
+## 11b2b1 文字追加、项目资料与可靠回执（BASE 16e73e0）
+
+**Files:** 新 learning/excerpt_publish.rs / excerpt_publish_tests.rs，mod注册；subtitles.rs复用原件解析并提供保留只读文件句柄的内部入口。
+
+- 先完成纯数据库文字提交，再扩展11b2b2截图/参考板文件清单；两步均无Tauri/UI入口。请求显式includeFrame=false；true在本子步明确拒绝，不能静默丢图。
+- `CommitRequest {operationId,excerptId,destination,includeFrame}`；destination为New(title,notebookId)、Append(noteId,expectedRevision,insertIndex)或Project(projectId,title,notebookId)。仅接收UUID/确认边界，不接收正文或文件路径。
+- 同operationId与请求摘要不符拒绝；同preview换operationId拒绝。先持久pending意图，再重新验证实际媒体完整SHA并持原只读lease、字幕原件hash和只读句柄。最终active.try_lock与worker busy_timeout(0)→IMMEDIATE短事务复核同库/root/source登记、项目未归档、目标当前revision，再save_in/课程关系/项目媒体关系/receipt原子提交。SQLite/active繁忙明确重试，不能带媒体lease等待锁。
+- 追加只向确认的顶层insertIndex插入，保留原笔记字段、导航颜色和其他节点；force_checkpoint保存历史。项目新笔记包含真实project reference，索引随以后保存保留。
+- 已提交操作先重放原始receipt，不因源后来变化或目标后来删除而再次创建；另返targetAvailable提示现状。最终提交异常先读持久回执，数据库不可读不推断未提交。pending失败可用相同请求手动重试；取消pending同时取消preview，不删除用户实体。
+- RED→GREEN：新建/重复/丢回执、同ID改请求和换ID重复、追加位置/修订冲突与旧字段保留、项目关系/归档拒绝、来源变化/取消/错库、最终事务回滚与pending重试、并发同ID/关闭后重读。完整Rust/生产构建/扫描及独立本地提交。
+
+Ruling：纯文字发布没有新文件，因此本子步不制造空文件清单；图片发布将在11b2b2加入预分配UUID与fsync清单后开放。若错在拆分顺序，代价是内部入口接通延后，不损失已保存内容。
+
+- [x] 6项行为RED→GREEN，补并发/忙锁及Windows媒体和字幕只读句柄保护；全部摘录28项通过。完整Rust501通过/2既有忽略，生产前端构建成功。证据 `docs/evidence/merge/task11-excerpt-publish-text.md`。仍未激活IPC/UI或截图发布。

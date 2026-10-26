@@ -258,7 +258,7 @@ pub fn list(db: &Connection, course: &str) -> Result<Vec<LearningSubtitle>, Stri
         .map_err(|e| e.to_string())?;
     Ok(values)
 }
-fn registered(
+pub(super) fn registered(
     db: &Connection,
     base: &Path,
     course: &str,
@@ -332,11 +332,31 @@ pub(crate) fn verified_cues(
     course: &str,
     id: &str,
 ) -> Result<(String, Vec<TranscriptCue>), String> {
+    let (sha, cues, _lease, _path) = verified_cues_leased(db, base, course, id)?;
+    Ok((sha, cues))
+}
+// A confirmed local excerpt keeps this handle until its database transaction ends.
+pub(super) fn verified_cues_leased(
+    db: &Connection,
+    base: &Path,
+    course: &str,
+    id: &str,
+) -> Result<(String, Vec<TranscriptCue>, fs::File, PathBuf), String> {
     let duration = super::store::course(db, course)?.duration_ms;
     let (path, expected) = registered(db, base, course, id)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    let lease = options.open(&path).map_err(|_| "字幕资料缺失或正在写入")?;
+    if !lease.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("字幕资料不是普通文件".into());
+    }
     let mut bytes = Vec::new();
-    fs::File::open(&path)
-        .map_err(|_| "字幕资料缺失")?
+    (&lease)
         .take(MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
@@ -351,7 +371,7 @@ pub(crate) fn verified_cues(
         .extension()
         .and_then(|v| v.to_str())
         .ok_or("字幕格式无效")?;
-    Ok((sha, parse(&bytes, format, id, duration)?))
+    Ok((sha, parse(&bytes, format, id, duration)?, lease, path))
 }
 
 #[cfg(test)]
