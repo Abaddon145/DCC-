@@ -1,17 +1,17 @@
 //! Backend-only prepared material; persistence and user confirmation follow separately.
 use super::excerpts::{ExcerptSelection, ExcerptText};
 use crate::state::AppState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExcerptFrame {
     pub time_ms: u64,
     pub sha256: String,
     pub data_url: String,
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedExcerpt {
     pub library_id: String,
     pub root_hash: String,
@@ -93,13 +93,7 @@ pub fn prepare_in_library(
     state
         .with_library_if_id(library, |db, base| {
             let current = super::store::course(db, course)?;
-            let file: String = db
-                .query_row(
-                    "SELECT primary_file_id FROM media_entries WHERE id=?1",
-                    [&current.media_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
+            let file = super::analysis::source_file_id(db, &current.media_id)?;
             let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
             if base != live.base
                 || current.media_id != text.media_id

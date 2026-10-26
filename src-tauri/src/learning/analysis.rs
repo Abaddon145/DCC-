@@ -223,13 +223,7 @@ fn publish_preview(
                 return Err("素材库位置已变化".into());
             }
             let current = super::store::course(db, &input.preview.course_id)?;
-            let file: String = db
-                .query_row(
-                    "SELECT primary_file_id FROM media_entries WHERE id=?1",
-                    [current.media_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
+            let file = source_file_id(db, &current.media_id)?;
             let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
             if file != input.source_file_id
                 || current.title != input.title
@@ -404,6 +398,12 @@ pub(super) fn source_scope_changed(
         Err(std::sync::TryLockError::Poisoned(_)) => true,
     }
 }
+pub(super) fn source_file_id(db: &rusqlite::Connection, media: &str) -> Result<String, String> {
+    db.query_row(
+        "SELECT f.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id AND f.entry_id=e.id AND f.role='main' WHERE e.id=?1 AND e.deleted_at IS NULL AND e.kind='video'",
+        [media], |r| r.get(0),
+    ).map_err(|_| "课程主文件不存在或不属于此视频".into())
+}
 pub(super) fn live_source_controlled(
     state: &crate::state::AppState,
     library: &str,
@@ -417,13 +417,7 @@ pub(super) fn live_source_controlled(
         .ok_or("素材库已切换")?;
     let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
     let course = super::store::course(&db, course)?;
-    let file_id: String = db
-        .query_row(
-            "SELECT f.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id AND f.entry_id=e.id AND f.role='main' WHERE e.id=?1 AND e.deleted_at IS NULL AND e.kind='video'",
-            [&course.media_id],
-            |r| r.get(0),
-        )
-        .map_err(|_| "课程主文件不存在或不属于此视频")?;
+    let file_id = source_file_id(&db, &course.media_id)?;
     let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
     let prepared = crate::media_access::prepare_media_file(&db, &base, &file_id, &grants)?;
     let stop = || {

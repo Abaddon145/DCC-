@@ -44,3 +44,18 @@
 - RED→GREEN：真实FFmpeg合成视频单帧/摘要/原件不变、坏视频保留文字而无图、没有截图时只读文字/实际媒体SHA、错库/取消/维护/源变化拒绝。回归原分析真实帧与其任务测试；完整Rust、前端构建、扫描及独立本地提交。
 - [x] 定向摘录15项、课程分析32项通过；最终完整Rust488通过/2既有忽略，生产前端构建成功。证据 `docs/evidence/merge/task11-excerpt-runtime.md`。本步仍只有后台准备，不含持久保存或界面入口。
 - 11b2发布接缝事实见 `docs/integration/excerpt-publication-seams.md`；高难度只读核查使用GPT-6.1 Sol high，未使用Astra，最终全分支审查仍Task14。
+
+## 11b2a 不可变预览存储与恢复边界（BASE 650a344）
+
+**Files:** 新 learning/excerpt_store.rs / excerpt_store_tests.rs / schema-v29.sql；mod迁移、backup.rs两处失效链；PreparedExcerpt/ExcerptText补严格反序列化与Clone；提取共享source_file_id查询供来源准备、最终检查及存储元数据复查。无前端命令激活。
+
+- v29新增learning_excerpts（library/root/course/media/file、完整不可变payload/SHA、ready/cancelled/committed）、learning_excerpt_operations（operationId主键、excerptId唯一、请求/SHA、pending/committed/cancelled、manifest及receipt）和learning_course_notes关系。操作回执不对笔记/板做级联删除；committed必须有receipt，其他状态不能冒充回执。
+- `save_prepared(db,base,library,&PreparedExcerpt)->StoredExcerpt{id,status,prepared}`；guarded版本提供最终事务提交回调，序列化在事务前。当前只有同内容ready预览可复用，取消/已提交后允许用户新建同内容摘录，不全局锁死内容SHA。最多16MiBJSON；元数据、正文重建、图片类型/解码大小/SHA和图文状态一致性校验。
+- `get_preview(db,base,current_library,id)` 读取前先限字节及校验payloadSHA；ready严格绑定本库和原root。cancelled/committed仅作为当前库备份内的只读历史保留旧来源绑定，不作为可续写授权；始终校验调用者当前library marker，不能读另一个活动库。
+- `cancel_preview` 幂等取消ready，但存在pending发布记录时拒绝直接取消，避免绕过恢复清单；已提交不删除实体。后续发布重试以operationId/确认请求摘要/回执为准，不调用转换Replace路径。
+- `invalidate_previews` 只取消未提交预览及操作，加入普通恢复与中断恢复两处链；不删笔记、关系或历史回执。旧v28数据迁移保持正文和已有素材；现有8个schema版本断言仅升级到29，保留其他数据断言。
+- RED→GREEN：持久重读/ready去重/跨连接并发、取消后可重建、错库/root/正文或图片篡改拒绝、payload摘要损坏、v28迁移/操作状态约束/回执不级联、真实整库备份恢复作废旧确认而保留笔记。完整Rust/构建/扫描及独立本地提交。
+
+此步不生成“已保存摘录”回执、不发布目标附件；11b2b实现带清单的笔记/项目/板原子发布后再接UI。
+
+- [x] 初始5项行为RED后实现；存储6项、全部摘录21项通过。完整Rust494通过/2既有忽略，生产前端构建成功，源码扫描476文件/0命中。证据 `docs/evidence/merge/task11-excerpt-store.md`。无前端改动，不重复上阶段424项界面回归。

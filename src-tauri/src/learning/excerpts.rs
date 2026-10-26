@@ -13,8 +13,8 @@ pub struct ExcerptSelection {
     pub comment: String,
     pub frame_time_ms: Option<u64>,
 }
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExcerptText {
     pub course_id: String,
     pub media_id: String,

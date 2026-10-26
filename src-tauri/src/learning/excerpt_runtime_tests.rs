@@ -4,7 +4,7 @@ use std::{
     fs,
     sync::atomic::{AtomicUsize, Ordering},
 };
-fn fixture(
+pub(super) fn fixture(
     real: bool,
 ) -> (
     tempfile::TempDir,
