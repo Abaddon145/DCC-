@@ -111,32 +111,39 @@ fn validate(p: &PreparedExcerpt) -> Result<(), String> {
         {
             return Err("摘录截图身份无效".into());
         }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(
-                frame
-                    .data_url
-                    .strip_prefix("data:image/jpeg;base64,")
-                    .ok_or("摘录截图类型无效")?,
-            )
-            .map_err(|_| "摘录截图编码无效")?;
-        if bytes.len() > 256 * 1024 || hash(&bytes) != frame.sha256 {
-            return Err("摘录截图超限或摘要不符".into());
-        }
-        let mut reader =
-            image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Jpeg);
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(1024);
-        limits.max_image_height = Some(1024);
-        limits.max_alloc = Some(64 * 1024 * 1024);
-        reader.limits(limits);
-        let image = reader.decode().map_err(|_| "摘录截图无法解码或尺寸超限")?;
-        if image.width() == 0 || image.height() == 0 {
-            return Err("摘录截图尺寸无效".into());
-        }
+        frame_bytes(frame)?;
     } else if t.frame_time_ms.is_some() && p.warnings.is_empty() {
         return Err("缺少截图失败提示，未静默丢弃图片".into());
     }
     Ok(())
+}
+
+pub(super) fn frame_bytes(frame: &super::excerpt_runtime::ExcerptFrame) -> Result<Vec<u8>, String> {
+    if frame.data_url.len() > 350000 || !digest(&frame.sha256) {
+        return Err("摘录截图身份无效".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            frame
+                .data_url
+                .strip_prefix("data:image/jpeg;base64,")
+                .ok_or("摘录截图类型无效")?,
+        )
+        .map_err(|_| "摘录截图编码无效")?;
+    if bytes.len() > 256 * 1024 || hash(&bytes) != frame.sha256 {
+        return Err("摘录截图超限或摘要不符".into());
+    }
+    let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Jpeg);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1024);
+    limits.max_image_height = Some(1024);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|_| "摘录截图无法解码或尺寸超限")?;
+    if image.width() == 0 || image.height() == 0 {
+        return Err("摘录截图尺寸无效".into());
+    }
+    Ok(bytes)
 }
 
 pub fn save_prepared(

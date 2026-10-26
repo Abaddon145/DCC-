@@ -74,3 +74,18 @@
 Ruling：纯文字发布没有新文件，因此本子步不制造空文件清单；图片发布将在11b2b2加入预分配UUID与fsync清单后开放。若错在拆分顺序，代价是内部入口接通延后，不损失已保存内容。
 
 - [x] 6项行为RED→GREEN，补并发/忙锁及Windows媒体和字幕只读句柄保护；全部摘录28项通过。完整Rust501通过/2既有忽略，生产前端构建成功。证据 `docs/evidence/merge/task11-excerpt-publish-text.md`。仍未激活IPC/UI或截图发布。
+
+## 11b2b2a 截图文件清单与受控发布（BASE 31a3dba）
+
+**Files:** 新 learning/excerpt_files.rs / excerpt_file_tests.rs及mod注册。先把共享文件边界完成，随后11b2b2b接入附件、板及回执，避免未经测试的文件操作直接进入笔记事务。
+
+- `prepare_files(base,operationId,libraryId,rootHash,frame)->FrameFiles`：只接受后端PreparedExcerpt中的已验证JPEG（再次验证摘要、大小、尺寸），输出JPEG及WebP缩略图、尺寸、真实SHA和大小。复用images::import_image_to在私人临时目录处理，再原子复制到learning-data/excerpts/{operationId}/staging；保留既有相同内容，拒绝不一致和路径链接。源视频不复制。
+- `PublicationManifest`绑定operation/excerpt/library/root/requestSHA、预分配图片UUID、可选预分配新笔记UUID及所有stage/final相对路径/大小/SHA。最终地址只允许严格构造的note-attachments/{noteId}/{imageId}.jpg，或reference-boards/{boardId}/originals/{imageId}.jpg及thumbnails/{imageId}.webp；不接受前端路径。
+- 清单先fsync并以内容SHA命名，Locator使用learning-data/excerpts/{operationId}/{sha}.json，严格读取路径/大小/摘要/字段/目标绑定。清单初次创建前拒绝已存在的最终路径，不覆盖；已有同一清单允许复核后重试。
+- `publish_files`：先完整核验所有stage和已存在final，再复制缺失文件；noclobber、fsync，返回只读校验后的全部结果。最后一个文件失败不能报告成功，留下清单可恢复；不在此模块决定SQLite提交或删除用户内容。
+- `cleanup_uncommitted(db,base,manifest)`：调用者必须已确认操作未提交且位于原库/根；若DB不可读/manifest不匹配/任一目标已登记或内容SHA变了，则保留并明确报告。仅删除清单中的、当前仍匹配且未登记的新文件，不删目录、不删旧附件、源视频或用户实体；stage保留用于重试，提交后清理由后续集成调用。
+- RED→GREEN：真实JPEG/WebP准备和完整摘要、清单篡改/越界/root拒绝、预先存在目标不覆盖、部分发布后重试、清理只针对未登记新文件且保留旧文件/篡改内容/源件。仍无IPC/UI。
+
+Ruling：文件边界先单独证明，正式发布始终由11b2b2b持媒体lease和短事务完成；11b2b2a的文件复制本身不等于已保存摘录。
+
+- [x] 4项行为RED→GREEN，补独立暂存篡改、重复准备和实际复制库根目录检查；最终全部摘录33项通过。最终完整Rust506通过/2既有忽略（82.93秒），前端生产构建成功。证据 `docs/evidence/merge/task11-excerpt-files.md`。
