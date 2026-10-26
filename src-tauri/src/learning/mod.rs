@@ -38,6 +38,9 @@ mod excerpt_image_publish_tests;
 pub mod excerpt_publish;
 #[cfg(test)]
 mod excerpt_publish_tests;
+pub mod excerpt_runner;
+#[cfg(test)]
+mod excerpt_runner_tests;
 pub mod excerpt_runtime;
 #[cfg(test)]
 mod excerpt_runtime_tests;

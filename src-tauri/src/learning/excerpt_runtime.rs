@@ -33,6 +33,7 @@ pub fn prepare_in_library(
 ) -> Result<PreparedExcerpt, String> {
     use base64::Engine;
     use sha2::{Digest, Sha256};
+    super::excerpts::validate_selection(selection)?;
     let stopped = || {
         cancelled()
             || state.tasks.maintenance().is_some()

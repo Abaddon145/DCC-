@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExcerptSelection {
     pub subtitle_id: Option<String>,
@@ -26,12 +26,7 @@ pub struct ExcerptText {
     pub comment: String,
     pub frame_time_ms: Option<u64>,
 }
-pub fn prepare_text(
-    db: &Connection,
-    base: &Path,
-    course: &str,
-    selection: &ExcerptSelection,
-) -> Result<ExcerptText, String> {
+pub(super) fn validate_selection(selection: &ExcerptSelection) -> Result<(), String> {
     use std::collections::HashSet;
     if selection.cue_ids.len() > 256
         || selection.ranges.len() > 256
@@ -53,6 +48,42 @@ pub fn prepare_text(
     {
         return Err("字幕与选中段不一致，或包含重复/无效段ID".into());
     }
+    if let Some(id) = &selection.subtitle_id {
+        if !uuid::Uuid::parse_str(id).is_ok_and(|v| v.to_string() == *id) {
+            return Err("字幕标识无效".into());
+        }
+    }
+    if selection.cue_ids.is_empty() && selection.ranges.is_empty() {
+        return Err("请选择实际时间范围或完整字幕段".into());
+    }
+    let mut end = 0;
+    for range in &selection.ranges {
+        if range.start_ms < end || range.start_ms >= range.end_ms || range.end_ms > 604800000 {
+            return Err("摘录时间范围或顺序无效".into());
+        }
+        end = range.end_ms;
+    }
+    if selection.frame_time_ms.is_some_and(|at| {
+        at >= 604800000
+            || (!selection.ranges.is_empty()
+                && !selection
+                    .ranges
+                    .iter()
+                    .any(|r| at >= r.start_ms && at < r.end_ms))
+    }) {
+        return Err("截图时间不在选中范围内".into());
+    }
+    Ok(())
+}
+pub fn prepare_text(
+    db: &Connection,
+    base: &Path,
+    course: &str,
+    selection: &ExcerptSelection,
+) -> Result<ExcerptText, String> {
+    validate_selection(selection)?;
+    let requested: std::collections::HashSet<_> =
+        selection.cue_ids.iter().map(String::as_str).collect();
     let course = super::store::course(db, course)?;
     if !super::note_nodes::label(&course.title) {
         return Err("课程标题不能作为有效来源引用".into());

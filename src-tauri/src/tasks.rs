@@ -18,6 +18,7 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    CourseExcerpt(crate::learning::excerpt_runner::ExcerptTaskRequest),
     CourseTranscription(crate::learning::transcription::CourseTranscriptionRequest),
     CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest),
     #[serde(rename = "aiAnalyze")]
@@ -72,6 +73,7 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::CourseExcerpt(request) => request.label(),
             Self::CourseTranscription(_) => "本地课程转写",
             Self::CourseAnalysis(r) => {
                 if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
@@ -107,6 +109,7 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::CourseExcerpt(request) => request.validate(),
             Self::CourseTranscription(r) => {
                 Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
                 if !matches!(r.model_id.as_str(), "base" | "small") {
@@ -561,6 +564,15 @@ impl TaskRegistry {
             pause_requested: false,
         };
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let TaskRequest::CourseExcerpt(request) = &task.payload {
+            if let Some(existing) = store.entries.iter().find(|t| {
+                t.library_id == task.library_id
+                    && active(&t.status)
+                    && matches!(&t.payload,TaskRequest::CourseExcerpt(saved) if saved==request)
+            }) {
+                return Ok((existing.clone(), false));
+            }
+        }
         if let TaskRequest::AIAnalyze(request) = &task.payload {
             if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
         }
@@ -654,7 +666,28 @@ impl TaskRegistry {
         }
     }
     pub fn should_stop(&self, id: &str) -> bool {
-        self.get(id).map(|t| t.stop_requested).unwrap_or(true)
+        self.store
+            .lock()
+            .map(|store| {
+                store
+                    .entries
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.stop_requested)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true)
+    }
+    pub fn is_active_task(&self, id: &str) -> bool {
+        self.store
+            .lock()
+            .map(|store| {
+                store
+                    .entries
+                    .iter()
+                    .any(|task| task.id == id && active(&task.status) && !task.stop_requested)
+            })
+            .unwrap_or(false)
     }
     pub fn stop_label(&self, label: &str) -> bool {
         self.store
@@ -700,7 +733,19 @@ impl TaskRegistry {
             store.external.remove(id);
             if let Some(task) = store.entries.iter_mut().find(|t| t.id == id) {
                 task.updated_at = Utc::now().to_rfc3339();
-                task.status = if task.stop_requested {
+                let committed_excerpt = result.is_ok()
+                    && matches!(
+                        &task.payload,
+                        TaskRequest::CourseExcerpt(
+                            crate::learning::excerpt_runner::ExcerptTaskRequest::Commit { .. }
+                        )
+                    );
+                if committed_excerpt && task.stop_requested {
+                    task.message = "摘录已提交，停止请求晚于保存；目标内容保留".into();
+                }
+                task.status = if committed_excerpt {
+                    "completed"
+                } else if task.stop_requested {
                     if matches!(task.payload, TaskRequest::Download(_)) {
                         if task.pause_requested {
                             "paused"
@@ -727,6 +772,59 @@ impl TaskRegistry {
     }
 }
 
+#[cfg(test)]
+mod excerpt_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn learning_excerpt_task_late_cancel_preserves_committed_success_but_not_a_cancelled_prepare() {
+        use crate::learning::{
+            excerpt_publish::{CommitRequest, Destination},
+            excerpt_runner::ExcerptTaskRequest,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let payload = TaskRequest::CourseExcerpt(ExcerptTaskRequest::Commit {
+            request: CommitRequest {
+                operation_id: Uuid::new_v4().to_string(),
+                excerpt_id: Uuid::new_v4().to_string(),
+                destination: Destination::New {
+                    title: "已保存".into(),
+                    notebook_id: None,
+                },
+                include_frame: false,
+            },
+        });
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        // Lifecycle-only success fixture. Real target/receipt persistence has runner tests.
+        registry.finish(&task.id,Ok(serde_json::json!({"receipt":{"noteId":Uuid::new_v4().to_string()},"targetAvailable":true})));
+        assert_eq!(registry.get(&task.id).unwrap().status, "completed");
+        let selection = crate::learning::excerpts::ExcerptSelection {
+            ranges: vec![crate::learning::note_nodes::TimeRange {
+                start_ms: 0,
+                end_ms: 1,
+            }],
+            ..Default::default()
+        };
+        let (prepare, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::CourseExcerpt(ExcerptTaskRequest::Prepare {
+                    course_id: Uuid::new_v4().to_string(),
+                    selection,
+                }),
+            )
+            .unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&prepare.id).unwrap();
+        registry.finish(
+            &prepare.id,
+            Ok(serde_json::json!({"previewId":Uuid::new_v4().to_string()})),
+        );
+        assert_eq!(registry.get(&prepare.id).unwrap().status, "stopped");
+    }
+}
 #[cfg(test)]
 mod download_lifecycle_tests {
     use super::*;
@@ -1159,6 +1257,9 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::CourseExcerpt(request) => {
+            crate::learning::excerpt_runner::run(app, task, request).await
+        }
         TaskRequest::CourseTranscription(request) => {
             crate::learning::transcription_runner::run(app, task, request).await
         }

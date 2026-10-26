@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::MutexGuard, time::Duration};
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -35,7 +35,7 @@ pub enum Destination {
         y: f64,
     },
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommitRequest {
     pub operation_id: String,
@@ -245,6 +245,9 @@ pub(super) fn commit_guarded(
             [&request.excerpt_id],
         )
         .map_err(error)?;
+        if cancelled() || state.tasks.maintenance().is_some() {
+            return Err("摘录已停止，未提交目标；原有内容保留".into());
+        }
         if let Err(failure) = publish(tx) {
             // An exception can mean a lost acknowledgement, not a rolled-back commit.
             return match operation(&db, request, &raw) {
@@ -332,7 +335,7 @@ fn uuid(id: &str) -> Result<(), String> {
         Err("摘录操作或目标ID无效".into())
     }
 }
-fn validate_request(request: &CommitRequest) -> Result<String, String> {
+pub(super) fn validate_request(request: &CommitRequest) -> Result<String, String> {
     uuid(&request.operation_id)?;
     uuid(&request.excerpt_id)?;
     match &request.destination {

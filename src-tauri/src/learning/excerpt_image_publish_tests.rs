@@ -309,3 +309,40 @@ fn learning_excerpt_images_no_frame_creates_no_board_item_and_old_text_receipts_
     let parsed: ExcerptReceipt = serde_json::from_value(legacy).unwrap();
     assert_eq!(parsed, result.receipt);
 }
+#[test]
+fn learning_excerpt_images_cancel_after_file_copy_before_commit_rolls_back_the_target() {
+    let (root, state, library, request) = fixture();
+    let result = commit_in_library(&state, &library, &request, &|| {
+        let db =
+            crate::tasks::open_media_worker_connection(&root.path().join("library.db")).unwrap();
+        let location: Option<String> = db
+            .query_row(
+                "SELECT manifest_relative FROM learning_excerpt_operations WHERE operation_id=?1",
+                [&request.operation_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        location
+            .and_then(|path| fs::read(root.path().join(path)).ok())
+            .and_then(|raw| {
+                serde_json::from_slice::<super::excerpt_files::PublicationManifest>(&raw).ok()
+            })
+            .is_some_and(|manifest| root.path().join(&manifest.files[0].final_relative).exists())
+    });
+    assert!(
+        result.is_err(),
+        "a cancellation visible before SQLite commit must not report a saved target"
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM knowledge_notes", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}

@@ -105,3 +105,22 @@ Ruling：文件边界先单独证明，正式发布始终由11b2b2b持媒体leas
 
 - [x] 初始截图集成4项RED后实现，补追加/项目/无图和旧回执兼容；摘录全部40项通过。额外控制连接代际测试RED复现同库标识不变时旧worker误报成功，修复为活动连接确认复查与作用域内重新打开写连接。该测试是受控模型，真实整库备份恢复另有集成测试，不等于真实桌面并发恢复验收。
 - [x] 最终完整Rust513通过/2既有忽略（82.25秒），前端生产构建成功，证据 `docs/evidence/merge/task11-excerpt-image-publication.md`。未激活IPC/UI；主Task11后续11c/11d仍待执行。
+
+## 11c1 统一后台任务与 UUID 读取边界（BASE 6d54a0b，待实现）
+
+事实 `docs/integration/excerpt-ui-seams.md`。普通前端只读核查GPT-6 Sol medium；主实现仍inline，最后整体审查Task14使用高难度模型且不使用Astra。
+
+- 新 `ExcerptTaskRequest` action=prepare(courseId,selection)/commit(CommitRequest)，接入现有TaskRequest::CourseExcerpt、统一串行任务/取消/手动重试和中断恢复，不建摘录队列或付费流程。结果仅previewId或可靠receipt，不向tasks.json复制截图/全文。
+- 复用准备与发布函数；prepare结果在当前作用域内持久保存，commit沿用原operationId。纯输入预算/ID检查在入队前，提取现有selection验证复用，不分叉术语或课程规则。相同活动请求复用任务ID。
+- 统一should_stop读取停止位避免克隆大payload；保留其他任务原停止语义。commit返回可靠成功回执后才来的停止显示已完成并提示，不能伪称保存已撤回。prepare停止只取消未被新操作认领的ready预览，不删除已发布内容。
+- 提交前再检查取消（包括图片复制/SQL已完成但尚未commit的窗口），取消则回滚与按清单清理；提交后收到取消以持久回执为准。新增可复现测试先RED。
+- UUID-only get_preview/get_operation及当前课程分页operation摘要，均检查当前库与根；历史只读，ready/pending不能跨库/恢复复用。请求/摘要损坏以逐条错误保留，不执行宽泛恢复或自动重写正文。
+- Tauri入口spawn_blocking复用现有模式；读操作不进入任务队列，prepare/commit通过现有start_library_task。前端类型/API补齐，无视图激活。记录实际命令/计数，完整回归/构建/扫描和独立本地提交后继续11c2 Composer。
+
+### 11c1a 先接统一任务（BASE6d54a0b，待实现）
+
+新增excerpt_runner.rs/tests；TaskRequest::CourseExcerpt action=prepare/commit，结果仅UUID/receipt；选择预算提取复用。相同活动请求合并，TaskRegistry.should_stop直接查停止位；已经返回提交回执的任务不被迟到停止改成未保存。源准备结果在当前短作用域写preview；异常/停止不触碰用户实体。11c1b再加UUID读接口与前端类型。
+
+测试先证明准备/保存缺口、取消/错库、同请求任务去重及重启中断（不自动继续）、迟到取消不否定可靠成功；补“图片已复制但未commit”的取消窗口RED并修复。任务runner测试使用隔离真实AppState/TaskRegistry，不把纯队列模型当原生UI验收。
+
+- [x] 初始46项中41通过/5个新增缺口失败，随后全部46项通过26.26秒；完整Rust519通过/2既有忽略82.98秒，前端生产构建成功。证据 `docs/evidence/merge/task11-excerpt-tasks.md`。本步通过原有start_library_task支持CourseExcerpt；尚未增加前端按钮或独立UUID读命令。
