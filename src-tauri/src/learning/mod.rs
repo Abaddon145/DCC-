@@ -30,6 +30,9 @@ mod analysis_summary_tests;
 #[cfg(test)]
 mod analysis_tests;
 pub mod commands;
+pub mod excerpt_access;
+#[cfg(test)]
+mod excerpt_access_tests;
 #[cfg(test)]
 mod excerpt_file_tests;
 pub mod excerpt_files;

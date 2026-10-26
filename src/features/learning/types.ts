@@ -2,6 +2,19 @@ export interface Course {
   id: string; mediaId: string; title: string; positionMs: number;
   durationMs: number | null; rate: number; completed: boolean; progressRevision: number;
 }
+export interface ExcerptSelection {subtitleId:string|null;cueIds:string[];ranges:import("../../lib/learningNoteNodes").LearningReferenceData["ranges"];comment:string;frameTimeMs:number|null}
+export interface ExcerptText {courseId:string;mediaId:string;title:string;subtitleId:string|null;subtitleSha256:string|null;ranges:ExcerptSelection["ranges"];cues:TranscriptCue[];comment:string;frameTimeMs:number|null}
+export interface ExcerptFrame {timeMs:number;sha256:string;dataUrl:string}
+export interface PreparedExcerpt {libraryId:string;rootHash:string;sourceFileId:string;sourceSha256:string;durationMs:number;text:ExcerptText;document:import("@tiptap/react").JSONContent;frame:ExcerptFrame|null;warnings:string[]}
+export interface StoredExcerpt {id:string;status:"ready"|"committed"|"cancelled";prepared:PreparedExcerpt}
+export type ExcerptDestination={kind:"new";title:string;notebookId:string|null}|{kind:"append";noteId:string;expectedRevision:number;insertIndex:number}|{kind:"project";projectId:string;title:string;notebookId:string|null}|{kind:"board";boardId:string;x:number;y:number};
+export interface CommitExcerptRequest {operationId:string;excerptId:string;destination:ExcerptDestination;includeFrame:boolean}
+export interface ExcerptReceipt {operationId:string;excerptId:string;noteId?:string;revision?:number;boardId?:string;boardItemId?:string;warnings:string[]}
+export interface CommitExcerptResult {receipt:ExcerptReceipt;targetAvailable:boolean}
+export type ExcerptTaskRequest={action:"prepare";courseId:string;selection:ExcerptSelection}|{action:"commit";request:CommitExcerptRequest};
+export interface ExcerptOperation {operationId:string;excerptId:string;status:"pending"|"committed"|"cancelled";request:CommitExcerptRequest;receipt:ExcerptReceipt|null;createdAt:string;previewReadable:boolean;warning:string|null}
+export interface ExcerptOperationSummary {operationId:string;excerptId:string;status:ExcerptOperation["status"]|"unreadable";title:string;receipt:ExcerptReceipt|null;createdAt:string;error:string|null}
+export interface ExcerptTargets {projects:import("../../types").ProjectSummary[];boards:import("../../types").ReferenceBoardSummary[]}
 export interface NoteArchiveVersion {id:string;profileId:string;sourceKey:string;versionKey:string;sha256:string;size:number;createdAt:string;conversionState:"unconverted"|"partial"|"converted"}
 export interface NoteArchivePage {versions:import("../../types").Page<NoteArchiveVersion>;unconvertedCount:number;partialCount:number}
 export interface NoteArchiveView {archiveId:string;sha256:string;size:number;text:string|null}

@@ -124,3 +124,14 @@ Ruling：文件边界先单独证明，正式发布始终由11b2b2b持媒体leas
 测试先证明准备/保存缺口、取消/错库、同请求任务去重及重启中断（不自动继续）、迟到取消不否定可靠成功；补“图片已复制但未commit”的取消窗口RED并修复。任务runner测试使用隔离真实AppState/TaskRegistry，不把纯队列模型当原生UI验收。
 
 - [x] 初始46项中41通过/5个新增缺口失败，随后全部46项通过26.26秒；完整Rust519通过/2既有忽略82.98秒，前端生产构建成功。证据 `docs/evidence/merge/task11-excerpt-tasks.md`。本步通过原有start_library_task支持CourseExcerpt；尚未增加前端按钮或独立UUID读命令。
+
+### 11c1b UUID 预览/回执读取与前端线型（BASE037d8fb）
+
+新excerpt_access.rs及tests，统一spawn_blocking命令：get_learning_excerpt、get_learning_excerpt_operation、list_learning_excerpt_operations（courseId/offset/limit≤50）、cancel_learning_excerpt_preview、cancel_learning_excerpt_operation、get_learning_excerpt_targets。所有请求只接当前库/实体UUID及分页，无路径/正文。目标选项复用现有projects(false)/reference_boards只读查询，不能使用会立即加素材的picker。
+
+- 所有读在同一当前活动库作用域内，marker与expectedLibraryId一致才执行；ready/root检查复用store，已提交receipt不依赖原件仍存在。operation读取严格验证冻结请求/SHA/身份/回执；来源preview损坏可保留已提交回执并给warning，不从诊断记录重新写正文。
+- 列表只查当前course UUID对应的本库操作，最多50条，不加载所有截图/正文；损坏记录保留为unreadable条目及错误，不拖垮其他行。为course查询增加新摘录表索引。未知course可返回空历史，错库不能降级查询当前库。
+- cancel操作按UUID在服务端读取已冻结请求后调用原取消逻辑；cancel ready仍禁止绕过pending操作。取消不能删除已保存实体。读操作不进入任务队列；准备/确认仍走共享CourseExcerpt任务。
+- 前端扩展共享LibraryTaskRequest和学习types/API；任务提交显式重建允许字段，丢弃运行时附带的createdAt/status/document/path等额外属性，避免旧笔记入参问题再现。字幕范围与LearningReference共享类型。暂不渲染新界面。
+- RED→GREEN：当前库/错误UUID/根身份、分页和课程隔离、pending取消和已提交回执、来源损坏与单条操作损坏保留、目标查询无副作用；前端invoke形状/字段剔除/期望库传递。运行定向、完整Rust/前端、构建、扫描并本地提交后进入11c2。
+`n- [x] 11c1b：摘录定向51项、前端接口3项通过；完整Rust524通过/2既有忽略，完整前端427通过，构建4.96秒成功。证据 docs/evidence/merge/task11-excerpt-access.md。

@@ -403,7 +403,7 @@ fn scope<'a>(
     }
     Ok(active)
 }
-fn operation(
+pub(super) fn operation(
     db: &Connection,
     request: &CommitRequest,
     raw: &str,

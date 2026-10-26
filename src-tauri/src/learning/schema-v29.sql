@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS learning_excerpts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_excerpt_ready
  ON learning_excerpts(payload_sha256) WHERE status='ready';
+CREATE INDEX IF NOT EXISTS idx_learning_excerpt_course ON learning_excerpts(course_id,created_at DESC,id);
 CREATE TABLE IF NOT EXISTS learning_excerpt_operations (
  operation_id TEXT PRIMARY KEY,
  excerpt_id TEXT NOT NULL UNIQUE REFERENCES learning_excerpts(id),

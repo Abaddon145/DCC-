@@ -3,9 +3,36 @@ import type {Page} from "../../types";
 import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
 import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem} from "./types";
 import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./types";
+import type {ExcerptTaskRequest,ExcerptDestination,StoredExcerpt,ExcerptOperation,ExcerptOperationSummary,ExcerptTargets} from "./types";
+import type {LibraryTask} from "../../types";
+
+// Structural types do not strip snapshot metadata from runtime objects.
+function writableExcerptDestination(destination:ExcerptDestination):ExcerptDestination {
+  switch(destination.kind){
+    case "new":return {kind:"new",title:destination.title,notebookId:destination.notebookId};
+    case "append":return {kind:"append",noteId:destination.noteId,expectedRevision:destination.expectedRevision,insertIndex:destination.insertIndex};
+    case "project":return {kind:"project",projectId:destination.projectId,title:destination.title,notebookId:destination.notebookId};
+    case "board":return {kind:"board",boardId:destination.boardId,x:destination.x,y:destination.y};
+  }
+}
+function writableExcerptTask(task:ExcerptTaskRequest):ExcerptTaskRequest {
+  if(task.action==="prepare"){
+    const {subtitleId,cueIds,ranges,comment,frameTimeMs}=task.selection;
+    return {action:"prepare",courseId:task.courseId,selection:{subtitleId,cueIds:[...cueIds],ranges:ranges.map(({startMs,endMs})=>({startMs,endMs})),comment,frameTimeMs}};
+  }
+  const {operationId,excerptId,includeFrame,destination}=task.request;
+  return {action:"commit",request:{operationId,excerptId,includeFrame,destination:writableExcerptDestination(destination)}};
+}
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
 export const learningApi={
+  startExcerptTask:(expectedLibraryId:string,request:ExcerptTaskRequest)=>invoke<LibraryTask>("start_library_task",{expectedLibraryId,payload:{kind:"courseExcerpt",request:writableExcerptTask(request)}}),
+  getExcerpt:(expectedLibraryId:string,previewId:string)=>invoke<StoredExcerpt>("get_learning_excerpt",{expectedLibraryId,previewId}),
+  getExcerptOperation:(expectedLibraryId:string,operationId:string)=>invoke<ExcerptOperation>("get_learning_excerpt_operation",{expectedLibraryId,operationId}),
+  listExcerptOperations:(expectedLibraryId:string,courseId:string,offset=0,limit=20)=>invoke<Page<ExcerptOperationSummary>>("list_learning_excerpt_operations",{expectedLibraryId,courseId,offset,limit}),
+  cancelExcerptPreview:(expectedLibraryId:string,previewId:string)=>invoke<void>("cancel_learning_excerpt_preview",{expectedLibraryId,previewId}),
+  cancelExcerptOperation:(expectedLibraryId:string,operationId:string)=>invoke<void>("cancel_learning_excerpt_operation",{expectedLibraryId,operationId}),
+  excerptTargets:(expectedLibraryId:string)=>invoke<ExcerptTargets>("get_learning_excerpt_targets",{expectedLibraryId}),
   listNoteArchives:(expectedLibraryId:string,offset=0,limit=50)=>invoke<import("./types").NoteArchivePage>("list_learning_note_archives",{expectedLibraryId,offset,limit}),
   readNoteArchive:(expectedLibraryId:string,archiveId:string)=>invoke<import("./types").NoteArchiveView>("read_learning_note_archive",{expectedLibraryId,archiveId}),
   exportNoteArchive:(expectedLibraryId:string,archiveId:string,path:string)=>invoke<void>("export_learning_note_archive",{expectedLibraryId,archiveId,path}),

@@ -13,3 +13,7 @@
 - prepare_course_analysis虽用spawn_blocking，但自身准备没有独立取消任务。摘录不应另造线程队列；采用既有TaskRegistry准备/提交，关闭弹窗后仍可由任务中心核对和停止。
 
 待实施11c：UUID只读preview/operation查询、统一任务runner、API类型与入口、字幕选择/当前帧→预览确认、重试与恢复。没有据此激活新入口或改变原文/付费调用。
+
+## 导航事实补充
+
+简单定位使用GPT-6 Luna medium，只读、未测试、未改代码（HEAD037d8fb）。`App.tsx`的openLearning(mediaId,projectId?,projectContext?)和openNoteLearning(reference,index,noteId)已使用真实课程/媒体ID及prepareNoteJump指纹。returnFromLearning按returnNoteId/项目上下文/媒体ID恢复来源；LearningWorkspace通过onBack触发退出。指定目标仍由knowledgeInitialId、knowledgeProjectId、referenceInitialBoardId、coreMediaId等现有props交给对应Workspace/Hub。当前LearningWorkspace没有打开已保存笔记/参考板的callback；后续接入口应复用这些状态与安全退出，不另造事件协议。关键位置App.tsx172-192、816-818。

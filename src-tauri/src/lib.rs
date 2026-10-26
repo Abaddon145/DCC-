@@ -337,6 +337,12 @@ fn application_builder(
                 Box::new(tauri::generate_handler![
                     commands::preview_external_video,
                     learning::commands::start_learning_playback,
+                    learning::excerpt_access::get_learning_excerpt,
+                    learning::excerpt_access::get_learning_excerpt_operation,
+                    learning::excerpt_access::list_learning_excerpt_operations,
+                    learning::excerpt_access::cancel_learning_excerpt_preview,
+                    learning::excerpt_access::cancel_learning_excerpt_operation,
+                    learning::excerpt_access::get_learning_excerpt_targets,
                     learning::note_preview_runtime::prepare_note_conversion_preview,
                     learning::note_preview_runtime::read_note_conversion_block,
                     learning::note_preview_runtime::list_learning_note_archives,
