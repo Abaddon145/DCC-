@@ -93,45 +93,22 @@ pub fn prepare(
         return Err("采样时间超出视频范围".into());
     }
     let stop = || {
-        state.active_library_id().ok().as_deref() != Some(library)
+        source_scope_changed(state, library, Some(&live.base))
             || state.tasks.maintenance().is_some()
     };
     let mut frames = vec![];
     let mut frame_bytes = 0u64;
     if !options.frame_times_ms.is_empty() {
         let ffmpeg = crate::runtime::tools::require(resources, "ffmpeg")?;
-        let work = tempfile::tempdir().map_err(|_| "无法创建课程采样临时目录")?;
+
         let mut times = options.frame_times_ms.clone();
         times.sort_unstable();
         for at in times {
             if stop() {
                 return Err("课程预览已停止".into());
             }
-            let path = work.path().join(format!("{at}.jpg"));
-            let args = vec![
-                "-nostdin".into(),
-                "-v".into(),
-                "error".into(),
-                "-ss".into(),
-                format!("{:.3}", at as f64 / 1000.0),
-                "-i".into(),
-                live.lease.to_string_lossy().into_owned(),
-                "-frames:v".into(),
-                "1".into(),
-                "-vf".into(),
-                "scale=1024:1024:force_original_aspect_ratio=decrease".into(),
-                "-n".into(),
-                path.to_string_lossy().into_owned(),
-            ];
-            crate::runtime::process::capture(
-                &ffmpeg,
-                &args,
-                std::time::Duration::from_secs(30),
-                &stop,
-                &mut |_| {},
-            )
-            .map_err(|_| "课程采样失败或已停止，未生成成功预览")?;
-            let data_url = crate::ai::analyzer::jpeg(&path)?;
+            let data_url =
+                crate::media_engine::frame::sample_jpeg(&ffmpeg, &live.lease, at, &stop)?;
             frame_bytes = frame_bytes
                 .checked_add(data_url.len() as u64)
                 .ok_or("课程采样超限")?;
@@ -389,13 +366,13 @@ pub(crate) fn request_body(
 }
 
 pub(crate) struct LiveSource {
-    db: rusqlite::Connection,
-    base: std::path::PathBuf,
-    course: super::models::Course,
-    file_id: String,
-    prepared: crate::media_access::PreparedMediaFile,
-    lease: crate::media_access::CheckedMediaFile,
-    sha: String,
+    pub(super) db: rusqlite::Connection,
+    pub(super) base: std::path::PathBuf,
+    pub(super) course: super::models::Course,
+    pub(super) file_id: String,
+    pub(super) prepared: crate::media_access::PreparedMediaFile,
+    pub(super) lease: crate::media_access::CheckedMediaFile,
+    pub(super) sha: String,
     subtitle_id: Option<String>,
     subtitle_sha: Option<String>,
     cues: Vec<TranscriptCue>,
@@ -410,7 +387,24 @@ fn live_source(
     live_source_controlled(state, library, course, subtitle, choose_default, &|| false)
 }
 
-fn live_source_controlled(
+// Cancellation polling must never wait for a lock whose owner may need our read lease.
+// Busy defers the decision; it is not approval for publishing or a paid request.
+pub(super) fn source_scope_changed(
+    state: &crate::state::AppState,
+    library: &str,
+    base: Option<&std::path::Path>,
+) -> bool {
+    match state.active.try_lock() {
+        Ok(active) => {
+            active.marker.library_id != library
+                || active.connection.is_none()
+                || base.is_some_and(|base| base != active.base_dir)
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(std::sync::TryLockError::Poisoned(_)) => true,
+    }
+}
+pub(super) fn live_source_controlled(
     state: &crate::state::AppState,
     library: &str,
     course: &str,
@@ -425,16 +419,16 @@ fn live_source_controlled(
     let course = super::store::course(&db, course)?;
     let file_id: String = db
         .query_row(
-            "SELECT primary_file_id FROM media_entries WHERE id=?1",
+            "SELECT f.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id AND f.entry_id=e.id AND f.role='main' WHERE e.id=?1 AND e.deleted_at IS NULL AND e.kind='video'",
             [&course.media_id],
             |r| r.get(0),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "课程主文件不存在或不属于此视频")?;
     let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
     let prepared = crate::media_access::prepare_media_file(&db, &base, &file_id, &grants)?;
     let stop = || {
         cancelled()
-            || state.active_library_id().ok().as_deref() != Some(library)
+            || source_scope_changed(state, library, Some(&base))
             || state.tasks.maintenance().is_some()
     };
     let (lease, sha) = prepared.open_for_analysis(&stop)?;
@@ -483,14 +477,17 @@ fn recheck_live(
         }
     }
     let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
-    let valid = state
-        .with_library_if_id(library, |db, base| {
-            Ok(base == live.base
-                && live
-                    .prepared
-                    .matches_current(db, base, &live.file_id, &grants))
-        })?
-        .unwrap_or(false);
+    let active = state
+        .active
+        .try_lock()
+        .map_err(|_| "素材库繁忙，未确认课程来源，请稍后重试")?;
+    let valid = active.marker.library_id == library
+        && active.base_dir == live.base
+        && active.connection.as_ref().is_some_and(|db| {
+            live.prepared
+                .matches_current(db, &active.base_dir, &live.file_id, &grants)
+        });
+    drop(active);
     if !valid || state.tasks.maintenance().is_some() {
         return Err("素材库、原件或访问批准已变化".into());
     }

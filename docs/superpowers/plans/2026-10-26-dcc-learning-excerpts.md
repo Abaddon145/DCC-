@@ -29,3 +29,18 @@
 2. 11c学习区字幕选择/当前帧→预览确认UI、可靠重试和目标选择，原生遮挡复用现有overlay；无图不得创建空参考板图片。
 3. 11d项目学习资料查询/精准来源跳转/解绑不删实体。新项目关系不能只写knowledge_references，否则save_in重建会丢；应复用正文真实project reference或明确关联表。
 4. 每步测试与本地提交，最后Task14真实原生/长文/IME/DPI及完整来源回看验证。当前不触发真实用户迁移、付费AI、推送、合并、发布或覆盖安装。
+
+## 11b1 媒体来源与单帧准备（BASE 84149c9）
+
+**Files:** 新 learning/excerpt_runtime.rs / excerpt_runtime_tests.rs；现有analysis.rs仅复用来源读取边界、将原取帧循环调用提取到共享 media_engine/frame.rs；两处mod注册。暂不新增schema或Tauri入口，持久operation/提交在11b2。
+
+- `prepare_in_library(state,expected_library_id,course_id,selection,resources,cancelled)->PreparedExcerpt`，仅Rust后端可调用。结构保存library/root身份、source_file_id/完整SHA/duration、11a文字、唯一JSON正文、可选单帧及warnings；没有任意源路径输入或已保存回执。
+- 直接复用 analysis::live_source_controlled，只提升必要字段与该函数在learning内的可见性，不复制原件/批准/字幕校验，不为本步重构整套分析模块。抓帧期间持有现有CheckedMediaFile只读租约。
+- `media_engine::frame::sample_jpeg(ffmpeg,&CheckedMediaFile,time_ms,stop)->dataURL` 由现有分析与摘录共同调用：固定安全参数、-nostdin/-n、单帧、1024像素、30秒超时、私人临时目录；复用现有有内存限制的JPEG转换。工具仍由现有runtime定位，临时文件自动回收。
+- 取消、维护、错库、原件摘要变化均失败，不能变成普通截图警告。普通解码/截图失败保留已校验文字、frame=None并显式warnings；不返回“已保存”。无截图请求不调用FFmpeg。
+- 返回前复查字幕SHA、课程/原件登记及根身份；释放媒体租约后才进入短AppState作用域锁，不持租约等待提交锁。后续11b2提交必须重新完整核验媒体SHA，不能把这份未持久化准备对象当可复用授权。
+- 实际RED复现旧来源入口会接受其他媒体拥有的primary_file_id；在同一共享查询要求文件entry_id归属当前视频且role=main，同时修复分析与摘录，不在各调用方堆补丁。
+- Windows真实只读lease＋有界写线程RED复现“库锁等待文件替换、文件读取取消轮询又等库锁”的环。共用source_scope_changed.try_lock用于分析/摘录读取与任务取消轮询；WouldBlock仅延后判断，不能作为确认。分析最终来源确认try_lock忙时明确重试，不绕过付费请求前核验；摘录释放lease后进入最终强校验。
+- RED→GREEN：真实FFmpeg合成视频单帧/摘要/原件不变、坏视频保留文字而无图、没有截图时只读文字/实际媒体SHA、错库/取消/维护/源变化拒绝。回归原分析真实帧与其任务测试；完整Rust、前端构建、扫描及独立本地提交。
+- [x] 定向摘录15项、课程分析32项通过；最终完整Rust488通过/2既有忽略，生产前端构建成功。证据 `docs/evidence/merge/task11-excerpt-runtime.md`。本步仍只有后台准备，不含持久保存或界面入口。
+- 11b2发布接缝事实见 `docs/integration/excerpt-publication-seams.md`；高难度只读核查使用GPT-6.1 Sol high，未使用Astra，最终全分支审查仍Task14。

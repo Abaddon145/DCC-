@@ -57,7 +57,7 @@ where
                 .map(|t| t.stop_requested || !matches!(t.status.as_str(), "queued" | "running"))
                 .unwrap_or(true)
     };
-    let stop = || stopped() || state.active_library_id().ok().as_deref() != Some(&task.library_id);
+    let stop = || stopped() || analysis::source_scope_changed(state, &task.library_id, None);
     let (input, live) = analysis::load_confirmed_controlled(
         state,
         &task.library_id,
