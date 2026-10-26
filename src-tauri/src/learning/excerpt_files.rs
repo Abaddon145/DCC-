@@ -386,8 +386,38 @@ fn destination_path(base: &Path, relative: &str, create: bool) -> Result<PathBuf
     Ok(path)
 }
 fn check_file(base: &Path, relative: &str, size: u64, sha: &str) -> Result<PathBuf, String> {
+    open_checked_file(base, relative, size, sha).map(|(path, _lease)| path)
+}
+pub(super) fn lock_published_files(
+    base: &Path,
+    manifest: &PublicationManifest,
+) -> Result<Vec<fs::File>, String> {
+    verify_manifest(base, manifest)?;
+    manifest
+        .files
+        .iter()
+        .map(|file| {
+            open_checked_file(base, &file.final_relative, file.size, &file.sha256)
+                .map(|(_, lease)| lease)
+        })
+        .collect()
+}
+fn open_checked_file(
+    base: &Path,
+    relative: &str,
+    size: u64,
+    sha: &str,
+) -> Result<(PathBuf, fs::File), String> {
     let path = destination_path(base, relative, false)?;
-    let metadata = fs::metadata(&path).map_err(|_| "截图文件缺失")?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    let file = options.open(&path).map_err(|_| "截图文件缺失或正在写入")?;
+    let metadata = file.metadata().map_err(|_| "截图文件缺失")?;
     if !metadata.is_file() {
         return Err("截图文件缺失".into());
     }
@@ -396,13 +426,12 @@ fn check_file(base: &Path, relative: &str, size: u64, sha: &str) -> Result<PathB
     }
     // A changed stage cannot turn a small screenshot check into an unbounded media read.
     let mut bytes = Vec::new();
-    fs::File::open(&path)
-        .map_err(error)?
+    (&file)
         .take(size + 1)
         .read_to_end(&mut bytes)
         .map_err(error)?;
     if bytes.len() as u64 != size || hash(&bytes) != sha {
         return Err("截图文件摘要或大小已改变，未覆盖或清理".into());
     }
-    Ok(path)
+    Ok((path, file))
 }

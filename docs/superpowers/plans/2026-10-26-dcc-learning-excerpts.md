@@ -89,3 +89,19 @@ Ruling：纯文字发布没有新文件，因此本子步不制造空文件清�
 Ruling：文件边界先单独证明，正式发布始终由11b2b2b持媒体lease和短事务完成；11b2b2a的文件复制本身不等于已保存摘录。
 
 - [x] 4项行为RED→GREEN，补独立暂存篡改、重复准备和实际复制库根目录检查；最终全部摘录33项通过。最终完整Rust506通过/2既有忽略（82.93秒），前端生产构建成功。证据 `docs/evidence/merge/task11-excerpt-files.md`。
+
+## 11b2b2b 截图与目标事务、回执接通（BASE de57a21）
+
+**Files:** excerpt_publish/files及其测试；knowledge.rs最小预分配新笔记ID入口；knowledge_files.rs已发布图片登记入口；reference_boards.rs单图事务内入口；schema-v29.sql补板项来源关系。
+
+- destination增加Board(boardId,x,y)，坐标有限且绝对值不超过1,000,000，要求includeFrame=true且准备结果真实有图；不生成空板项。笔记/项目允许显式仅文字，沿用已有确认请求。
+- noteId/revision在receipt改为可选，新增可选boardId/boardItemId，空字段不序列化；旧文字回执保持可读。targetAvailable只指目标实体当前是否存在，不能因目标删除而重建。
+- 图片处理/fsync清单在锁外完成，pending操作通过短作用域/IMMEDIATE事务只绑定一个manifest_relative。已有清单重试复用图片ID/新笔记预分配ID及全部文件SHA；同ID改请求继续拒绝。少量竞争中未绑定的自有清单保留，不删除归属不明材料。
+- 新笔记UUID在清单阶段预分配；knowledge内部入口只允许新建、规范UUID且当前不存在，不能借保留ID覆盖旧笔记。必要的无图片初始笔记只在同一未提交事务内存在，附件登记后保存完整正文，清除仅该新笔记的中间历史；不提交空笔记。
+- 截图带普通image节点和指向截图实际毫秒的LearningReference，仍保留完整原文及所有选择范围。复用现有附件协议，不提交磁盘路径给WebView。参考板复用stored image插入/触碰时间/z-index，learning_excerpt_board_items保留准确来源；关系级联只删关系，committed操作回执不级联。
+- 最终active.try_lock→busy0/IMMEDIATE复查目标与来源，再publish_files、登记附件/板项、save_in/关系/receipt同事务完成；最终文件也获取FILE_SHARE_READ句柄保留到commit，防止已校验副本在提交窗口丢失。
+- 任一SQL/复制/取消/提交异常先核对持久回执。已提交保留全部文件；数据库不可读保留并报待核对；确认pending后只清理清单中未登记且未改变的新文件。取消pending同样清理自有新文件，stage与清单保留供诊断，不动用户对象。恢复备份不自动按旧日志删文件。
+- RED→GREEN：新笔记/追加/项目截图与协议读取、板项和准确来源、无图拒绝、旧修订不写附件、最终SQL失败清理/稳定ID重试、实际最终副本只读保护、丢回执不重复、真实整库备份保留已保存图片并作废pending。完整Rust/前端构建/扫描/本地提交后再接11c界面。
+
+- [x] 初始截图集成4项RED后实现，补追加/项目/无图和旧回执兼容；摘录全部40项通过。额外控制连接代际测试RED复现同库标识不变时旧worker误报成功，修复为活动连接确认复查与作用域内重新打开写连接。该测试是受控模型，真实整库备份恢复另有集成测试，不等于真实桌面并发恢复验收。
+- [x] 最终完整Rust513通过/2既有忽略（82.25秒），前端生产构建成功，证据 `docs/evidence/merge/task11-excerpt-image-publication.md`。未激活IPC/UI；主Task11后续11c/11d仍待执行。

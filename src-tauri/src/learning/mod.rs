@@ -33,6 +33,8 @@ pub mod commands;
 #[cfg(test)]
 mod excerpt_file_tests;
 pub mod excerpt_files;
+#[cfg(test)]
+mod excerpt_image_publish_tests;
 pub mod excerpt_publish;
 #[cfg(test)]
 mod excerpt_publish_tests;

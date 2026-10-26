@@ -9,7 +9,7 @@ use std::fs;
 fn hash(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
 }
-fn fixture(
+pub(super) fn fixture(
     frame: bool,
 ) -> (
     tempfile::TempDir,

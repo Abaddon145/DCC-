@@ -602,6 +602,44 @@ fn add_paths_internal(
     }
 }
 
+pub(crate) fn insert_prepared_jpeg_in(
+    connection: &Connection,
+    board_id: &str,
+    stored: &images::StoredImage,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    ensure_board(connection, board_id)?;
+    Uuid::parse_str(&stored.id).map_err(|_| "参考图身份无效")?;
+    if stored.original_rel_path
+        != format!("reference-boards/{board_id}/originals/{}.jpg", stored.id)
+        || stored.thumbnail_rel_path
+            != format!("reference-boards/{board_id}/thumbnails/{}.webp", stored.id)
+        || !x.is_finite()
+        || !y.is_finite()
+        || x.abs() > 1_000_000.0
+        || y.abs() > 1_000_000.0
+        || stored.pixel_width == 0
+        || stored.pixel_height == 0
+    {
+        return Err("已准备参考图的路径、尺寸或位置无效".into());
+    }
+    let width = f64::from(stored.pixel_width).min(480.0);
+    let height = f64::from(stored.pixel_height) * width / f64::from(stored.pixel_width);
+    insert_stored_item(
+        connection,
+        board_id,
+        stored,
+        x,
+        y,
+        width,
+        height,
+        0.0,
+        next_z(connection, board_id)?,
+        None,
+        None,
+    )
+}
 fn insert_stored_item(
     connection: &Connection,
     board_id: &str,

@@ -538,6 +538,31 @@ pub fn save(db: &mut Connection, input: NoteInput) -> Result<Note> {
     Ok(note)
 }
 pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool) -> Result<Note> {
+    save_note_in(tx, input, force_checkpoint, None)
+}
+// A durable file journal reserves this ID before publishing attachments.
+pub(crate) fn save_reserved_new_in(tx: &Connection, input: NoteInput, id: &str) -> Result<Note> {
+    if input.id.is_some()
+        || input.expected_revision.is_some()
+        || !Uuid::parse_str(id).is_ok_and(|v| v.to_string() == id)
+        || tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_notes WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(error)?
+    {
+        return Err("预分配笔记身份已占用或不是新建请求，未覆盖原笔记".into());
+    }
+    save_note_in(tx, input, false, Some(id))
+}
+fn save_note_in(
+    tx: &Connection,
+    input: NoteInput,
+    force_checkpoint: bool,
+    reserved_id: Option<&str>,
+) -> Result<Note> {
     let (plain, references) = inspect_document(&input.document)?;
     crate::learning::note_nodes::validate_registered(tx, &input.document)?;
     let title = input.title.trim();
@@ -577,7 +602,10 @@ pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool)
     let timestamp = now();
     let note = Note {
         color: previous.as_ref().and_then(|v| v.color.clone()),
-        id: previous.as_ref().map(|v| v.id.clone()).unwrap_or_else(uid),
+        id: previous
+            .as_ref()
+            .map(|v| v.id.clone())
+            .unwrap_or_else(|| reserved_id.map(str::to_owned).unwrap_or_else(uid)),
         notebook_id: input.notebook_id,
         title: title.into(),
         document: input.document,

@@ -100,7 +100,7 @@ fn learning_excerpt_publish_append_preserves_body_metadata_color_and_rejects_sta
     let receipt = commit_in_library(&state, &library, &request, &|| false)
         .unwrap()
         .receipt;
-    assert_eq!(receipt.revision, note.revision + 1);
+    assert_eq!(receipt.revision, Some(note.revision + 1));
     let saved = state
         .with_library(|db, _| knowledge::get(db, &note.id))
         .unwrap();
@@ -163,7 +163,7 @@ fn learning_excerpt_publish_project_links_real_entities_and_survives_later_note_
     };
     let result = commit_in_library(&state, &library, &request, &|| false).unwrap();
     state.with_library_mut(|db,_|{
-        let mut note=knowledge::get(db,&result.receipt.note_id)?;assert!(note.plain_text.contains("UE学习场景"));
+        let mut note=knowledge::get(db,result.receipt.note_id.as_deref().unwrap())?;assert!(note.plain_text.contains("UE学习场景"));
         note.document["content"].as_array_mut().unwrap().push(json!({"type":"paragraph","content":[{"type":"text","text":"后续手动笔记"}]}));
         knowledge::save(db,NoteInput{id:Some(note.id.clone()),expected_revision:Some(note.revision),notebook_id:note.notebook_id,title:note.title,document:note.document,tags:note.tags,favorite:note.favorite,journal_date:note.journal_date})?;
         assert_eq!(db.query_row("SELECT count(*) FROM knowledge_references WHERE note_id=?1 AND target_kind='project' AND target_id=?2",params![note.id,project],|r|r.get::<_,i64>(0)).unwrap(),1);
@@ -281,7 +281,7 @@ fn learning_excerpt_publish_selected_subtitles_are_verified_before_writing_full_
     })
     .unwrap();
     let note = state
-        .with_library(|db, _| knowledge::get(db, &result.receipt.note_id))
+        .with_library(|db, _| knowledge::get(db, result.receipt.note_id.as_deref().unwrap()))
         .unwrap();
     assert!(note.plain_text.contains("完整字幕第一行"));
     assert!(note.plain_text.contains("第二行也保留"));
@@ -332,4 +332,47 @@ fn learning_excerpt_publish_concurrent_clicks_have_one_receipt_and_busy_database
     blocker.execute_batch("ROLLBACK").unwrap();
     assert!(commit_in_library(&state, &library, &next, &|| false).is_ok());
     assert_eq!(counts(&state), (2, 0, 2));
+}
+#[test]
+fn learning_excerpt_publish_rejects_a_stale_worker_after_same_library_connection_is_replaced() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    let (root, state, library, request) = fixture();
+    let restored_path = root.path().join("restored-connection.db");
+    state
+        .with_library(|db, _| {
+            db.execute("VACUUM INTO ?1", [restored_path.to_string_lossy().as_ref()])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .unwrap();
+    let restored = crate::db::open_database(&restored_path).unwrap();
+    super::excerpt_store::invalidate_previews(&restored).unwrap();
+    let replacement = Mutex::new(Some(restored));
+    let calls = AtomicUsize::new(0);
+    // Model the active connection generation changing after intent admission;
+    // the old worker remains open. This is separate from real backup tests.
+    let result = commit_in_library(&state, &library, &request, &|| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            state.active.lock().unwrap().connection = replacement.lock().unwrap().take();
+        }
+        false
+    });
+    assert!(
+        result.is_err(),
+        "a stale worker must not report a write to the active restored library"
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM knowledge_notes", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
 }

@@ -29,3 +29,7 @@ CREATE TABLE IF NOT EXISTS learning_course_notes (
  PRIMARY KEY(course_id,note_id)
 );
 CREATE INDEX IF NOT EXISTS idx_learning_course_notes_note ON learning_course_notes(note_id);
+CREATE TABLE IF NOT EXISTS learning_excerpt_board_items (
+ item_id TEXT PRIMARY KEY REFERENCES reference_board_items(id) ON DELETE CASCADE,
+ excerpt_id TEXT NOT NULL UNIQUE REFERENCES learning_excerpts(id)
+);

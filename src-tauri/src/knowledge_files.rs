@@ -122,14 +122,75 @@ pub fn import(
         .persist_noclobber(&target)
         .map_err(|e| e.to_string())?;
     let filename = source.file_name().unwrap().to_string_lossy().to_string();
-    if let Err(error)=db.execute("INSERT INTO knowledge_attachments(id,note_id,filename,relative_path,mime,sha256,size,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,note_id,filename,relative,mime,sha,size,Utc::now().to_rfc3339()]){let _=fs::remove_file(target);return Err(error.to_string());}
-    Ok(Attachment {
+    let imported = Attachment {
         id,
         note_id: note_id.into(),
         filename,
         mime: mime.into(),
         size,
-    })
+    };
+    if let Err(error) = insert_metadata(db, &imported, &relative, &sha) {
+        let _ = fs::remove_file(target);
+        return Err(error);
+    }
+    Ok(imported)
+}
+fn insert_metadata(
+    db: &Connection,
+    item: &Attachment,
+    relative: &str,
+    sha: &str,
+) -> Result<(), String> {
+    db.execute("INSERT INTO knowledge_attachments(id,note_id,filename,relative_path,mime,sha256,size,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item.id,item.note_id,item.filename,relative,item.mime,sha,item.size,Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+pub(crate) fn register_published_jpeg(
+    db: &Connection,
+    base: &Path,
+    note_id: &str,
+    id: &str,
+    filename: &str,
+    sha: &str,
+    size: u64,
+) -> Result<Attachment, String> {
+    if ![note_id, id]
+        .iter()
+        .all(|v| Uuid::parse_str(v).is_ok_and(|id| id.to_string() == *v))
+        || size == 0
+        || size > 256 * 1024
+        || filename.is_empty()
+        || filename.len() > 1000
+        || filename.chars().any(char::is_control)
+    {
+        return Err("已发布截图登记无效".into());
+    }
+    if knowledge::get(db, note_id)?.deleted_at.is_some() {
+        return Err("请先恢复目标笔记".into());
+    }
+    let relative = format!("note-attachments/{note_id}/{id}.jpg");
+    let path = crate::media::safe_relative(base, &relative)?;
+    crate::media_access::reject_links(&path)?;
+    if !path
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .starts_with(base.canonicalize().map_err(|e| e.to_string())?)
+        || fs::metadata(&path).map_err(|e| e.to_string())?.len() != size
+    {
+        return Err("截图副本缺失或大小不符".into());
+    }
+    validate_image(&path)?;
+    if file_digest::digest_file(&path)?.1 != sha {
+        return Err("截图副本摘要不符".into());
+    }
+    let item = Attachment {
+        id: id.into(),
+        note_id: note_id.into(),
+        filename: filename.into(),
+        mime: "image/jpeg".into(),
+        size,
+    };
+    insert_metadata(db, &item, &relative, sha)?;
+    Ok(item)
 }
 pub fn path(db: &Connection, base: &Path, id: &str) -> Result<(PathBuf, String), String> {
     Uuid::parse_str(id).map_err(|_| "附件 ID 无效")?;
