@@ -8,7 +8,7 @@ import type {LibraryTask,Page} from "../../types";
 import {learningApi} from "./api";
 import {learningTime} from "./LearningControls";
 import type {CommitExcerptRequest,ExcerptDestination,ExcerptOperationSummary,ExcerptReceipt,ExcerptSelection,ExcerptTargets,StoredExcerpt} from "./types";
-export interface ExcerptComposerProps {libraryId:string;courseId:string;selection:ExcerptSelection;projectId?:string;onClose:()=>void;onOpen:(receipt:ExcerptReceipt)=>void}
+export interface ExcerptComposerProps {libraryId:string;courseId:string;selection:ExcerptSelection;durationMs?:number|null;projectId?:string;onClose:()=>void;onOpen:(receipt:ExcerptReceipt)=>void|Promise<void>}
 export function ExcerptComposer(props:ExcerptComposerProps){return <Composer key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
 const states:Record<string,string>={pending:"待确认恢复",committed:"已保存",cancelled:"已取消",unreadable:"记录需检查",queued:"排队中",running:"处理中",completed:"已完成",failed:"失败",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
@@ -19,12 +19,13 @@ function destinationLabel(destination:ExcerptDestination,targets:ExcerptTargets)
   if(destination.kind==="append")return `追加到笔记 ${destination.noteId} · 修订 ${destination.expectedRevision} · 第 ${destination.insertIndex} 个块之前`;
   return `参考板：${targets.boards.find(b=>b.id===destination.boardId)?.name||destination.boardId}`;
 }
-function Composer({libraryId,courseId,selection,projectId,onClose,onOpen}:ExcerptComposerProps){
+function Composer({libraryId,courseId,selection,durationMs,projectId,onClose,onOpen}:ExcerptComposerProps){
   const [preview,setPreview]=useState<StoredExcerpt|null>(null),[frozen,setFrozen]=useState<CommitExcerptRequest|null>(null),[receipt,setReceipt]=useState<ExcerptReceipt|null>(null);
   const [task,setTask]=useState<LibraryTask|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(""),[notice,setNotice]=useState("");
   const [kind,setKind]=useState<ExcerptDestination["kind"]>("new"),[title,setTitle]=useState(""),[notebook,setNotebook]=useState(""),[project,setProject]=useState(projectId||""),[board,setBoard]=useState("");
   const [note,setNote]=useState<KnowledgeNote|null>(null),[index,setIndex]=useState(0),[query,setQuery]=useState(""),[notes,setNotes]=useState<NoteSummary[]>([]),[noteOffset,setNoteOffset]=useState(0),[noteTotal,setNoteTotal]=useState(0);
   const [comment,setComment]=useState(selection.comment),[capture,setCapture]=useState(selection.frameTimeMs!==null),[includeFrame,setIncludeFrame]=useState(true);
+  const [startTime,setStartTime]=useState(selection.ranges[0]?(selection.ranges[0].startMs/1000).toFixed(3):""),[endTime,setEndTime]=useState(selection.ranges[0]?(selection.ranges[0].endMs/1000).toFixed(3):"");
   const [targets,setTargets]=useState<ExcerptTargets>({projects:[],boards:[]}),[notebooks,setNotebooks]=useState<KnowledgeNotebook[]>([]);
   const [history,setHistory]=useState<Page<ExcerptOperationSummary>>({items:[],total:0,offset:0,limit:20}),[offset,setOffset]=useState(0),[preparedTasks,setPreparedTasks]=useState<LibraryTask[]>([]),[revision,setRevision]=useState(0);
   const gate=useRequestGate(),busyRef=useRef(false),composing=useRef(false),dialog=useRef<HTMLElement>(null);
@@ -40,7 +41,7 @@ function Composer({libraryId,courseId,selection,projectId,onClose,onOpen}:Excerp
       if(t.status==="fulfilled")setTargets(t.value);
       if(n.status==="fulfilled")setNotebooks(n.value);
       if(h.status==="fulfilled")setHistory(h.value);
-      if(tasks.status==="fulfilled")setPreparedTasks(tasks.value.filter(t=>t.libraryId===libraryId&&t.payload.kind==="courseExcerpt"&&t.payload.request.action==="prepare"&&t.payload.request.courseId===courseId).slice(-20).reverse());
+      if(tasks.status==="fulfilled")setPreparedTasks(tasks.value.filter(t=>t.libraryId===libraryId&&t.payload.kind==="courseExcerpt"&&t.payload.request.action==="prepare"&&t.payload.request.courseId===courseId).slice(0,20));
       const failures=results.filter(r=>r.status==="rejected");if(failures.length)setError(`部分目标或记录读取失败：${failures.map(r=>String(r.reason)).join("；")}；已有结果保留，可刷新重试。`);
     });return()=>{live=false;};
   },[libraryId,courseId,offset,revision]);
@@ -76,7 +77,18 @@ function Composer({libraryId,courseId,selection,projectId,onClose,onOpen}:Excerp
     return()=>{live=false;window.clearTimeout(timer);};
   },[task,frozen,consumeTask,revision]);
   // Closing dismisses this view only. The shared task and durable operation own recovery.
-  const prepare=()=>run(async()=>{if(frozen||active(task))return;setNotice("");setPreview(null);await consumeTask(await learningApi.startExcerptTask(libraryId,{action:"prepare",courseId,selection:{...selection,comment,frameTimeMs:capture?selection.frameTimeMs:null}}),null);});
+  const prepare=()=>run(async()=>{
+    if(frozen||active(task))return;setNotice("");
+    let ranges=selection.ranges;
+    if(!selection.cueIds.length){
+      const parse=(value:string)=>{if(!/^\d+(?:\.\d{1,3})?$/.test(value.trim()))throw new Error("请输入非负秒数，最多三位小数");return Math.round(Number(value)*1000);};
+      const start=parse(startTime),end=parse(endTime);
+      if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>=end||(durationMs!=null&&end>durationMs))throw new Error("时间范围无效或超过视频时长");
+      if(capture&&selection.frameTimeMs!==null&&(selection.frameTimeMs<start||selection.frameTimeMs>=end))throw new Error("截图时间不在所选范围内");
+      ranges=[{startMs:start,endMs:end}];
+    }
+    setPreview(null);await consumeTask(await learningApi.startExcerptTask(libraryId,{action:"prepare",courseId,selection:{...selection,ranges,comment,frameTimeMs:capture?selection.frameTimeMs:null}}),null);
+  });
   const confirm=()=>run(async()=>{
     if(!preview||active(task))return;
     let request=frozen;
@@ -116,10 +128,12 @@ function Composer({libraryId,courseId,selection,projectId,onClose,onOpen}:Excerp
         <p>保留完整选中字幕和准确时间段；预览后确认保存，不复制整段视频，也不调用付费 AI。</p>
         {error&&<p role="alert" className="learning-analysis-alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
         {busy&&<LoadFeedback label="正在核对摘录…"/>}
-        {!preview&&!frozen&&<><p>已选 {selection.cueIds.length} 段字幕{selection.ranges.length?` · ${selection.ranges.length} 个时间段`:""}</p><label>摘录备注<textarea value={comment} disabled={locked} maxLength={20000} onChange={event=>setComment(event.target.value)}/></label>
+        {!preview&&!frozen&&<><p>已选 {selection.cueIds.length} 段字幕{selection.ranges.length?` · ${selection.ranges.length} 个时间段`:""}</p>
+          {!selection.cueIds.length&&<><label>开始时间（秒）<input inputMode="decimal" value={startTime} disabled={locked} onChange={event=>setStartTime(event.target.value)}/></label><label>结束时间（秒）<input inputMode="decimal" value={endTime} disabled={locked} onChange={event=>setEndTime(event.target.value)}/></label><p>精确到毫秒；结束时间必须晚于开始时间。</p></>}
+          <label>摘录备注<textarea value={comment} disabled={locked} maxLength={20000} onChange={event=>setComment(event.target.value)}/></label>
           {selection.frameTimeMs!==null&&<label className="learning-excerpt-check"><input type="checkbox" checked={capture} disabled={locked} onChange={event=>setCapture(event.target.checked)}/>截图时间 {exactTime(selection.frameTimeMs)}</label>}
           <button className="secondary-button" disabled={locked} onClick={()=>void prepare()}>准备摘录预览</button></>}
-        {task&&<section aria-label="摘录后台任务"><p>{states[task.status]||task.status} · {task.phase}</p>{active(task)&&<><progress aria-label="摘录任务进度"/><button className="secondary-button" disabled={busy} onClick={()=>void run(async()=>{await api.cancelLibraryTask(task.id);setNotice("已请求停止，最终结果以保存回执为准");setRevision(n=>n+1);})}>停止后台任务</button></>}
+        {task&&<section aria-label="摘录后台任务"><p>{states[task.status]||task.status} · {task.phase}</p>{task.status==="failed"&&task.message&&<p role="alert" className="learning-analysis-alert">{task.message}</p>}{active(task)&&<><progress aria-label="摘录任务进度"/><button className="secondary-button" disabled={busy||!task.cancellable} onClick={()=>void run(async()=>{await api.cancelLibraryTask(task.id);setNotice("已请求停止，最终结果以保存回执为准");setRevision(n=>n+1);})}>停止后台任务</button></>}
           <button className="secondary-button" disabled={busy} onClick={()=>void run(async()=>{await consumeTask(await api.getLibraryTask(task.id),frozen);setRevision(n=>n+1);})}>刷新任务</button></section>}
         {preview&&<section role="region" aria-label="摘录预览" className="learning-excerpt-preview"><h3>确认来源</h3><p>{preview.prepared.text.title}</p>
           <ul>{preview.prepared.text.ranges.map((r,i)=><li key={i}>{exactTime(r.startMs)}—{exactTime(r.endMs)}</li>)}</ul>
@@ -136,7 +150,7 @@ function Composer({libraryId,courseId,selection,projectId,onClose,onOpen}:Excerp
             {note&&<label>插入到第几个顶层块之前（0 为开头，{note.document.content?.length||0} 为末尾）<input type="number" min={0} max={note.document.content?.length||0} step={1} value={index} disabled={locked} onChange={event=>setIndex(Number(event.target.value))}/><span>已读取修订 {note.revision}；保存时若有新修订则拒绝覆盖。</span></label>}</>}</>}
         </section>}
         {frozen&&<section aria-label="冻结的保存确认"><h3>已锁定本次确认</h3><p>{destinationLabel(frozen.destination,targets)}</p><p>{frozen.includeFrame?"包含来源截图":"仅保存文字和来源"}</p><details><summary>操作编号</summary>{frozen.operationId}</details>{!receipt&&<div className="learning-panel-actions"><button className="secondary-button" disabled={busy||active(task)} onClick={()=>void run(()=>readReceipt(frozen))}>读取保存回执</button><button className="secondary-button" disabled={busy||active(task)} onClick={()=>void cancel()}>取消本次确认</button></div>}</section>}
-        {receipt&&<section aria-label="摘录保存回执"><h3>摘录已保存</h3>{receipt.warnings.map((w,i)=><p key={i}>{w}</p>)}<button className="primary-button" disabled={busy} onClick={()=>onOpen(receipt)}>打开保存位置</button></section>}
+        {receipt&&<section aria-label="摘录保存回执"><h3>摘录已保存</h3>{receipt.warnings.map((w,i)=><p key={i}>{w}</p>)}<button className="primary-button" disabled={busy} onClick={()=>void run(async()=>{await onOpen(receipt);})}>打开保存位置</button></section>}
         <details><summary>摘录记录与恢复</summary><button className="secondary-button" disabled={busy} onClick={()=>setRevision(n=>n+1)}>刷新记录与目标</button>
           {history.items.map(h=><div key={h.operationId}><button className="secondary-button" disabled={busy||active(task)||!!frozen||h.status==="unreadable"} onClick={()=>void recover(h.operationId)} aria-label={`读取记录：${h.title}`}>{h.title} · {states[h.status]}</button>{h.error&&<p>{h.error}</p>}{h.status==="pending"&&<button className="secondary-button" disabled={locked} onClick={()=>void run(async()=>{await learningApi.cancelExcerptOperation(libraryId,h.operationId);setRevision(n=>n+1);})}>取消未提交记录</button>}</div>)}
           {!history.total&&<p>暂无保存操作记录</p>}{history.total>20&&<nav aria-label="摘录记录分页"><button className="secondary-button" disabled={busy||!offset} onClick={()=>setOffset(n=>Math.max(0,n-20))}>上一页记录</button><button className="secondary-button" disabled={busy||offset+history.items.length>=history.total} onClick={()=>setOffset(n=>n+20)}>下一页记录</button></nav>}

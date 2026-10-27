@@ -67,3 +67,32 @@ it("keeps IME composition open and cycles dialog focus with Tab",async()=>{
   fireEvent.keyDown(screen.getByRole("button",{name:"收起"}),{key:"Tab"});expect(screen.getByRole("button",{name:"关闭摘录窗口"})).toHaveFocus();
   fireEvent.compositionStart(modal);fireEvent.keyDown(modal,{key:"Escape"});expect(props.onClose).not.toHaveBeenCalled();fireEvent.compositionEnd(modal);fireEvent.keyDown(modal,{key:"Escape"});expect(props.onClose).toHaveBeenCalledTimes(1);
 });
+it("prepares an explicit manual range at millisecond precision",async()=>{
+  const manual={subtitleId:null,cueIds:[],ranges:[{startMs:1500,endMs:1501}],comment:"",frameTimeMs:1500};
+  render(<ExcerptComposer {...props} selection={manual}/>);
+  fireEvent.change(screen.getByRole("textbox",{name:"开始时间（秒）"}),{target:{value:"1.125"}});fireEvent.change(screen.getByRole("textbox",{name:"结束时间（秒）"}),{target:{value:"2.875"}});
+  fireEvent.click(screen.getByRole("button",{name:"准备摘录预览"}));await screen.findByText("完整字幕 <script>不作为HTML执行</script>");
+  expect(learningApi.startExcerptTask).toHaveBeenCalledWith("lib",{action:"prepare",courseId:"course",selection:{...manual,ranges:[{startMs:1125,endMs:2875}]}});
+});
+it("rejects a manual range that excludes the requested screenshot",async()=>{
+  const manual={subtitleId:null,cueIds:[],ranges:[{startMs:1500,endMs:1501}],comment:"",frameTimeMs:1500};
+  render(<ExcerptComposer {...props} selection={manual}/>);
+  fireEvent.change(screen.getByRole("textbox",{name:"开始时间（秒）"}),{target:{value:"2"}});fireEvent.change(screen.getByRole("textbox",{name:"结束时间（秒）"}),{target:{value:"3"}});
+  fireEvent.click(screen.getByRole("button",{name:"准备摘录预览"}));expect(await screen.findByRole("alert")).toHaveTextContent("截图时间不在所选范围内");expect(learningApi.startExcerptTask).not.toHaveBeenCalled();
+});
+it("keeps the saved receipt visible if opening its target fails",async()=>{
+  const onOpen=vi.fn().mockRejectedValueOnce(new Error("播放器无法安全关闭"));
+  vi.mocked(learningApi.listExcerptOperations).mockResolvedValue({items:[{operationId:"operation",excerptId:"preview",status:"committed",title:"历史摘录",receipt:operation.receipt,createdAt:"",error:null}],total:1,offset:0,limit:20});
+  render(<ExcerptComposer {...props} onOpen={onOpen}/>);fireEvent.click(screen.getByText("摘录记录与恢复"));fireEvent.click(await screen.findByRole("button",{name:"读取记录：历史摘录"}));await screen.findByText("摘录已保存");
+  fireEvent.click(screen.getByRole("button",{name:"打开保存位置"}));expect(await screen.findByRole("alert")).toHaveTextContent("播放器无法安全关闭");expect(screen.getByText("摘录已保存")).toBeVisible();
+});
+it("shows the actual background failure so the user can decide how to retry",async()=>{
+  vi.mocked(learningApi.startExcerptTask).mockImplementationOnce(async(_lib,request)=>({...task({kind:"courseExcerpt",request},"failed"),message:"字幕来源已改变，请重新选择"}));
+  render(<ExcerptComposer {...props}/>);fireEvent.click(screen.getByRole("button",{name:"准备摘录预览"}));expect(await screen.findByRole("alert")).toHaveTextContent("字幕来源已改变");
+});
+it("lists the newest preparation tasks first when more than twenty exist",async()=>{
+  const request={kind:"courseExcerpt" as const,request:{action:"prepare" as const,courseId:"course",selection}};
+  vi.mocked(api.listLibraryTasks).mockResolvedValue(Array.from({length:21},(_,i)=>({...task(request),id:`task-${i}`,createdAt:i===0?"最新":"较旧"+i})));
+  render(<ExcerptComposer {...props}/>);fireEvent.click(screen.getByText("摘录记录与恢复"));
+  expect(await screen.findByRole("button",{name:/读取准备任务.*最新/})).toBeInTheDocument();expect(screen.queryByRole("button",{name:/读取准备任务.*较旧20/})).toBeNull();
+});

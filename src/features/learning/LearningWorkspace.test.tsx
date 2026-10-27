@@ -1,6 +1,6 @@
 import {act,fireEvent,render,screen,waitFor} from "@testing-library/react";
 import {beforeEach,it,expect,vi} from "vitest";
-import {StrictMode} from "react";
+import {StrictMode,useState} from "react";
 import {LearningWorkspace} from "./LearningWorkspace";
 import {learningApi} from "./api";
 import {api} from "../../lib/api";
@@ -8,10 +8,12 @@ import type {PlaybackSnapshot} from "./types";
 import {flushWorkspaceEdits,registerNoteSaveGuard} from "../../lib/noteSaveGuard";
 import {NativeLearningSurface} from "./NativeLearningSurface";
 import type {CourseAnalysisDetail} from "./types";
+import type {ExcerptComposerProps} from "./ExcerptComposer";
 
 const events=vi.hoisted(()=>new Map<string,(event:{payload:any})=>void>());
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,handler:(event:{payload:any})=>void)=>{events.set(name,handler);return ()=>events.delete(name);})}));
-vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn(),listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{getCourse:vi.fn(),listCourses:vi.fn(),listSeries:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),controlPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),stopPlayback:vi.fn(),listSubtitles:vi.fn(),transcriptPage:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn()}}));
+vi.mock("./ExcerptComposer",()=>({ExcerptComposer:({selection,onClose,onOpen}:ExcerptComposerProps)=>{const [error,setError]=useState("");return <section role="dialog" aria-modal="true" aria-label="学习摘录"><output data-testid="excerpt-selection">{JSON.stringify(selection)}</output>{error&&<p role="alert">{error}</p>}<button onClick={onClose}>关闭测试窗口</button><button onClick={()=>void Promise.resolve(onOpen({operationId:"operation",excerptId:"preview",noteId:"note",revision:1,warnings:[]})).catch(reason=>setError(String(reason)))}>打开已保存笔记</button></section>;}}));
 vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([]),getWorkspaceContext:vi.fn(),saveWorkspaceContext:vi.fn()}}));
 const initial:PlaybackSnapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:1500,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[{id:1,kind:"audio",label:"中文"},{id:2,kind:"sub",label:"中文字幕"}],audioId:1,subtitleId:null,fullscreen:false,error:null,saveError:null};
 const props={libraryId:"lib",courseId:"course",onBack:vi.fn(),notify:vi.fn()};
@@ -241,4 +243,33 @@ it("only confirms a completed mark after backend success and preserves it on sav
   fireEvent.click(completed);
   expect(await screen.findByRole("alert")).toHaveTextContent("进度写入失败");
   expect(screen.getByRole("button",{name:"已完成 · 恢复学习"})).toHaveAttribute("aria-pressed","true");
+});
+it("captures selected subtitle IDs and current frame without sending displayed text",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"subtitle",courseId:"course",name:"字幕",format:"srt",sha256:"sha",cueCount:1}]);
+  vi.mocked(learningApi.transcriptPage).mockResolvedValue({items:[{id:"cue",subtitleId:"subtitle",startMs:1000,endMs:2000,text:"页面上的字幕"}],total:1,offset:0,limit:50});
+  render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
+  fireEvent.click(await screen.findByRole("checkbox",{name:"选择第 1 段字幕"}));fireEvent.click(screen.getByRole("button",{name:"创建学习摘录"}));
+  expect(screen.getByTestId("excerpt-selection")).toHaveTextContent(JSON.stringify({subtitleId:"subtitle",cueIds:["cue"],ranges:[],comment:"",frameTimeMs:1500}));
+  expect(screen.getByRole("dialog",{name:"学习摘录"})).toHaveAttribute("aria-modal","true");
+});
+it("does not navigate to a receipt until the playback leave guard succeeds",async()=>{
+  const onOpenReceipt=vi.fn();vi.mocked(learningApi.stopPlayback).mockRejectedValueOnce(new Error("停止播放器失败"));
+  render(<LearningWorkspace {...props} onOpenReceipt={onOpenReceipt}/>);await screen.findByRole("button",{name:"播放"});fireEvent.click(screen.getByRole("button",{name:"创建学习摘录"}));
+  expect(screen.getByTestId("excerpt-selection")).toHaveTextContent('"ranges":[{"startMs":1500,"endMs":1501}]');
+  fireEvent.click(screen.getByRole("button",{name:"打开已保存笔记"}));expect(await screen.findByRole("alert")).toHaveTextContent("停止播放器失败");expect(onOpenReceipt).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button",{name:"打开已保存笔记"}));await waitFor(()=>expect(onOpenReceipt).toHaveBeenCalledWith(expect.objectContaining({noteId:"note"})));
+});
+it("never reuses another course's selected captions",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"subtitle",courseId:"course",name:"字幕",format:"srt",sha256:"sha",cueCount:1}]);
+  vi.mocked(learningApi.transcriptPage).mockResolvedValue({items:[{id:"cue",subtitleId:"subtitle",startMs:1000,endMs:2000,text:"旧课程字幕"}],total:1,offset:0,limit:50});
+  vi.mocked(learningApi.startPlayback).mockImplementation(async(_lib,id)=>({...initial,courseId:id}));
+  const {rerender}=render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));fireEvent.click(await screen.findByRole("checkbox",{name:"选择第 1 段字幕"}));
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);rerender(<LearningWorkspace {...props} courseId="another-course"/>);await waitFor(()=>expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","another-course"));
+  fireEvent.click(screen.getByRole("button",{name:"创建学习摘录"}));expect(screen.getByTestId("excerpt-selection")).toHaveTextContent('"cueIds":[]');expect(screen.getByTestId("excerpt-selection")).toHaveTextContent('"subtitleId":null');
+});
+it("waits for an in-flight player start before leaving and stops that session",async()=>{
+  let finish!:(snapshot:PlaybackSnapshot)=>void;vi.mocked(learningApi.startPlayback).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  const onBack=vi.fn();render(<LearningWorkspace {...props} onBack={onBack}/>);await waitFor(()=>expect(finish).toBeDefined());fireEvent.click(screen.getByRole("button",{name:"返回视频详情"}));
+  expect(onBack).not.toHaveBeenCalled();expect(learningApi.stopPlayback).not.toHaveBeenCalled();await act(async()=>finish(initial));
+  await waitFor(()=>expect(onBack).toHaveBeenCalledTimes(1));expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
 });
