@@ -16,6 +16,7 @@ export interface ExcerptOperation {operationId:string;excerptId:string;status:"p
 export interface ExcerptOperationSummary {operationId:string;excerptId:string;status:ExcerptOperation["status"]|"unreadable";title:string;receipt:ExcerptReceipt|null;createdAt:string;error:string|null}
 export interface ExcerptTargets {projects:import("../../types").ProjectSummary[];boards:import("../../types").ReferenceBoardSummary[]}
 export interface ProjectLearningNote {id:string;title:string;updatedAt:string;courseCount:number}
+export interface BoardExcerptJump {courseId:string;mediaId:string;positionMs:number;endMs:number;sourceFingerprint:string}
 export interface NoteArchiveVersion {id:string;profileId:string;sourceKey:string;versionKey:string;sha256:string;size:number;createdAt:string;conversionState:"unconverted"|"partial"|"converted"}
 export interface NoteArchivePage {versions:import("../../types").Page<NoteArchiveVersion>;unconvertedCount:number;partialCount:number}
 export interface NoteArchiveView {archiveId:string;sha256:string;size:number;text:string|null}

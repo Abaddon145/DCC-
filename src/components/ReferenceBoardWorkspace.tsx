@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ArrowDownToLine, ArrowLeft, ArrowUpToLine, BringToFront, ClipboardPaste, Copy, Download, FolderOpen, Grid3X3, ImagePlus, Maximize2, Pin, PinOff, Redo2, RotateCcw, SendToBack, Trash2, Undo2, Unplug, X } from "lucide-react";
+import { ArrowDownToLine, ArrowLeft, ArrowUpToLine, BringToFront, ClipboardPaste, Copy, Download, FolderOpen, Grid3X3, ImagePlus, Maximize2, Pin, PinOff, Play, Redo2, RotateCcw, SendToBack, Trash2, Undo2, Unplug, X } from "lucide-react";
 import type { ReferenceBoardDetail, ReferenceBoardItem, ReferenceBoardItemTransform } from "../types";
 import { api } from "../lib/api";
 import { arrangeItems, cloneItems, reorderItems, type BoardView } from "../lib/referenceBoard";
 import { ReferenceCanvas, type ReferenceCanvasHandle } from "./ReferenceCanvas";
+import {registerWorkspaceLeaveGuard} from "../lib/noteSaveGuard";
 
 interface Props {
   initialBoard: ReferenceBoardDetail;
@@ -13,16 +14,20 @@ interface Props {
   onBack?: () => void;
   onDetach?: (boardId: string) => Promise<void>;
   onChanged?: () => void;
+  initialItemId?: string | null;
+  onLearnSource?: (boardId:string,itemId:string)=>Promise<void>;
   notify: (message: string, error?: boolean) => void;
 }
 
-export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack, onDetach, onChanged, notify }: Props) {
+export function ReferenceBoardWorkspace({ initialBoard, initialItemId, floating = false, onBack, onDetach, onChanged, onLearnSource, notify }: Props) {
   const [board, setBoard] = useState(initialBoard);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toolbarVisible, setToolbarVisible] = useState(true);
   const [pinned, setPinned] = useState(true);
+  const [openingSource,setOpeningSource]=useState(false);
+  const sourceBusy=useRef(false);
   const canvas = useRef<ReferenceCanvasHandle>(null);
   const boardRef = useRef(board);
   const persistedIds = useRef(new Set(initialBoard.items.map(item => item.id)));
@@ -50,7 +55,7 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
   };
 
   const saveNow = useCallback(async () => {
-    if (savingPromise.current) await savingPromise.current;
+    while (savingPromise.current) await savingPromise.current;
     if (revision.current === savedRevision.current) { setDirty(false); return; }
     const savingRevision = revision.current;
     const current = boardRef.current;
@@ -68,6 +73,13 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
     }).finally(() => { savingPromise.current = null; setSaving(false); });
     savingPromise.current = task; setSaving(true); await task;
   }, [onChanged]);
+  const saveBeforeLeaving=useCallback(async()=>{do{await saveNow();}while(savingPromise.current||revision.current!==savedRevision.current);},[saveNow]);
+  useEffect(()=>floating?undefined:registerWorkspaceLeaveGuard(saveBeforeLeaving),[floating,saveBeforeLeaving]);
+  useEffect(()=>{
+    if(!initialItemId)return;
+    if(!initialBoard.items.some(item=>item.id===initialItemId)){notify("参考图已不可用，参考板仍可查看",true);return;}
+    setSelectedIds(new Set([initialItemId]));const frame=requestAnimationFrame(()=>canvas.current?.fitSelection());return()=>cancelAnimationFrame(frame);
+  },[initialBoard.id,initialItemId]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -145,16 +157,16 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
   const arrange = () => mutateItems(items => arrangeItems(items, selectedIds));
   const exportPng = async () => {
     const path = await save({ defaultPath: `${safeFilename(boardRef.current.name)}.png`, filters: [{ name: "PNG 图片", extensions: ["png"] }] }); if (!path) return;
-    try { await saveNow(); await api.exportReferenceBoard(boardRef.current.id, path, { scale: 1 }); notify("参考板 PNG 已导出"); }
+    try { await saveBeforeLeaving(); await api.exportReferenceBoard(boardRef.current.id, path, { scale: 1 }); notify("参考板 PNG 已导出"); }
     catch (error) { notify(`导出失败：${String(error)}`, true); }
   };
   const detach = async () => {
     if (!onDetach) return;
-    try { await saveNow(); await onDetach(boardRef.current.id); }
+    try { await saveBeforeLeaving(); await onDetach(boardRef.current.id); }
     catch (error) { notify(String(error), true); }
   };
   const attach = async () => {
-    try { await saveNow(); closeArmed.current = true; await api.attachReferenceWindow(boardRef.current.id); }
+    try { await saveBeforeLeaving(); closeArmed.current = true; await api.attachReferenceWindow(boardRef.current.id); }
     catch (error) { closeArmed.current = false; notify(String(error), true); }
   };
 
@@ -176,8 +188,13 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
     window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler);
   }, [selectedIds, floating]);
 
+  const openSource=async()=>{
+    if(sourceBusy.current||!onLearnSource||selectedIds.size!==1)return;
+    const item=[...selectedIds][0];sourceBusy.current=true;setOpeningSource(true);
+    try{await saveBeforeLeaving();await onLearnSource(boardRef.current.id,item);}catch(error){notify(`无法打开视频来源：${String(error)}`,true);}finally{sourceBusy.current=false;setOpeningSource(false);}
+  };
   const toolbars = <div className={`reference-toolbar ${floating ? "floating" : ""}`} data-no-drag>
-    {!floating && <button title="返回参考板列表" onClick={async () => { await saveNow(); onBack?.(); }}><ArrowLeft size={16} /></button>}
+    {!floating && <button title="返回参考板列表" onClick={async () => { try{await saveBeforeLeaving();onBack?.();}catch(error){notify(`参考板保存失败：${String(error)}`,true);} }}><ArrowLeft size={16} /></button>}
     <strong title={board.name}>{board.name}</strong><span className="reference-save-state">{saving ? "保存中…" : dirty ? "等待保存" : "已保存"}</span>
     <i />
     <button title="添加本地图片" onClick={() => void chooseImages()}><ImagePlus size={16} /></button>
@@ -185,6 +202,7 @@ export function ReferenceBoardWorkspace({ initialBoard, floating = false, onBack
     <button title="撤销 Ctrl+Z" disabled={!undoStack.current.length} onClick={undo}><Undo2 size={16} /></button>
     <button title="重做 Ctrl+Y" disabled={!redoStack.current.length} onClick={redo}><Redo2 size={16} /></button>
     <button title="自动排列" disabled={!board.items.length} onClick={arrange}><Grid3X3 size={16} /></button>
+    {onLearnSource&&!floating&&<button title="查看图片的视频来源" aria-label="查看图片的视频来源" disabled={selectedIds.size!==1||openingSource} onClick={()=>void openSource()}><Play size={16}/></button>}
     <button title="复制选择 Ctrl+D" disabled={!selectedIds.size} onClick={() => void duplicateSelected()}><Copy size={16} /></button>
     <button title="向前一层" disabled={!selectedIds.size} onClick={() => reorder("forward")}><ArrowUpToLine size={16} /></button>
     <button title="向后一层" disabled={!selectedIds.size} onClick={() => reorder("backward")}><ArrowDownToLine size={16} /></button>

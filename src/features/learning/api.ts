@@ -36,6 +36,7 @@ export const learningApi={
   listProjectNotes:(expectedLibraryId:string,projectId:string,offset=0,limit=50)=>invoke<Page<import("./types").ProjectLearningNote>>("list_project_learning_notes",{expectedLibraryId,projectId,offset,limit}),
   linkProjectNote:(expectedLibraryId:string,projectId:string,noteId:string)=>invoke<void>("link_project_learning_note",{expectedLibraryId,projectId,noteId}),
   unlinkProjectNote:(expectedLibraryId:string,projectId:string,noteId:string)=>invoke<void>("unlink_project_learning_note",{expectedLibraryId,projectId,noteId}),
+  prepareBoardExcerptJump:(expectedLibraryId:string,boardId:string,itemId:string)=>invoke<import("./types").BoardExcerptJump|null>("prepare_learning_board_excerpt_jump",{expectedLibraryId,boardId,itemId}),
   listNoteArchives:(expectedLibraryId:string,offset=0,limit=50)=>invoke<import("./types").NoteArchivePage>("list_learning_note_archives",{expectedLibraryId,offset,limit}),
   readNoteArchive:(expectedLibraryId:string,archiveId:string)=>invoke<import("./types").NoteArchiveView>("read_learning_note_archive",{expectedLibraryId,archiveId}),
   exportNoteArchive:(expectedLibraryId:string,archiveId:string,path:string)=>invoke<void>("export_learning_note_archive",{expectedLibraryId,archiveId,path}),

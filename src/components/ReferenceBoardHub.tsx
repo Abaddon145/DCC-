@@ -12,9 +12,11 @@ interface Props {
   onDetached: (boardId: string) => void;
   notify: (message: string, error?: boolean) => void;
   initialBoardId?: string | null;
+  initialItemId?: string | null;
+  onLearnSource?: (boardId:string,itemId:string)=>Promise<void>;
 }
 
-export function ReferenceBoardHub({ detachedBoardId, onDetached, notify, initialBoardId = null }: Props) {
+export function ReferenceBoardHub({ detachedBoardId, onDetached, notify, initialBoardId = null,initialItemId,onLearnSource }: Props) {
   const [boards, setBoards] = useState<ReferenceBoardSummary[]>([]);
   const [active, setActive] = useState<ReferenceBoardDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,7 +52,7 @@ export function ReferenceBoardHub({ detachedBoardId, onDetached, notify, initial
 
   if (active) {
     if (detachedBoardId === active.id) return <div className="reference-detached-placeholder"><Grid3X3 size={42} /><h2>{active.name}</h2><p>该参考板正在独立悬浮窗口中编辑。</p><button className="secondary-button" onClick={() => {openGate.invalidate();setOpening(false);setFailedBoard(null);setActive(null);}}>返回参考板列表</button></div>;
-    return <>{opening&&<LoadFeedback label="正在打开参考板…"/>}{failedBoard&&<ReadFailure onRetry={()=>void openBoard(failedBoard)}/>}<ReferenceBoardWorkspace key={active.id} initialBoard={active} onBack={() => {openGate.invalidate();setOpening(false);setFailedBoard(null);setActive(null); void loadBoards(); }} onDetach={detach} onChanged={loadBoards} notify={notify} /></>;
+    return <>{opening&&<LoadFeedback label="正在打开参考板…"/>}{failedBoard&&<ReadFailure onRetry={()=>void openBoard(failedBoard)}/>}<ReferenceBoardWorkspace key={active.id} initialBoard={active} initialItemId={active.id===initialBoardId?initialItemId:null} onLearnSource={onLearnSource} onBack={() => {openGate.invalidate();setOpening(false);setFailedBoard(null);setActive(null); void loadBoards(); }} onDetach={detach} onChanged={loadBoards} notify={notify} /></>;
   }
 
   return <section className="reference-hub">

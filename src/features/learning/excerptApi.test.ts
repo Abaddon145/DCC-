@@ -29,3 +29,6 @@ it("scopes project learning links by library, project and note identities",async
   await learningApi.linkProjectNote("library","project","note");expect(invoke).toHaveBeenLastCalledWith("link_project_learning_note",{expectedLibraryId:"library",projectId:"project",noteId:"note"});
   await learningApi.unlinkProjectNote("library","project","note");expect(invoke).toHaveBeenLastCalledWith("unlink_project_learning_note",{expectedLibraryId:"library",projectId:"project",noteId:"note"});
 });
+it("requests board source verification with only scoped board and item identities",async()=>{
+  await learningApi.prepareBoardExcerptJump("library","board","item");expect(invoke).toHaveBeenCalledWith("prepare_learning_board_excerpt_jump",{expectedLibraryId:"library",boardId:"board",itemId:"item"});
+});
