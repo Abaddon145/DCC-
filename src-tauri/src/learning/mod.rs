@@ -49,6 +49,9 @@ pub mod commands;
 pub mod excerpt_access;
 #[cfg(test)]
 mod excerpt_access_tests;
+pub mod excerpt_board_source;
+#[cfg(test)]
+mod excerpt_board_source_tests;
 #[cfg(test)]
 mod excerpt_file_tests;
 pub mod excerpt_files;

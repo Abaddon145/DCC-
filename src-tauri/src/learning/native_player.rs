@@ -522,29 +522,7 @@ fn boot_engine(app: &tauri::AppHandle, session: &Arc<PlaybackSession>) -> Result
         if state.tasks.maintenance().is_some() {
             return Err("素材库正在维护".into());
         }
-        state
-            .with_library_if_id(&session.lease.library_id, |db, base| {
-                let course = super::store::course(db, &session.lease.course_id)?;
-                let current: String = db
-                    .query_row(
-                        "SELECT primary_file_id FROM media_entries WHERE id=?1",
-                        [course.media_id],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if current != file_id
-                    || !prepared.matches_current(
-                        db,
-                        base,
-                        &file_id,
-                        &crate::media_access::LocalMediaGrants::new(&state.config_directory()),
-                    )
-                {
-                    return Err("视频登记或访问批准已变化，未发布播放会话".into());
-                }
-                Ok(())
-            })?
-            .ok_or("素材库已切换")?;
+        confirm_session_source(&state, session, &prepared, &file_id)?;
         *session.engine.lock().map_err(|_| "播放内核锁损坏")? = Some(engine.clone());
         engine
             .window
@@ -1155,13 +1133,7 @@ fn checked_session_source(
     let (id, prepared) = state
         .with_library_if_id(&session.lease.library_id, |db, base| {
             let course = super::store::course(db, &session.lease.course_id)?;
-            let id: String = db
-                .query_row(
-                    "SELECT primary_file_id FROM media_entries WHERE id=?1",
-                    [course.media_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
+            let id = super::analysis::source_file_id(db, &course.media_id)?;
             Ok((
                 id.clone(),
                 crate::media_access::prepare_media_file(db, base, &id, &grants)?,
@@ -1177,16 +1149,41 @@ fn checked_session_source(
     {
         return Err("视频原件已变化，未按旧笔记引用启动播放器".into());
     }
-    let valid = state
-        .with_library_if_id(&session.lease.library_id, |db, base| {
-            super::store::course(db, &session.lease.course_id)?;
-            Ok(prepared.matches_current(db, base, &id, &grants))
-        })?
-        .unwrap_or(false);
-    if !valid || !current() {
+    confirm_session_source(state, session, &prepared, &id)?;
+    if !current() {
         return Err("访问批准或播放会话已变化，未启动播放器".into());
     }
     Ok((checked, prepared, id))
+}
+
+fn confirm_session_source(
+    state: &AppState,
+    session: &PlaybackSession,
+    prepared: &crate::media_access::PreparedMediaFile,
+    id: &str,
+) -> Result<(), String> {
+    let active = state
+        .active
+        .try_lock()
+        .map_err(|_| "素材库繁忙，播放器未打开，请稍后重试")?;
+    if active.marker.library_id != session.lease.library_id
+        || super::analysis_store::library_identity(&active.base_dir)?.0 != session.lease.library_id
+    {
+        return Err("素材库已切换".into());
+    }
+    let db = active.connection.as_ref().ok_or("数据库正在维护")?;
+    let course = super::store::course(db, &session.lease.course_id)?;
+    if super::analysis::source_file_id(db, &course.media_id)? != id
+        || !prepared.matches_current(
+            db,
+            &active.base_dir,
+            id,
+            &crate::media_access::LocalMediaGrants::new(&state.config_directory()),
+        )
+    {
+        return Err("视频登记或访问批准已变化，未发布播放会话".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -1406,6 +1403,62 @@ impl PlaybackAction {
 mod learning_native_tests {
     use super::*;
     use crate::learning::models::Course;
+    #[test]
+    fn learning_board_excerpt_native_source_busy_never_waits_with_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(root.path());
+        let library = state.active_library_id().unwrap();
+        let course = course_fixture(&state);
+        let path = root
+            .path()
+            .join(format!("media-library/video/{}/video.mp4", course.media_id));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"registered video").unwrap();
+        let session = claim_session(&state, &library, &course.id).unwrap();
+        let (lease, prepared, id) = checked_session_source(&state, &session).unwrap();
+        std::thread::scope(|scope| {
+            let held = state.active.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let state_ref = &state;
+            let session_ref = &session;
+            let prepared_ref = &prepared;
+            let id_ref = &id;
+            let worker = scope.spawn(move || {
+                tx.send(confirm_session_source(
+                    state_ref,
+                    session_ref,
+                    prepared_ref,
+                    id_ref,
+                ))
+                .unwrap();
+            });
+            let result = rx.recv_timeout(std::time::Duration::from_millis(500));
+            drop(held);
+            worker.join().unwrap();
+            assert!(
+                result.is_ok_and(|r| r.is_err()),
+                "busy library must fail promptly while the media lease is held"
+            );
+        });
+        drop(lease);
+    }
+    #[test]
+    fn learning_board_excerpt_native_rejects_non_main_file() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(root.path());
+        let library = state.active_library_id().unwrap();
+        let course = course_fixture(&state);
+        let path = root
+            .path()
+            .join(format!("media-library/video/{}/video.mp4", course.media_id));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"registered video").unwrap();
+        let session = claim_session(&state, &library, &course.id).unwrap();
+        let (lease, _, _) = checked_session_source(&state, &session).unwrap();
+        drop(lease);
+        state.with_library(|db,_|{db.execute("UPDATE media_files SET role='proxy' WHERE id=(SELECT primary_file_id FROM media_entries WHERE id=?1)",[&course.media_id]).unwrap();Ok(())}).unwrap();
+        assert!(checked_session_source(&state, &session).is_err());
+    }
     #[test]
     fn learning_note_native_source_rechecks_requested_fingerprint_at_playback_start() {
         use sha2::{Digest, Sha256};

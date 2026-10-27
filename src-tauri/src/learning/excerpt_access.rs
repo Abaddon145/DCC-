@@ -175,7 +175,7 @@ pub(super) fn scoped<T>(
         )
     })
 }
-fn read_record(db: &Connection, id: &str) -> Result<StoredOperation, String> {
+pub(super) fn read_record(db: &Connection, id: &str) -> Result<StoredOperation, String> {
     uuid(id)?;
     let (excerpt,raw,created):(String,String,String)=db.query_row("SELECT excerpt_id,request_json,substr(created_at,1,128) FROM learning_excerpt_operations WHERE operation_id=?1 AND length(CAST(request_json AS BLOB))<=65536",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|_|"摘录操作不存在或记录超限")?;
     let request: CommitRequest =

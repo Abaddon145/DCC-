@@ -343,6 +343,7 @@ fn application_builder(
                     learning::excerpt_access::cancel_learning_excerpt_preview,
                     learning::excerpt_access::cancel_learning_excerpt_operation,
                     learning::excerpt_access::get_learning_excerpt_targets,
+                    learning::excerpt_board_source::prepare_learning_board_excerpt_jump,
                     learning::project_notes::list_project_learning_notes,
                     learning::project_notes::link_project_learning_note,
                     learning::project_notes::unlink_project_learning_note,

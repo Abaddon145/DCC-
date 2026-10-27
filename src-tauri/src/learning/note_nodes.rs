@@ -62,13 +62,7 @@ pub fn prepare_jump(
     if reference.ranges.iter().any(|range| range.end_ms > duration) {
         return Err("引用超出当前视频时长，未截断跳转".into());
     }
-    let file: String = db
-        .query_row(
-            "SELECT primary_file_id FROM media_entries WHERE id=?1",
-            [&course.media_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let file = super::analysis::source_file_id(&db, &course.media_id)?;
     let grants = crate::media_access::LocalMediaGrants::new(&state.config_directory());
     let prepared = crate::media_access::prepare_media_file(&db, &base, &file, &grants)?;
     let stop = || {
@@ -83,13 +77,7 @@ pub fn prepare_jump(
     state
         .with_library_if_id(library, |db, current| {
             let current_course = super::store::course(db, &reference.course_id)?;
-            let current_file: String = db
-                .query_row(
-                    "SELECT primary_file_id FROM media_entries WHERE id=?1",
-                    [&current_course.media_id],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
+            let current_file = super::analysis::source_file_id(db, &current_course.media_id)?;
             if current != base
                 || current_course.media_id != course.media_id
                 || current_course.duration_ms != course.duration_ms
