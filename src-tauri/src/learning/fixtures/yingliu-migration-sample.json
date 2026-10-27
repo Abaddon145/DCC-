@@ -1,0 +1,749 @@
+{
+  "format": "yingliu-migration-input",
+  "version": 1,
+  "synthetic": true,
+  "sampleRootHint": "artifacts/learning-upgrade/migration-input-v1",
+  "sourceProfile": {
+    "id": "a1000000-0000-4000-8000-000000000001",
+    "application": "yingliu",
+    "sourceCode": "c86650831aecb55ef7bec288df9ae7fb27c8d178",
+    "vaultIdentity": "synthetic-vault-a-filesystem-identity",
+    "binding": "synthetic-only"
+  },
+  "snapshot": {
+    "relativePath": "learning.snapshot.db",
+    "bytes": 266240,
+    "sha256": "dba49e0512521ce4f4f859a90e013c394dd6846858cc7c23b1c10e4140692723",
+    "schemaVersion": 8,
+    "userVersion": 8,
+    "consistentBackup": true
+  },
+  "tables": {
+    "schema_version": {
+      "fields": [
+        "version"
+      ],
+      "rows": [
+        {
+          "version": 8
+        }
+      ]
+    },
+    "categories": {
+      "fields": [
+        "id",
+        "name",
+        "description",
+        "icon",
+        "color",
+        "sort_order",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": [
+        {
+          "id": "cat-1",
+          "name": "合成分类",
+          "description": null,
+          "icon": null,
+          "color": null,
+          "sort_order": 0,
+          "created_at": 1,
+          "updated_at": 1
+        }
+      ]
+    },
+    "series": {
+      "fields": [
+        "id",
+        "category_id",
+        "title",
+        "description",
+        "cover_path",
+        "source_type",
+        "source_url",
+        "source_playlist_id",
+        "author",
+        "total_items",
+        "completed_items",
+        "created_at",
+        "updated_at",
+        "favorite",
+        "sort_order"
+      ],
+      "rows": [
+        {
+          "id": "series-1",
+          "category_id": "cat-1",
+          "title": "合成系列",
+          "description": null,
+          "cover_path": null,
+          "source_type": null,
+          "source_url": null,
+          "source_playlist_id": null,
+          "author": null,
+          "total_items": 2,
+          "completed_items": 0,
+          "created_at": 1,
+          "updated_at": 1,
+          "favorite": 0,
+          "sort_order": 0
+        }
+      ]
+    },
+    "series_items": {
+      "fields": [
+        "id",
+        "series_id",
+        "title",
+        "file_path",
+        "source_url",
+        "source_video_id",
+        "source_playlist_index",
+        "duration_ms",
+        "sort_order",
+        "thumbnail_path",
+        "download_task_id",
+        "available",
+        "created_at",
+        "updated_at",
+        "file_key",
+        "source_key",
+        "download_request",
+        "download_state",
+        "request_key",
+        "thumbnail_source",
+        "source_thumbnail_url",
+        "thumbnail_key"
+      ],
+      "rows": [
+        {
+          "id": "course-1",
+          "series_id": "series-1",
+          "title": "同内容不同课次",
+          "file_path": "media/source.bin",
+          "source_url": null,
+          "source_video_id": null,
+          "source_playlist_index": null,
+          "duration_ms": 60000,
+          "sort_order": 0,
+          "thumbnail_path": null,
+          "download_task_id": null,
+          "available": 0,
+          "created_at": 1,
+          "updated_at": 1,
+          "file_key": null,
+          "source_key": null,
+          "download_request": null,
+          "download_state": "waiting",
+          "request_key": null,
+          "thumbnail_source": null,
+          "source_thumbnail_url": null,
+          "thumbnail_key": null
+        },
+        {
+          "id": "course-2",
+          "series_id": "series-1",
+          "title": "同内容不同课次",
+          "file_path": "media/source.bin",
+          "source_url": null,
+          "source_video_id": null,
+          "source_playlist_index": null,
+          "duration_ms": 60000,
+          "sort_order": 0,
+          "thumbnail_path": null,
+          "download_task_id": null,
+          "available": 0,
+          "created_at": 1,
+          "updated_at": 1,
+          "file_key": null,
+          "source_key": null,
+          "download_request": null,
+          "download_state": "waiting",
+          "request_key": null,
+          "thumbnail_source": null,
+          "source_thumbnail_url": null,
+          "thumbnail_key": null
+        }
+      ]
+    },
+    "playback_progress": {
+      "fields": [
+        "item_id",
+        "position_ms",
+        "duration_ms",
+        "completed",
+        "playback_rate",
+        "last_played_at",
+        "updated_at",
+        "last_sequence"
+      ],
+      "rows": [
+        {
+          "item_id": "course-1",
+          "position_ms": 11000,
+          "duration_ms": 60000,
+          "completed": 0,
+          "playback_rate": 1.0,
+          "last_played_at": null,
+          "updated_at": 1,
+          "last_sequence": 100
+        }
+      ]
+    },
+    "video_notes": {
+      "fields": [
+        "id",
+        "item_id",
+        "time_ms",
+        "content",
+        "created_at",
+        "updated_at",
+        "markdown_vault_id",
+        "markdown_path"
+      ],
+      "rows": [
+        {
+          "id": "note-1",
+          "item_id": "course-1",
+          "time_ms": 10000,
+          "content": "合成时间点笔记",
+          "created_at": 1,
+          "updated_at": 1,
+          "markdown_vault_id": "synthetic-vault-a-filesystem-identity",
+          "markdown_path": "complex.md"
+        },
+        {
+          "id": "note-2",
+          "item_id": "course-1",
+          "time_ms": 20000,
+          "content": "合成时间点笔记",
+          "created_at": 1,
+          "updated_at": 1,
+          "markdown_vault_id": "synthetic-vault-a-filesystem-identity",
+          "markdown_path": "complex.md"
+        }
+      ]
+    },
+    "learning_settings": {
+      "fields": [
+        "key",
+        "value"
+      ],
+      "rows": [
+        {
+          "key": "config",
+          "value": "{\"restorePosition\":true}"
+        }
+      ]
+    },
+    "video_analyses": {
+      "fields": [
+        "id",
+        "item_id",
+        "source_path",
+        "source_fingerprint",
+        "status",
+        "analysis_mode",
+        "model",
+        "prompt_version",
+        "language",
+        "duration_ms",
+        "progress",
+        "stage",
+        "summary_json",
+        "markdown_path",
+        "markdown_vault_id",
+        "error",
+        "options_json",
+        "transcript_done",
+        "keyframes_done",
+        "created_at",
+        "updated_at",
+        "completed_at",
+        "note_target_vault_id",
+        "note_warning",
+        "template_id",
+        "template_version",
+        "template_snapshot",
+        "template_warning",
+        "reuse_analysis_id"
+      ],
+      "rows": [
+        {
+          "id": "ai-1",
+          "item_id": "course-1",
+          "source_path": "media/source.bin",
+          "source_fingerprint": "synthetic-fingerprint-not-a-production-hash",
+          "status": "completed",
+          "analysis_mode": "standard",
+          "model": "deepseek-flash",
+          "prompt_version": "v0.5.0-1",
+          "language": null,
+          "duration_ms": 60000,
+          "progress": 0.0,
+          "stage": null,
+          "summary_json": "{\"contentType\": \"tutorial\", \"oneSentenceSummary\": \"合成摘要\", \"overview\": \"仅隔离迁移样例\", \"chapters\": [], \"keyPoints\": [], \"tutorialSteps\": [], \"terms\": [], \"actionItems\": [], \"tags\": []}",
+          "markdown_path": null,
+          "markdown_vault_id": null,
+          "error": null,
+          "options_json": "{}",
+          "transcript_done": 0,
+          "keyframes_done": 0,
+          "created_at": 1,
+          "updated_at": 1,
+          "completed_at": null,
+          "note_target_vault_id": null,
+          "note_warning": null,
+          "template_id": "general",
+          "template_version": 0,
+          "template_snapshot": null,
+          "template_warning": null,
+          "reuse_analysis_id": null
+        }
+      ]
+    },
+    "transcript_segments": {
+      "fields": [
+        "id",
+        "analysis_id",
+        "segment_index",
+        "start_ms",
+        "end_ms",
+        "text"
+      ],
+      "rows": [
+        {
+          "id": "cue-1",
+          "analysis_id": "ai-1",
+          "segment_index": 0,
+          "start_ms": 10000,
+          "end_ms": 12000,
+          "text": "合成字幕原文"
+        }
+      ]
+    },
+    "analysis_chunks": {
+      "fields": [
+        "id",
+        "analysis_id",
+        "chunk_index",
+        "start_ms",
+        "end_ms",
+        "result_json",
+        "status"
+      ],
+      "rows": [
+        {
+          "id": "chunk-1",
+          "analysis_id": "ai-1",
+          "chunk_index": 0,
+          "start_ms": 0,
+          "end_ms": 60000,
+          "result_json": "{\"contentType\": \"tutorial\", \"oneSentenceSummary\": \"合成摘要\", \"overview\": \"仅隔离迁移样例\", \"chapters\": [], \"keyPoints\": [], \"tutorialSteps\": [], \"terms\": [], \"actionItems\": [], \"tags\": []}",
+          "status": "completed"
+        }
+      ]
+    },
+    "analysis_keyframes": {
+      "fields": [
+        "id",
+        "analysis_id",
+        "time_ms",
+        "path",
+        "sha256",
+        "scene_score"
+      ],
+      "rows": [
+        {
+          "id": "frame-1",
+          "analysis_id": "ai-1",
+          "time_ms": 11000,
+          "path": "vault/Attachments/test.png",
+          "sha256": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+          "scene_score": null
+        }
+      ]
+    },
+    "ai_usage": {
+      "fields": [
+        "id",
+        "analysis_id",
+        "operation",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "usage_json",
+        "created_at"
+      ],
+      "rows": [
+        {
+          "id": "usage-1",
+          "analysis_id": "ai-1",
+          "operation": "chunk",
+          "model": "deepseek-flash",
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "cached_tokens": 10,
+          "usage_json": null,
+          "created_at": 1
+        }
+      ]
+    },
+    "knowledge_index": {
+      "fields": [
+        "path",
+        "title",
+        "content_hash",
+        "mtime",
+        "content",
+        "analysis_id",
+        "item_id",
+        "indexed_at"
+      ],
+      "rows": [
+        {
+          "path": "complex.md",
+          "title": "合成兼容样本",
+          "content_hash": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589",
+          "mtime": 1,
+          "content": "﻿---\r\ntitle: 合成兼容样本\r\ntags:\r\n  - 学习\r\n---\r\n\r\n# 标题\r\n\r\n普通 **粗体** 与 *斜体*、[课程](yingliu://video/test?t=751000)。\r\n\r\n> 引用\r\n\r\n- [ ] 任务\r\n- 列表\r\n  - 子项\r\n\r\n| 列一 | 列二 |\r\n| --- | --- |\r\n| 内容 | 数值 |\r\n\r\n```ts\r\nconst value = 1;\r\n```\r\n\r\n![附件](Attachments/test.png)\r\n\r\n![[Attachments/test.png]]\r\n\r\n[[链接#标题|别名]]\r\n\r\n> [!note] 特殊提示\r\n> 应原样保留\r\n\r\n%% 私有注释 %%\r\n\r\n$$\r\na^2+b^2=c^2\r\n$$\r\n",
+          "analysis_id": "ai-1",
+          "item_id": "course-1",
+          "indexed_at": 1
+        }
+      ]
+    },
+    "knowledge_links": {
+      "fields": [
+        "source_path",
+        "target"
+      ],
+      "rows": [
+        {
+          "source_path": "complex.md",
+          "target": "链接#标题"
+        }
+      ]
+    },
+    "knowledge_tags": {
+      "fields": [
+        "path",
+        "tag"
+      ],
+      "rows": [
+        {
+          "path": "complex.md",
+          "tag": "学习"
+        }
+      ]
+    },
+    "ai_template_versions": {
+      "fields": [
+        "id",
+        "version",
+        "definition_json",
+        "created_at"
+      ],
+      "rows": [
+        {
+          "id": "custom-test",
+          "version": 1,
+          "definition_json": "{\"synthetic\":true}",
+          "created_at": 1
+        }
+      ]
+    },
+    "ai_template_preferences": {
+      "fields": [
+        "id",
+        "favorite",
+        "deleted"
+      ],
+      "rows": [
+        {
+          "id": "custom-test",
+          "favorite": 1,
+          "deleted": 0
+        }
+      ]
+    },
+    "knowledge_note_metadata": {
+      "fields": [
+        "vault_id",
+        "path",
+        "favorite",
+        "template"
+      ],
+      "rows": [
+        {
+          "vault_id": "synthetic-vault-a-filesystem-identity",
+          "path": "complex.md",
+          "favorite": 1,
+          "template": 0
+        }
+      ]
+    },
+    "knowledge_note_versions": {
+      "fields": [
+        "id",
+        "vault_id",
+        "path",
+        "content_hash",
+        "text",
+        "bytes",
+        "created_at"
+      ],
+      "rows": [
+        {
+          "id": "version-1",
+          "vault_id": "synthetic-vault-a-filesystem-identity",
+          "path": "complex.md",
+          "content_hash": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589",
+          "text": "﻿---\r\ntitle: 合成兼容样本\r\ntags:\r\n  - 学习\r\n---\r\n\r\n# 标题\r\n\r\n普通 **粗体** 与 *斜体*、[课程](yingliu://video/test?t=751000)。\r\n\r\n> 引用\r\n\r\n- [ ] 任务\r\n- 列表\r\n  - 子项\r\n\r\n| 列一 | 列二 |\r\n| --- | --- |\r\n| 内容 | 数值 |\r\n\r\n```ts\r\nconst value = 1;\r\n```\r\n\r\n![附件](Attachments/test.png)\r\n\r\n![[Attachments/test.png]]\r\n\r\n[[链接#标题|别名]]\r\n\r\n> [!note] 特殊提示\r\n> 应原样保留\r\n\r\n%% 私有注释 %%\r\n\r\n$$\r\na^2+b^2=c^2\r\n$$\r\n",
+          "bytes": 473,
+          "created_at": 1
+        }
+      ]
+    },
+    "knowledge_attachments": {
+      "fields": [
+        "vault_id",
+        "path",
+        "name",
+        "content_hash",
+        "bytes",
+        "imported_at"
+      ],
+      "rows": [
+        {
+          "vault_id": "synthetic-vault-a-filesystem-identity",
+          "path": "Attachments/test.png",
+          "name": "test.png",
+          "content_hash": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+          "bytes": 70,
+          "imported_at": 1
+        }
+      ]
+    }
+  },
+  "files": [
+    {
+      "relativePath": "vault/plain.md",
+      "bytes": 43,
+      "sha256": "ee06f636801d89c404ddab4bdd49f67d17d9d713e06c349ec65dcdb9b7643ba1",
+      "beforeSha256": "ee06f636801d89c404ddab4bdd49f67d17d9d713e06c349ec65dcdb9b7643ba1",
+      "afterSha256": "ee06f636801d89c404ddab4bdd49f67d17d9d713e06c349ec65dcdb9b7643ba1",
+      "required": true,
+      "kind": "markdown"
+    },
+    {
+      "relativePath": "vault/complex.md",
+      "bytes": 473,
+      "sha256": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589",
+      "beforeSha256": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589",
+      "afterSha256": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589",
+      "required": true,
+      "kind": "markdown"
+    },
+    {
+      "relativePath": "vault/long.md",
+      "bytes": 944010,
+      "sha256": "9b5df745ef4d778ac98bd92b86e4b68286351bb3417f00c0ea33d23ba8cc4e35",
+      "beforeSha256": "9b5df745ef4d778ac98bd92b86e4b68286351bb3417f00c0ea33d23ba8cc4e35",
+      "afterSha256": "9b5df745ef4d778ac98bd92b86e4b68286351bb3417f00c0ea33d23ba8cc4e35",
+      "required": true,
+      "kind": "markdown"
+    },
+    {
+      "relativePath": "vault/Attachments/test.png",
+      "bytes": 70,
+      "sha256": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+      "beforeSha256": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+      "afterSha256": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+      "required": true,
+      "kind": "attachment"
+    },
+    {
+      "relativePath": "media/source.bin",
+      "bytes": 41,
+      "sha256": "92419ca5163e20b27ffa48e8ce64754a3e441655b0d8196346b53568c54916ec",
+      "beforeSha256": "92419ca5163e20b27ffa48e8ce64754a3e441655b0d8196346b53568c54916ec",
+      "afterSha256": "92419ca5163e20b27ffa48e8ce64754a3e441655b0d8196346b53568c54916ec",
+      "required": true,
+      "kind": "synthetic-media"
+    }
+  ],
+  "objects": [
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "course",
+        "course-1"
+      ],
+      "targetKind": "learning-course",
+      "mapping": "not-imported"
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "course",
+        "course-2"
+      ],
+      "targetKind": "learning-course",
+      "mapping": "not-imported"
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "markdown",
+        "synthetic-vault-a-filesystem-identity",
+        "complex.md"
+      ],
+      "targetKind": "document_json",
+      "mapping": "not-imported",
+      "archive": "vault/complex.md",
+      "links": [
+        {
+          "itemId": "course-1",
+          "timeMs": 10000
+        }
+      ]
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "time-note",
+        "note-1"
+      ],
+      "targetKind": "video-reference-note",
+      "mapping": "not-imported",
+      "courseSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "course",
+        "course-1"
+      ],
+      "markdownSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "markdown",
+        "synthetic-vault-a-filesystem-identity",
+        "complex.md"
+      ],
+      "timeMs": 10000
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "time-note",
+        "note-2"
+      ],
+      "targetKind": "video-reference-note",
+      "mapping": "not-imported",
+      "courseSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "course",
+        "course-1"
+      ],
+      "markdownSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "markdown",
+        "synthetic-vault-a-filesystem-identity",
+        "complex.md"
+      ],
+      "timeMs": 20000
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "note-version",
+        "version-1"
+      ],
+      "targetKind": "archived-note-history",
+      "mapping": "not-imported",
+      "markdownSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "markdown",
+        "synthetic-vault-a-filesystem-identity",
+        "complex.md"
+      ],
+      "sha256": "f1251013483d57b69ef9896eddf57ee611d7b34b9139b242c0a0de9b5ebbd589"
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "attachment",
+        "synthetic-vault-a-filesystem-identity",
+        "Attachments/test.png",
+        "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c"
+      ],
+      "targetKind": "managed-attachment",
+      "mapping": "not-imported",
+      "archive": "vault/Attachments/test.png"
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "analysis",
+        "ai-1"
+      ],
+      "targetKind": "historical-course-analysis",
+      "mapping": "not-imported",
+      "courseSourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "course",
+        "course-1"
+      ],
+      "reuseAllowed": false
+    },
+    {
+      "sourceKey": [
+        "a1000000-0000-4000-8000-000000000001",
+        "keyframe",
+        "frame-1"
+      ],
+      "targetKind": "analysis-image-reference",
+      "mapping": "not-imported",
+      "archive": "vault/Attachments/test.png",
+      "timeMs": 11000
+    }
+  ],
+  "expectations": [
+    {
+      "case": "same-profile-same-source-key-same-hash",
+      "outcome": "reuse-target"
+    },
+    {
+      "case": "same-profile-key-source-changed-target-edited",
+      "outcome": "conflict-preserve-both"
+    },
+    {
+      "case": "new-profile-same-content-media",
+      "outcome": "reuse-media-preserve-course-context"
+    },
+    {
+      "case": "missing-attachment",
+      "outcome": "pending-not-complete"
+    },
+    {
+      "case": "source-file-changed-during-read",
+      "outcome": "source-changed-no-publish"
+    },
+    {
+      "case": "unsupported-special-block",
+      "outcome": "protected-block-or-pending-with-original-archive"
+    },
+    {
+      "case": "profile-binding-ambiguous",
+      "outcome": "require-explicit-relink"
+    }
+  ],
+  "unresolvedReferences": [
+    {
+      "relativePath": "vault/complex.md",
+      "href": "yingliu://video/test?t=751000",
+      "reason": "UNKNOWN_COURSE",
+      "expected": "preserve-in-archive-mark-unavailable-no-name-guess"
+    }
+  ]
+}

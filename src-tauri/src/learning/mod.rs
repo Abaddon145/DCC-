@@ -73,6 +73,10 @@ mod excerpt_store_tests;
 mod excerpt_tests;
 pub mod excerpts;
 pub mod files;
+#[cfg(test)]
+mod import_manifest;
+#[cfg(test)]
+mod import_manifest_tests;
 pub mod models;
 #[cfg(windows)]
 mod native_ipc;
