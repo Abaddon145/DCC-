@@ -156,7 +156,7 @@ fn uuid(id: &str) -> Result<(), String> {
         Err("摘录、操作或课程ID必须为规范UUID".into())
     }
 }
-fn scoped<T>(
+pub(super) fn scoped<T>(
     state: &AppState,
     library: &str,
     read: impl FnOnce(&Connection, &Path, &Path) -> Result<T, String>,
@@ -217,7 +217,7 @@ fn title(db: &Connection, request: &CommitRequest) -> String {
             .unwrap_or_else(|_| "参考板（名称暂不可读取）".into()),
     }
 }
-async fn job<T, F>(app: tauri::AppHandle, library: String, work: F) -> Result<T, String>
+pub(super) async fn job<T, F>(app: tauri::AppHandle, library: String, work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&AppState, &str) -> Result<T, String> + Send + 'static,

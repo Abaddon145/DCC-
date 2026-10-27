@@ -804,6 +804,9 @@ fn write_target(
         params![p.text.course_id, note.id],
     )
     .map_err(error)?;
+    if let Destination::Project { project_id, .. } = &request.destination {
+        tx.execute("INSERT OR IGNORE INTO project_learning_notes(project_id,note_id,created_at) VALUES(?1,?2,datetime('now'))",params![project_id,note.id]).map_err(error)?;
+    }
     let mut warnings = p.warnings.clone();
     if p.frame.is_some() && !request.include_frame {
         warnings.push("已按确认仅保存文字，截图未写入".into());
