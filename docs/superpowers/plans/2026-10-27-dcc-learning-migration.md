@@ -71,6 +71,27 @@
 - [x] 读取过程复核大小、修改时间、双次 SHA 和规范相对路径；Windows 测试使用只读共享方式，仍不声称消除所有真实路径替换竞争。
 - [x] 定向和完整 Rust 回归、格式/凭据检查，写证据并独立提交；未声明文件、活动写入与实际授权留待后续阶段。证据见 `docs/evidence/merge/task12b2b-file-parity.md`。
 
+## Task 12b3：合成固定快照的串联验证
+
+**Files:** 扩展 `src-tauri/src/learning/import_file_check_tests.rs`；在测试模块内直接组合已有清单、文件、内存快照及表核对。无新增生产入口或真实路径读取。
+
+**Interface:** 合成导出样例只作为固定快照验证；先检查同一份清单，再验证所有声明文件、检查 WAL、读取同一内存快照并对比声明表，最后重复检查文件与 WAL。任一必需或可选文件缺失显示未完成；过程中变化拒绝。报告区分实际匹配数与清单自报的对象/未解析引用，不报告“可迁入”。样例活动非空 WAL 与主文件摘要不构成一个完整导出，固定快照检查必须拒绝；活动 WAL 的一致性快照行为由 12b1 单独验证。
+
+- [x] RED→GREEN：完整样例、必需/可选缺失、同长度文件变化、表行变更、阶段间文件变化、非空 WAL 及阶段间 WAL 变化；合成源文件与隔离目标 SQLite 哨兵在检查前后保持内容不变。
+- [x] 检查初始与最终文件覆盖的是全部声明项目；缺失时不继续声称表、文件完整。错误不包含内容或路径。
+- [x] 定向和完整 Rust 回归、格式/凭据检查、证据与独立本地提交；ABA 替换、真实句柄和目标切库仍待后续处理。详见 `docs/evidence/merge/task12b3-integrated-preflight.md`。
+
+## Task 12c1：库内来源身份及恢复失效
+
+**Files:** 新 `src-tauri/src/learning/schema-v31.sql`、`source_profiles.rs`、`source_profiles_tests.rs`；更新 `learning/mod.rs`、`backup.rs` 的正常与中断恢复、现有 schema 版本断言。无来源文件选择、读取、UI、任务或 Tauri 命令。
+
+**Interface:** 后端内部 `scope(state, expectedLibraryId)` 使用现有 `with_library_if_id` 与 `analysis_store::library_identity` 捕获库 UUID 和规范根摘要；`create(state, scope)`、`get(state, scope, profileId)` 在同一活动库锁内重新核对两者，来源 profile/epoch 由后端生成规范非 nil UUID。v31 只保存 profile ID、固定 `yingliu`、epoch、创建时间；不保存路径、清单提示、密钥或批准，不代表已选择或授权真实来源。`invalidate_epochs(db)` 用于两条恢复路径，使未来本机批准不能因同目录恢复而继承；目前没有 grant 读取器。
+
+- [ ] RED→GREEN：v30→v31 单事务升级和重复打开；人为触发迁移失败时表与版本同时回滚，旧笔记和归档不变。
+- [ ] 两个不同根持相同 marker UUID、切库后旧 scope、未知/非规范 profile ID、缺失表或异常数据均不允许跨库创建或读取。检查新表没有任何源路径或授权字段。
+- [ ] 真正的隔离整库备份恢复和中断恢复分别保留 profile 身份、轮换 epoch；隔离库以外无写入。旧归档来源键保持原样，不根据它自动建立新 profile。
+- [ ] 定向与完整 Rust 回归、构建、格式/凭据检查及本地提交。来源选择与身份绑定、来源映射、用户授权及恢复事务仍属后续步骤；不能把 inert profile 视为授权。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

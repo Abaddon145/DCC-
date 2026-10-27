@@ -153,3 +153,214 @@ fn learning_import_file_check_refuses_conflicting_writer_and_recovers_after_clos
     drop(writer);
     assert_eq!(verify(temp.path(), &manifest()).unwrap().verified, 6);
 }
+
+#[derive(Debug, PartialEq, Eq)]
+enum FixturePreflight {
+    Incomplete {
+        required: usize,
+        optional: usize,
+    },
+    Compared {
+        files: usize,
+        rows: usize,
+        declared_objects: usize,
+        declared_unresolved: usize,
+    },
+}
+
+// Test-only composition. It is not an authorization or a production import preview.
+fn check_fixture_preflight(
+    root: &Path,
+    value: &Value,
+    between: impl FnOnce(&Path),
+) -> Result<FixturePreflight, String> {
+    let bytes = serde_json::to_vec(value).map_err(|_| "合成清单无法编码")?;
+    check_fixture_preflight_bytes(root, &bytes, between)
+}
+
+fn check_fixture_preflight_bytes(
+    root: &Path,
+    bytes: &[u8],
+    between: impl FnOnce(&Path),
+) -> Result<FixturePreflight, String> {
+    let declared = super::import_manifest::validate_synthetic_manifest(bytes)?;
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| "合成清单无法解析")?;
+    if value["snapshot"]["relativePath"] != "learning.snapshot.db" {
+        return Err("合成快照名称无效".into());
+    }
+    let check_wal = || -> Result<(), String> {
+        let wal = root.join("learning.snapshot.db-wal");
+        crate::media_access::reject_links(&wal).map_err(|_| "合成快照日志不可用")?;
+        match fs::metadata(wal) {
+            Ok(meta) if meta.is_file() && meta.len() == 0 => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err("合成固定快照包含活动日志".into()),
+        }
+    };
+    let before = verify_synthetic_files(root, bytes)?;
+    if before.missing_required != 0 || before.missing_optional != 0 {
+        return Ok(FixturePreflight::Incomplete {
+            required: before.missing_required,
+            optional: before.missing_optional,
+        });
+    }
+    check_wal()?;
+    let snapshot = super::import_snapshot::snapshot_synthetic(
+        &root.join("learning.snapshot.db"),
+        std::time::Duration::from_secs(2),
+    )?;
+    let rows = super::import_table_check::verify_synthetic_tables(&snapshot, bytes)?;
+    between(root);
+    check_wal()?;
+    let after = verify_synthetic_files(root, bytes)?;
+    if after.missing_required != 0
+        || after.missing_optional != 0
+        || after.verified != before.verified
+    {
+        return Err("合成来源在检查期间发生变化".into());
+    }
+    Ok(FixturePreflight::Compared {
+        files: after.verified,
+        rows,
+        declared_objects: declared.declared_objects,
+        declared_unresolved: declared.declared_unresolved_references,
+    })
+}
+
+#[test]
+fn learning_import_preflight_combines_fixed_fixture_without_touching_target() {
+    let source = fixture();
+    let target = tempfile::tempdir().unwrap();
+    let target_path = target.path().join("target.db");
+    let target_db = rusqlite::Connection::open(&target_path).unwrap();
+    target_db
+        .execute_batch(
+            "CREATE TABLE saved_note(body TEXT); INSERT INTO saved_note VALUES('preserve');",
+        )
+        .unwrap();
+    drop(target_db);
+    let before_target = fs::read(&target_path).unwrap();
+    let before_source = fs::read(source.path().join("learning.snapshot.db")).unwrap();
+    assert_eq!(
+        check_fixture_preflight(source.path(), &manifest(), |_| {}).unwrap(),
+        FixturePreflight::Compared {
+            files: 6,
+            rows: 22,
+            declared_objects: 9,
+            declared_unresolved: 1,
+        }
+    );
+    assert_eq!(fs::read(&target_path).unwrap(), before_target);
+    assert_eq!(
+        fs::read(source.path().join("learning.snapshot.db")).unwrap(),
+        before_source
+    );
+}
+
+#[test]
+fn learning_import_preflight_reports_missing_instead_of_claiming_a_complete_comparison() {
+    for name in [
+        "vault/plain.md",
+        "vault/Attachments/test.png",
+        "learning.snapshot.db",
+    ] {
+        let source = fixture();
+        fs::remove_file(source.path().join(name)).unwrap();
+        assert_eq!(
+            check_fixture_preflight(source.path(), &manifest(), |_| {}).unwrap(),
+            FixturePreflight::Incomplete {
+                required: 1,
+                optional: 0
+            }
+        );
+    }
+    let source = fixture();
+    fs::remove_file(source.path().join("vault/plain.md")).unwrap();
+    let mut optional = manifest();
+    optional["files"][0]["required"] = json!(false);
+    assert_eq!(
+        check_fixture_preflight(source.path(), &optional, |_| {}).unwrap(),
+        FixturePreflight::Incomplete {
+            required: 0,
+            optional: 1
+        }
+    );
+}
+
+#[test]
+fn learning_import_preflight_rejects_row_file_and_between_stage_changes() {
+    let source = fixture();
+    let mut changed_row = manifest();
+    changed_row["tables"]["categories"]["rows"][0]["name"] = json!("different");
+    assert!(check_fixture_preflight(source.path(), &changed_row, |_| {}).is_err());
+    assert!(check_fixture_preflight(source.path(), &manifest(), |root| {
+        let mut changed = PLAIN.to_vec();
+        changed[0] ^= 1;
+        fs::write(root.join("vault/plain.md"), changed).unwrap();
+    })
+    .is_err());
+    fs::write(source.path().join("vault/plain.md"), PLAIN).unwrap();
+    assert!(check_fixture_preflight(source.path(), &manifest(), |root| {
+        fs::remove_file(root.join("vault/plain.md")).unwrap();
+    })
+    .is_err());
+}
+
+#[test]
+fn learning_import_preflight_rejects_nonempty_or_changing_wal_and_bad_manifest_first() {
+    let source = fixture();
+    let wal = source.path().join("learning.snapshot.db-wal");
+    fs::write(&wal, b"not-a-fixed-snapshot").unwrap();
+    assert!(check_fixture_preflight(source.path(), &manifest(), |_| {}).is_err());
+    fs::write(&wal, b"").unwrap();
+    assert!(check_fixture_preflight(source.path(), &manifest(), |root| {
+        fs::write(root.join("learning.snapshot.db-wal"), b"changed").unwrap();
+    })
+    .is_err());
+    let mut invalid = manifest();
+    invalid["version"] = json!(2);
+    let error =
+        check_fixture_preflight(&source.path().join("missing-root"), &invalid, |_| {}).unwrap_err();
+    assert!(error.contains("清单格式"));
+}
+
+#[test]
+fn learning_import_preflight_rejects_raw_duplicate_keys_before_root_access() {
+    let source = fixture();
+    let text = std::str::from_utf8(MANIFEST).unwrap();
+    let duplicate = text.replacen("\"version\": 1,", "\"version\": 1, \"version\": 1,", 1);
+    let error = check_fixture_preflight_bytes(
+        &source.path().join("missing-root"),
+        duplicate.as_bytes(),
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(error.contains("清单格式"));
+}
+
+#[test]
+fn learning_import_preflight_rejects_committed_wal_not_covered_by_main_file_hash() {
+    let source = fixture();
+    let path = source.path().join("learning.snapshot.db");
+    let main_before = fs::read(&path).unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    let _: i64 = writer
+        .query_row("PRAGMA wal_autocheckpoint=0", [], |r| r.get(0))
+        .unwrap();
+    writer.execute("INSERT INTO video_notes(id,item_id,time_ms,content,created_at,updated_at) VALUES('wal-note','course-1',30000,'wal only',1,1)", []).unwrap();
+    drop(writer);
+    let wal = source.path().join("learning.snapshot.db-wal");
+    let wal_before = fs::read(&wal).unwrap();
+    assert!(!wal_before.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), main_before);
+    let error = check_fixture_preflight(source.path(), &manifest(), |_| {}).unwrap_err();
+    assert!(error.contains("活动日志"));
+    assert_eq!(fs::read(&path).unwrap(), main_before);
+    assert_eq!(fs::read(wal).unwrap(), wal_before);
+}
