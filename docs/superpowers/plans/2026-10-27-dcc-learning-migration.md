@@ -83,14 +83,16 @@
 
 ## Task 12c1：库内来源身份及恢复失效
 
-**Files:** 新 `src-tauri/src/learning/schema-v31.sql`、`source_profiles.rs`、`source_profiles_tests.rs`；更新 `learning/mod.rs`、`backup.rs` 的正常与中断恢复、现有 schema 版本断言。无来源文件选择、读取、UI、任务或 Tauri 命令。
+**Files:** 新 `src-tauri/src/learning/schema-v31.sql`、`source_profiles.rs`、`source_profiles_tests.rs`；更新 `learning/mod.rs`、`backup.rs` 的正常与中断恢复、`db.rs` 的旧版迁移及现有 schema 版本断言。无来源文件选择、读取、UI、任务或 Tauri 命令。
 
 **Interface:** 后端内部 `scope(state, expectedLibraryId)` 使用现有 `with_library_if_id` 与 `analysis_store::library_identity` 捕获库 UUID 和规范根摘要；`create(state, scope)`、`get(state, scope, profileId)` 在同一活动库锁内重新核对两者，来源 profile/epoch 由后端生成规范非 nil UUID。v31 只保存 profile ID、固定 `yingliu`、epoch、创建时间；不保存路径、清单提示、密钥或批准，不代表已选择或授权真实来源。`invalidate_epochs(db)` 用于两条恢复路径，使未来本机批准不能因同目录恢复而继承；目前没有 grant 读取器。
 
-- [ ] RED→GREEN：v30→v31 单事务升级和重复打开；人为触发迁移失败时表与版本同时回滚，旧笔记和归档不变。
-- [ ] 两个不同根持相同 marker UUID、切库后旧 scope、未知/非规范 profile ID、缺失表或异常数据均不允许跨库创建或读取。检查新表没有任何源路径或授权字段。
-- [ ] 真正的隔离整库备份恢复和中断恢复分别保留 profile 身份、轮换 epoch；隔离库以外无写入。旧归档来源键保持原样，不根据它自动建立新 profile。
-- [ ] 定向与完整 Rust 回归、构建、格式/凭据检查及本地提交。来源选择与身份绑定、来源映射、用户授权及恢复事务仍属后续步骤；不能把 inert profile 视为授权。
+- [x] RED→GREEN：v30→v31 单事务升级和重复打开；人为触发迁移失败时表与版本同时回滚，旧笔记和归档不变。修正旧迁移降低 schema 版本的问题，验证重新打开不会重建已解除的项目笔记关联。
+- [x] 两个不同根持相同 marker UUID、切库后旧 scope、未知/非规范 profile ID、缺失表或异常数据均不允许跨库创建或读取。检查新表没有任何源路径或授权字段。
+- [x] 真正的隔离整库备份恢复和中断恢复分别保留 profile 身份、轮换 epoch；隔离库以外无写入。旧归档来源键保持原样，不根据它自动建立新 profile。
+- [x] 定向与完整 Rust 回归、构建、格式/凭据检查及本地提交。来源选择与身份绑定、来源映射、用户授权及恢复事务仍属后续步骤；不能把 inert profile 视为授权。见 `docs/evidence/merge/task12c1-source-profiles.md`。
+
+**交付前置风险：** 当前软件版本号尚未改变，已有的自动升级备份依版本号触发，且失败只提示；因此不能把隔离测试视为真实库已获得 v31 升级前备份，也尚未验证旧程序对 v31 的兼容性。真实安装和用户库升级前必须单独处理并验证这两项。
 
 ## 后续顺序（本计划不提前激活）
 

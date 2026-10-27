@@ -234,7 +234,7 @@ fn database_open_installs_compatible_asset_registry() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "30");
+    assert_eq!(version, "31");
 }
 
 #[test]

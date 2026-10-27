@@ -256,7 +256,7 @@ fn learning_note_archive_v26_migration_does_not_rewrite_existing_note_documents(
         },
     )
     .unwrap();
-    db.execute_batch("DROP TABLE learning_note_archive_items; DROP TABLE learning_note_archives; UPDATE schema_meta SET value='26' WHERE key='schema_version';").unwrap();
+    db.execute_batch("DROP TABLE learning_source_profiles; DROP TABLE learning_note_archive_items; DROP TABLE learning_note_archives; UPDATE schema_meta SET value='26' WHERE key='schema_version';").unwrap();
     super::migrate(&db).unwrap();
     super::migrate(&db).unwrap();
     let after = crate::knowledge::get(&db, &saved.id).unwrap();
@@ -276,6 +276,8 @@ fn learning_note_archive_migration_and_backup_restore_keep_bytes_and_registratio
     let bytes = b"\xef\xbb\xbf# Source\r\n[[Unknown]]\r\n";
     let (archive_id, item_id) = source_state
         .with_library(|db, base| {
+            db.execute_batch("DROP TABLE learning_source_profiles;")
+                .unwrap();
             db.execute(
                 "UPDATE schema_meta SET value='26' WHERE key='schema_version'",
                 [],
@@ -290,7 +292,7 @@ fn learning_note_archive_migration_and_backup_restore_keep_bytes_and_registratio
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(version, "30");
+            assert_eq!(version, "31");
             let saved = stored(db, base, bytes);
             let item =
                 add_archive_item(db, base, &saved.id, 3, bytes.len() as u64, "来源").unwrap();

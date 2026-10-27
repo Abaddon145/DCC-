@@ -259,7 +259,7 @@ fn migrate_to_v4(connection: &Connection) -> Result<(), String> {
     }
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','4')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<4",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -269,7 +269,7 @@ fn migrate_to_v4(connection: &Connection) -> Result<(), String> {
 fn migrate_to_v5(connection: &Connection) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','5')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<5",
             [],
         )
         .map_err(|e| format!("升级数据库到 v5 失败：{e}"))?;
@@ -279,7 +279,7 @@ fn migrate_to_v5(connection: &Connection) -> Result<(), String> {
 fn migrate_to_v6(connection: &Connection) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','6')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<6",
             [],
         )
         .map_err(|e| format!("升级数据库到 v6 失败：{e}"))?;
@@ -328,7 +328,7 @@ fn migrate_to_v7(connection: &Connection) -> Result<(), String> {
         .map_err(|e| format!("升级数据库到 v7 失败：{e}"))?;
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','7')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<7",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -2981,6 +2981,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_migrations_never_lower_newer_schema_version() {
+        let (_dir, connection) = setup();
+        for expected in ["31", "99"] {
+            connection
+                .execute(
+                    "UPDATE schema_meta SET value=?1 WHERE key='schema_version'",
+                    [expected],
+                )
+                .unwrap();
+            for migration in [migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7] {
+                migration(&connection).unwrap();
+                let version: String = connection
+                    .query_row(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(version, expected);
+            }
+        }
+    }
+
+    #[test]
     fn retains_legacy_fab_id_only_while_source_is_unchanged() {
         let (dir, mut connection) = setup();
         let mut input: AssetInput = serde_json::from_value(serde_json::json!({
@@ -3350,7 +3374,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "30");
+        assert_eq!(version, "31");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

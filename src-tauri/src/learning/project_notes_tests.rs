@@ -39,6 +39,36 @@ fn note(state: &AppState, project: Option<&str>) -> knowledge::Note {
     let content=project.map(|id|json!({"type":"reference","attrs":{"kind":"project","targetId":id,"label":"原项目引用"}}));
     state.with_library_mut(|db,_|knowledge::save(db,NoteInput{id:None,expected_revision:None,notebook_id:None,title:"学习笔记".into(),document:json!({"type":"doc","content":[{"type":"paragraph","content":content.into_iter().collect::<Vec<_>>()},{"type":"paragraph","content":[{"type":"text","text":"保留的正文"}]}]}),tags:vec![],favorite:false,journal_date:None})).unwrap()
 }
+
+#[test]
+fn learning_project_notes_unlinked_note_is_not_readded_after_library_reopen() {
+    let (root, state, library, course, _) = super::excerpt_runtime_tests::fixture(false);
+    let project_id = project(&state, "项目一");
+    let original = note(&state, Some(&project_id));
+    state.with_library_mut(|db, _| {
+        db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)", params![course, original.id]).unwrap();
+        db.execute("INSERT INTO project_learning_notes(project_id,note_id,created_at) VALUES(?1,?2,'now')", params![project_id,original.id]).unwrap();
+        Ok(())
+    }).unwrap();
+    unlink_in_library(&state, &library, &project_id, &original.id).unwrap();
+    drop(state);
+    let reopened = crate::state::test_state(root.path());
+    assert_eq!(
+        list_in_library(&reopened, &library, &project_id, 0, 20)
+            .unwrap()
+            .total,
+        0
+    );
+    reopened
+        .with_library(|db, _| {
+            assert_eq!(
+                knowledge::get(db, &original.id)?.document,
+                original.document
+            );
+            Ok(())
+        })
+        .unwrap();
+}
 #[test]
 fn learning_project_notes_migration_backfills_real_project_references_once() {
     let (_root, state, library, course, _) = super::excerpt_runtime_tests::fixture(false);
@@ -46,7 +76,7 @@ fn learning_project_notes_migration_backfills_real_project_references_once() {
     let other = project(&state, "项目二");
     let original = note(&state, Some(&first));
     let unrelated = note(&state, Some(&other));
-    state.with_library_mut(|db,_|{db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)",params![course,original.id]).unwrap();db.execute_batch("DROP TABLE IF EXISTS project_learning_notes;UPDATE schema_meta SET value='29' WHERE key='schema_version';").unwrap();super::migrate(db)?;Ok(())}).unwrap();
+    state.with_library_mut(|db,_|{db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)",params![course,original.id]).unwrap();db.execute_batch("DROP TABLE learning_source_profiles;DROP TABLE IF EXISTS project_learning_notes;UPDATE schema_meta SET value='29' WHERE key='schema_version';").unwrap();super::migrate(db)?;Ok(())}).unwrap();
     assert_eq!(
         list_in_library(&state, &library, &first, 0, 20)
             .unwrap()

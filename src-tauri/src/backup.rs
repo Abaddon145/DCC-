@@ -245,6 +245,7 @@ pub fn recover_interrupted_restore(
     before_migration(&active.base_dir);
     let restored = db::open_database(&active.db_path)?;
     crate::media_access::invalidate_external_grants(&restored)?;
+    crate::learning::source_profiles::invalidate_epochs(&restored)?;
     crate::learning::analysis_store::invalidate_previews(&restored)?;
     crate::learning::note_preview::invalidate_previews(&restored)?;
     crate::learning::excerpt_store::invalidate_previews(&restored)?;
@@ -271,6 +272,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         .map_err(|e| format!("备份数据库缺失：{e}"))?;
     let check = db::open_database(&prepared_db)?;
     crate::media_access::invalidate_external_grants(&check)?;
+    crate::learning::source_profiles::invalidate_epochs(&check)?;
     crate::learning::analysis_store::invalidate_previews(&check)?;
     crate::learning::note_preview::invalidate_previews(&check)?;
     crate::learning::excerpt_store::invalidate_previews(&check)?;
@@ -766,7 +768,7 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "30"
+            "31"
         );
         assert_eq!(
             restored
