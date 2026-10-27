@@ -38,6 +38,17 @@
 - [x] 使用现有 serde/uuid 和标准库实现检查；所有错误是通用中文消息，不回显输入内容、外部路径或密钥；不解析、访问或信任 `sampleRootHint`。
 - [x] 定向测试、完整 Rust 回归、构建、格式与凭据检查；写证据与实际边界并独立提交。详见 `docs/evidence/merge/task12a-synthetic-manifest.md`。
 
+## Task 12b1：隔离 SQLite 活动 WAL 快照
+
+**Files:** 新 `src-tauri/src/learning/import_snapshot.rs`、`import_snapshot_tests.rs`；仅在 `learning/mod.rs` 的测试构建注册。仍无用户路径、Tauri 命令、目标库写入或迁移入口。
+
+**Interface:** 合成测试的只读连接生成独立内存快照；调用 rusqlite 已启用的 online backup，限制等待时间，不执行源迁移、checkpoint、journal_mode 写入或调用源服务构造函数。快照只验证 integrity、外键以及 `schema_version` 与 `user_version` 均为 8；该步骤不声明 20 张表、外部文件或生产路径已核验。
+
+- [x] 在临时合成库中保持 WAL 写入连接打开、关闭自动 checkpoint、提交只存在 WAL 的笔记；确认裸主库看不到但快照能看到，读取前后合成 DB/WAL 字节不变，写连接仍可使用。
+- [x] 合成库 schema 版本不支持、数据库损坏、外键不一致或读取被锁时明确失败；锁等待有上限且失败无半份成功快照。
+- [x] 红灯后实现最小只读快照；只针对测试临时目录，不把路径检查误认为用户授权。测试记录 SQLite 可能操作测试库的 `-shm`；真实 Windows 的句柄、ACL 与源文件竞争尚未通过该测试。
+- [x] 定向与完整 Rust 回归、格式/凭据检查，写证据并独立提交。文件摘要、正式来源许可及 manifest 与 SQLite 的行一致性留给 12b2/12c。详见 `docs/evidence/merge/task12b1-synthetic-snapshot.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

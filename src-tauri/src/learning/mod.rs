@@ -77,6 +77,10 @@ pub mod files;
 mod import_manifest;
 #[cfg(test)]
 mod import_manifest_tests;
+#[cfg(test)]
+mod import_snapshot;
+#[cfg(test)]
+mod import_snapshot_tests;
 pub mod models;
 #[cfg(windows)]
 mod native_ipc;
