@@ -135,3 +135,15 @@ Ruling：文件边界先单独证明，正式发布始终由11b2b2b持媒体leas
 - 前端扩展共享LibraryTaskRequest和学习types/API；任务提交显式重建允许字段，丢弃运行时附带的createdAt/status/document/path等额外属性，避免旧笔记入参问题再现。字幕范围与LearningReference共享类型。暂不渲染新界面。
 - RED→GREEN：当前库/错误UUID/根身份、分页和课程隔离、pending取消和已提交回执、来源损坏与单条操作损坏保留、目标查询无副作用；前端invoke形状/字段剔除/期望库传递。运行定向、完整Rust/前端、构建、扫描并本地提交后进入11c2。
 `n- [x] 11c1b：摘录定向51项、前端接口3项通过；完整Rust524通过/2既有忽略，完整前端427通过，构建4.96秒成功。证据 docs/evidence/merge/task11-excerpt-access.md。
+
+### 11c2a 摘录确认组件（BASE1760bd3）
+
+先完成独立组件和行为测试，再由11c2b接学习区选择、当前帧与App精确导航。新增ExcerptComposer.tsx及测试，复用modal-card/backdrop、LoadFeedback、useRequestGate与统一任务API；无依赖或新队列。简单弹窗事实核查GPT-6 Luna medium，主实现inline，不用Astra。
+
+- 外部输入只含当前库/课程、选中cue的ID/字幕ID或明确毫秒范围、可选当前帧和备注；后端生成完整原文/截图。只有用户点击预览才prepare，确认前绝不写笔记/板。
+- 显示后端全字幕、分离时间段、备注和真实截图及警告，默认新笔记，可选项目/已有笔记/板。笔记读取当前revision与顶层插入位置；不把前端正文传到提交。参考板无图禁用。
+- 提交第一次生成operationId后冻结所有目标/预览参数，失败/丢回执允许同请求手动重试或读取持久回执。取消确认操作走后端UUID取消；不通过改参数绕过去重。关闭只收起，后台任务继续。
+- 当前课程分页操作历史可读取/取消pending、查看历史回执；恢复坏preview仍保留receipt，已取消不恢复写入。读取失败显式重试，不清空已有成功结果。显示未提交准备任务的预览入口，避免关窗后丢草稿。
+- 请求门与组件库/课key隔离过期异步响应；modal阻断native、Tab循环/初始焦点/关闭回焦、Esc及外部点击遵守IME。使用已有主题token与有界滚动，原生/DPI人工验收仍Task14。
+- 行为RED->GREEN验证明确确认、同operation重试、历史回执、错库结果拒绝、无图板禁用及键盘关闭；之后完整前端/构建。后端未改不重复Rust全量，沿用本轮524已验证结果。
+`n- [x] 11c2a：新增8个前端行为用例通过；完整前端435项通过，生产构建成功。补恢复目标名称/冻结表单/毫秒时间边界均先失败再通过。证据 docs/evidence/merge/task11-excerpt-composer.md；播放器入口与导航待11c2b。
