@@ -60,6 +60,17 @@
 - [x] 实现固定表名与显式列查询、按类型和多重集比较；不一致明确失败，不把 manifest 路径当权限。列和行完全匹配的 SQLite 虚拟表也必须拒绝。
 - [x] 定向和完整 Rust 回归、格式/凭据检查及独立本地提交。文件身份/外部文件、未声明对象、来源许可和恢复仍属后续步骤；证据见 `docs/evidence/merge/task12b2a-table-parity.md`。
 
+## Task 12b2b：合成原件和附件内容核对
+
+**Files:** 新 `src-tauri/src/learning/import_file_check.rs`、`import_file_check_tests.rs`、少量 `fixtures/yingliu-files/` 合成样例；`learning/mod.rs` 仅测试构建注册，`.gitattributes` 禁止对固定样例换行转换。复用 12a 合成清单检查和 12b2a 快照夹具；长文在临时目录按原样生成并核对摘要。
+
+**Interface:** 测试内部以显式临时根接收合成清单，核验其中声明的 snapshot 和文件的大小、SHA-256 与两次读取的一致性；区别必需及可选文件缺失，不读取 `sampleRootHint`。只返回计数/缺失状态，不提供文件内容或生产路径权限。8 MiB 合成夹具读取上限不是对真实媒体的上限；生产所需授权、文件句柄身份和重解析竞争仍需独立设计。
+
+- [x] 固定双方合成小文件并检查 SHA-256；测试在临时目录构造完整快照、图片、Markdown 和伪视频，不接触真实文件。
+- [x] RED→GREEN：完整文件与快照、必需/可选缺失、内容/长度/摘要变动、重复路径和越界路径、源根缺失及过大样本；错误不泄漏文件内容。
+- [x] 读取过程复核大小、修改时间、双次 SHA 和规范相对路径；Windows 测试使用只读共享方式，仍不声称消除所有真实路径替换竞争。
+- [x] 定向和完整 Rust 回归、格式/凭据检查，写证据并独立提交；未声明文件、活动写入与实际授权留待后续阶段。证据见 `docs/evidence/merge/task12b2b-file-parity.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

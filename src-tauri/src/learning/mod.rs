@@ -74,6 +74,10 @@ mod excerpt_tests;
 pub mod excerpts;
 pub mod files;
 #[cfg(test)]
+mod import_file_check;
+#[cfg(test)]
+mod import_file_check_tests;
+#[cfg(test)]
 mod import_manifest;
 #[cfg(test)]
 mod import_manifest_tests;
