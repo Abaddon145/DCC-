@@ -24,3 +24,8 @@ it("scopes preview receipt history targets and cancellation calls without paths"
   await learningApi.cancelExcerptPreview("library","preview");expect(invoke).toHaveBeenLastCalledWith("cancel_learning_excerpt_preview",{expectedLibraryId:"library",previewId:"preview"});
   await learningApi.cancelExcerptOperation("library","operation");expect(invoke).toHaveBeenLastCalledWith("cancel_learning_excerpt_operation",{expectedLibraryId:"library",operationId:"operation"});
 });
+it("scopes project learning links by library, project and note identities",async()=>{
+  await learningApi.listProjectNotes("library","project",50,50);expect(invoke).toHaveBeenLastCalledWith("list_project_learning_notes",{expectedLibraryId:"library",projectId:"project",offset:50,limit:50});
+  await learningApi.linkProjectNote("library","project","note");expect(invoke).toHaveBeenLastCalledWith("link_project_learning_note",{expectedLibraryId:"library",projectId:"project",noteId:"note"});
+  await learningApi.unlinkProjectNote("library","project","note");expect(invoke).toHaveBeenLastCalledWith("unlink_project_learning_note",{expectedLibraryId:"library",projectId:"project",noteId:"note"});
+});

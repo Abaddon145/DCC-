@@ -14,6 +14,7 @@ vi.mock("./DetailPanel", () => ({ DetailPanel: ({ asset }: { asset: AssetDetail 
 vi.mock("../features/intelligence/api",()=>({intelligenceApi:{listShots:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:200})}}));
 vi.mock("../features/intelligence/shot/ShotPanel",()=>({ShotPanel:({unitId,onSaved}:{unitId?:string;onSaved:(id:string)=>void})=><div>正在登记 {unitId}<button onClick={()=>onSaved("registered")}>完成登记</button></div>}));
 vi.mock("../features/assets/AssetDetail",()=>({AssetDetail:({onClose}:{onClose:()=>void})=><aside><button onClick={onClose}>关闭 Shot 详情</button></aside>}));
+vi.mock("./ProjectLearningNotes",()=>({ProjectLearningNotes:({onOpenNote}:{onOpenNote?:(id:string)=>void})=><button onClick={()=>onOpenNote?.("note-real")}>打开关联笔记</button>}));
 beforeEach(()=>vi.mocked(intelligenceApi.listShots).mockReset().mockResolvedValue({items:[],total:0,offset:0,limit:200}));
 
 const summary: ProjectSummary = {
@@ -45,6 +46,10 @@ async function pointerDrop(source:HTMLElement,target:HTMLElement){
 }
 
 describe("ProjectHub", () => {
+  it("opens project learning materials using the selected note identity",async()=>{
+    const onOpenNote=vi.fn();render(<ProjectHub libraryId="lib" onOpenNote={onOpenNote} contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));fireEvent.click(await screen.findByRole("button",{name:"学习资料"}));fireEvent.click(screen.getByRole("button",{name:"打开关联笔记"}));expect(onOpenNote).toHaveBeenCalledWith("note-real");
+  });
   it("reopens the exact project video and originating tab even without remembered workspace",async()=>{
     const video={...image,id:"video",kind:"video" as const,name:"课程",format:"mp4",projectIds:[summary.id],assetIds:[],files:[{id:"file-1",entryId:"video",role:"main" as const,logicalPath:"originals/video.mp4",originalName:"video.mp4",mimeType:"video/mp4",fileSize:512,checksum:"sha",width:320,height:180,durationMs:60000}]};
     vi.mocked(api.getProject).mockResolvedValue({...detail,media:[video]});vi.mocked(api.getMediaEntry).mockResolvedValue(video);

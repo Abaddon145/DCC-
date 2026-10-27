@@ -14,7 +14,7 @@ vi.mock("./components/TaskCenter",()=>({TaskCenter:()=>null}));
 vi.mock("./components/AssetGrid",()=>({AssetGrid:()=>null}));
 vi.mock("./components/ReliabilitySettings",()=>({AutomaticBackupService:()=>null}));
 vi.mock("./components/MediaLibraryView",()=>({MediaLibraryView:({onLearn,initialEntryId}:{onLearn?:(id:string)=>void;initialEntryId?:string})=><section><button onClick={()=>onLearn?.("media")}>学习此视频</button>{initialEntryId&&<span>视频详情 {initialEntryId}</span>}</section>}));
-vi.mock("./components/ProjectHub",()=>({ProjectHub:({onLearn,initialMediaId,initialProjectId}:{onLearn?:(id:string,projectId:string,context:{tab:string;scroll:number})=>void;initialMediaId?:string;initialProjectId?:string})=><section><button onClick={()=>onLearn?.("media","project",{tab:"units",scroll:123})}>学习项目视频</button>{initialMediaId&&<span>项目视频详情 {initialMediaId} · {initialProjectId}</span>}</section>}));
+vi.mock("./components/ProjectHub",()=>({ProjectHub:({onLearn,onOpenNote,initialMediaId,initialProjectId}:{onLearn?:(id:string,projectId:string,context:{tab:string;scroll:number})=>void;onOpenNote?:(id:string)=>void;initialMediaId?:string;initialProjectId?:string})=><section><button onClick={()=>onLearn?.("media","project",{tab:"units",scroll:123})}>学习项目视频</button><button onClick={()=>onOpenNote?.("project-note")}>打开项目笔记</button>{initialMediaId&&<span>项目视频详情 {initialMediaId} · {initialProjectId}</span>}</section>}));
 vi.mock("./features/learning/ExcerptComposer",()=>({ExcerptComposer:({onOpen}:ExcerptComposerProps)=><section role="dialog" aria-modal="true" aria-label="学习摘录"><button onClick={()=>void onOpen({operationId:"operation",excerptId:"preview",noteId:"saved-note",warnings:[]})}>打开测试笔记</button><button onClick={()=>void onOpen({operationId:"operation",excerptId:"preview",boardId:"saved-board",warnings:[]})}>打开测试参考板</button></section>}));
 vi.mock("./components/ReferenceBoardHub",()=>({ReferenceBoardHub:({initialBoardId}:{initialBoardId:string|null})=><section>参考板详情 {initialBoardId}</section>}));
 beforeEach(()=>{
@@ -35,6 +35,9 @@ it("opens the existing video identity and returns to that exact detail",async()=
 it.each([["打开测试笔记","笔记详情 saved-note"],["打开测试参考板","参考板详情 saved-board"]])("opens the precise saved target via %s",async(button,expected)=>{
   render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));await screen.findByRole("button",{name:"播放"});fireEvent.click(screen.getByRole("button",{name:"创建学习摘录"}));fireEvent.click(screen.getByRole("button",{name:button}));
   expect(await screen.findByText(expected)).toBeInTheDocument();expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
+});
+it("opens an associated project note by its exact identity",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"创作项目"}));fireEvent.click(await screen.findByRole("button",{name:"打开项目笔记"}));expect(await screen.findByText("笔记详情 project-note")).toBeInTheDocument();
 });
 it("opens a verified note range and returns to the same note identity",async()=>{
   const snapshot={sessionId:"note-session",libraryId:"lib",courseId:noteReference.courseId,ready:true,positionMs:0,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[],audioId:null,subtitleId:null,fullscreen:false,error:null,saveError:null};
