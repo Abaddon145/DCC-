@@ -49,6 +49,17 @@
 - [x] 红灯后实现最小只读快照；只针对测试临时目录，不把路径检查误认为用户授权。测试记录 SQLite 可能操作测试库的 `-shm`；真实 Windows 的句柄、ACL 与源文件竞争尚未通过该测试。
 - [x] 定向与完整 Rust 回归、格式/凭据检查，写证据并独立提交。文件摘要、正式来源许可及 manifest 与 SQLite 的行一致性留给 12b2/12c。详见 `docs/evidence/merge/task12b1-synthetic-snapshot.md`。
 
+## Task 12b2a：合成清单与数据库逐表核对
+
+**Files:** 新 `src-tauri/src/learning/import_table_check.rs`、`import_table_check_tests.rs`、`fixtures/yingliu-migration-sample.sqlite`；`learning/mod.rs` 仅测试构建注册；复用 12a 清单形状检查和 12b1 内存快照。无生产路径、UI 或迁入入口。
+
+**Interface:** 对调用方已生成的内存快照和合成 JSON 比较 20 个固定表；逐个确认 SQLite 普通表及 `table_xinfo` 列集合，显式、安全引用列名，忽略列序。按保留重复数量的行多重集比较，保留 NULL/整数/实数/UTF-8 文本类型，拒绝布尔、非有限浮点和 v1 未定义编码的 BLOB。返回已核对行数，不把未知表、外部文件或授权视为已核验。
+
+- [x] 核对并固定双方提供的合成 SQLite 样例 SHA-256，复制到测试夹具；只在测试 TempDir 副本上打开，绝不打开来源工程或真实用户数据库。
+- [x] 先测真实样例、行/列重排、NULL 与空串、整数与实数/布尔、重复行、内容变动、缺列/额外列、BLOB 和不安全列名；确认缺少能力时 RED。
+- [x] 实现固定表名与显式列查询、按类型和多重集比较；不一致明确失败，不把 manifest 路径当权限。列和行完全匹配的 SQLite 虚拟表也必须拒绝。
+- [x] 定向和完整 Rust 回归、格式/凭据检查及独立本地提交。文件身份/外部文件、未声明对象、来源许可和恢复仍属后续步骤；证据见 `docs/evidence/merge/task12b2a-table-parity.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

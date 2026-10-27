@@ -81,6 +81,10 @@ mod import_manifest_tests;
 mod import_snapshot;
 #[cfg(test)]
 mod import_snapshot_tests;
+#[cfg(test)]
+mod import_table_check;
+#[cfg(test)]
+mod import_table_check_tests;
 pub mod models;
 #[cfg(windows)]
 mod native_ipc;
