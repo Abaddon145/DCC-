@@ -195,6 +195,13 @@
 - [x] RED→GREEN：首次创建、重复选择复用、事务故障回滚、旧范围失效；既有来源和用户文件不改变。
 - [x] 测试备份恢复后重新选择及全量回归；身份并非权限或跨设备稳定凭证。详见 `docs/evidence/merge/task12c9-atomic-source.md`。
 
+## Task 12c10：Windows SQLite 实际文件句柄核验
+
+**范围：** 仅使用隔离的合成 Windows SQLite WAL 数据库，验证 SQLite 官方 file-control 接口可否取得实际主库和 WAL 的底层句柄，并与持有的文件句柄按卷序列号和文件索引核对。该实验不接入用户路径或产品读取器，不证明 SHM、缺失侧文件、完整路径授权或跨进程竞争安全。
+
+- [x] 测试主库和 WAL 的 SQLite 句柄确实对应锁定的合成文件，错误文件身份被拒绝，活动写入和 WAL 快照可用。
+- [x] 定向测试、格式及凭据检查，具体限制见 `docs/evidence/merge/task12c10-sqlite-handles.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

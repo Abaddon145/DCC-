@@ -181,6 +181,139 @@ fn synthetic_windows_lease(path: &Path, directory: bool) -> std::fs::File {
 
 #[cfg(windows)]
 #[test]
+fn learning_import_windows_sqlite_journal_pointer_does_not_guarantee_open_wal() {
+    use std::ptr;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("delete-mode.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE test(id INTEGER);").unwrap();
+    let mut journal: *mut rusqlite::ffi::sqlite3_file = ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            db.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_JOURNAL_POINTER,
+            (&mut journal as *mut *mut rusqlite::ffi::sqlite3_file).cast(),
+        )
+    };
+    assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+    assert!(!journal.is_null());
+    assert!(unsafe { (*journal).pMethods }.is_null());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_sqlite_handles_match_leased_database_and_wal() {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, ptr};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    fn file_identity(handle: *mut c_void) -> (u32, u32, u32) {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        assert_ne!(unsafe { GetFileInformationByHandle(handle, &mut info) }, 0);
+        (
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        )
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let path = root.join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+        .unwrap();
+    let wal = root.join("synthetic.db-wal");
+    let unrelated = root.join("other.db");
+    fs::write(&unrelated, b"other").unwrap();
+    let root_lease = synthetic_windows_lease(&root, true);
+    let db_lease = synthetic_windows_lease(&path, false);
+    let wal_lease = synthetic_windows_lease(&wal, false);
+    let other_lease = synthetic_windows_lease(&unrelated, false);
+    let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let mut db_handle: *mut c_void = ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            reader.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+            (&mut db_handle as *mut *mut c_void).cast(),
+        )
+    };
+    assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+    assert!(!db_handle.is_null());
+    assert_eq!(
+        file_identity(db_handle),
+        file_identity(db_lease.as_raw_handle())
+    );
+    assert_ne!(
+        file_identity(db_handle),
+        file_identity(other_lease.as_raw_handle())
+    );
+    let mut journal: *mut rusqlite::ffi::sqlite3_file = ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            reader.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_JOURNAL_POINTER,
+            (&mut journal as *mut *mut rusqlite::ffi::sqlite3_file).cast(),
+        )
+    };
+    assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+    assert!(!journal.is_null());
+    let mut wal_handle: *mut c_void = ptr::null_mut();
+    let methods = unsafe { (*journal).pMethods };
+    assert!(!methods.is_null());
+    let control = unsafe { (*methods).xFileControl }.expect("journal supports file control");
+    let rc = unsafe {
+        control(
+            journal,
+            rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+            (&mut wal_handle as *mut *mut c_void).cast(),
+        )
+    };
+    assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+    assert!(!wal_handle.is_null());
+    assert_eq!(
+        file_identity(wal_handle),
+        file_identity(wal_lease.as_raw_handle())
+    );
+    assert_ne!(
+        file_identity(wal_handle),
+        file_identity(db_lease.as_raw_handle())
+    );
+    writer
+        .execute(
+            "INSERT INTO video_notes VALUES(2,'writer still active')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot_synthetic(&path, Duration::from_secs(2))
+            .unwrap()
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(reader);
+    drop((db_lease, wal_lease, other_lease, root_lease));
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
 fn learning_import_windows_lease_protects_existing_files_while_sqlite_writes() {
     let temp = tempfile::tempdir().unwrap();
     let parent = temp.path().join("parent");
