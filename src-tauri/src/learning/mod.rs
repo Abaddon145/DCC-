@@ -120,6 +120,9 @@ mod import_manifest_tests;
 mod import_ops;
 #[cfg(test)]
 mod import_ops_tests;
+pub mod import_runner;
+#[cfg(test)]
+mod import_runner_tests;
 #[cfg(test)]
 mod import_snapshot;
 #[cfg(test)]

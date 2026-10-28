@@ -256,6 +256,20 @@
 - [x] RED→GREEN：v33→v34 升级与失败回滚；幂等批次；暂存/取消清理；新建提交登记来源；目标修订冲突不覆盖正文；中断后 pending 可列表并取消恢复。
 - [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d1-import-ops.md`。
 
+
+## Task 12d2：迁入批次接入 TaskRegistry
+
+**Files:** 新 `src-tauri/src/learning/import_runner.rs`、`import_runner_tests.rs`；更新 `import_ops.rs`（add/stage 幂等）、`learning/mod.rs`、`tasks.rs`（`TaskRequest::LearningImport`、去重、晚取消保留提交、execute）。无 Tauri 产品命令、无 UI、无真实映流路径读取；Prepare 仅接受调用方已核验的 markdown 字节。
+
+**Interface：**
+- `ImportTaskRequest::Prepare{profile_id,epoch,request_sha256,vault,relative_path,source_sha256,title,document,markdown}` → 校验后 `create_batch`+`add_item`+`stage_item_bytes`；返回 batchId/itemId/status。
+- `ImportTaskRequest::Commit{batch_id}` / `Cancel{batch_id}` → 委托 `import_ops`；Commit 成功晚于 stop 仍记 completed。
+- TaskRegistry：活跃同请求去重；标签「学习资料迁入准备/提交/取消」。
+
+**范围边界：** 不接 12e UI；不打开真实用户 Vault/SQLite；不把清单路径当授权。
+
+- [x] RED→GREEN：Prepare→Commit 经 TaskRegistry；冲突不覆盖正文；去重与取消 Prepare；坏载荷拒入队；晚取消保留已提交。
+- [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d2-task-registry.md`。
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

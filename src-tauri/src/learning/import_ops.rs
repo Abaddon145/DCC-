@@ -329,6 +329,28 @@ pub(super) fn add_item(
             Some((id, rev, hash)) => (Some(id.as_str()), Some(*rev), Some(hash.as_str())),
             None => (None, None, None),
         };
+        if let Some(existing_id) = db
+            .query_row(
+                "SELECT id FROM learning_import_items WHERE batch_id=?1 AND source_key_json=?2",
+                params![item.batch_id, item.source_key_json],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| "无法读取迁入条目")?
+        {
+            let existing = load_item(db, &existing_id)?;
+            let (title, doc, sha): (String, String, String) = db
+                .query_row(
+                    "SELECT title,document_json,source_sha256 FROM learning_import_items WHERE id=?1",
+                    [&existing.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|_| "无法读取迁入条目")?;
+            if title == input.title && doc == document_json && sha == item.source_sha256 {
+                return Ok(existing);
+            }
+            return Err("迁入条目已存在或无法登记".into());
+        }
         db.execute(
             "INSERT INTO learning_import_items(id,batch_id,source_key_json,source_sha256,target_kind,expected_target_id,expected_target_revision,expected_target_sha256,title,document_json,stage_relative,status,conflict_code,target_id,receipt_json,created_at) VALUES(?1,?2,?3,?4,'note',?5,?6,?7,?8,?9,NULL,'pending',NULL,NULL,NULL,?10)",
             params![
@@ -376,6 +398,16 @@ pub(super) fn stage_item_bytes(
             return Err("迁入暂存摘要不匹配".into());
         }
         let relative = stage_relative(&batch.id, &item.id);
+        if item.status == "staged" && item.stage_relative.as_deref() == Some(relative.as_str()) {
+            if let Ok(path) = stage_path(base, &relative) {
+                if path.is_file() {
+                    let on_disk = fs::read(&path).map_err(|_| "无法读取迁入暂存")?;
+                    if on_disk == bytes {
+                        return Ok(item);
+                    }
+                }
+            }
+        }
         write_stage(base, &relative, bytes)?;
         db.execute(
             "UPDATE learning_import_items SET status='staged', stage_relative=?1, conflict_code=NULL WHERE id=?2",
