@@ -8,6 +8,62 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
+fn learning_source_markdown_preview_converts_verified_bytes_without_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    let source = root.join("note.md");
+    let raw = b"# UE5\n\nLearning **assets**\n";
+    fs::write(&source, raw).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let selection = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
+    let result = selection.inspect(&state, "note.md").unwrap();
+    assert_eq!(result.state, note_origins::NoteOriginState::Unmapped);
+    assert_eq!(result.sha256, result.conversion.archive_hash);
+    assert!(!result.conversion.pending);
+    assert!(result
+        .conversion
+        .document
+        .unwrap()
+        .to_string()
+        .contains("UE5"));
+    assert_eq!(fs::read(&source).unwrap(), raw);
+    fs::write(&source, b"![image](missing.png)").unwrap();
+    assert!(
+        selection
+            .inspect(&state, "note.md")
+            .unwrap()
+            .conversion
+            .pending
+    );
+    fs::write(&source, [0xff, 0xfe]).unwrap();
+    let binary = selection.inspect(&state, "note.md").unwrap();
+    assert!(binary.conversion.pending);
+    assert!(binary.conversion.document.is_none());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM knowledge_notes", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn learning_source_vault_selection_binds_root_scope_and_epoch() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");

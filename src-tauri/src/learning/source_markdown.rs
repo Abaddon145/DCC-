@@ -26,6 +26,7 @@ const MAX_MARKDOWN: u64 = 5 * 1024 * 1024;
 pub(super) struct Inspection {
     pub state: NoteOriginState,
     pub sha256: String,
+    pub conversion: super::note_conversion::ConversionPreview,
 }
 
 pub(super) struct MarkdownLease {
@@ -239,6 +240,15 @@ fn inspect_markdown(
         return Err("来源笔记超过 5 MiB".into());
     }
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let conversion = super::note_conversion::convert_source_note(
+        &bytes,
+        &super::note_conversion::AttachmentMap::new(),
+        &super::note_conversion::MediaMap::new(),
+    )?;
     let state = note_origins::inspect_scoped(state, scope, &key, epoch, &sha256)?;
-    Ok(Inspection { state, sha256 })
+    Ok(Inspection {
+        state,
+        sha256,
+        conversion,
+    })
 }
