@@ -17,7 +17,7 @@ pub struct SourceProfile {
     pub created_at: String,
 }
 
-fn valid_uuid(value: &str) -> bool {
+pub(super) fn valid_uuid(value: &str) -> bool {
     Uuid::parse_str(value)
         .is_ok_and(|uuid| !uuid.is_nil() && uuid.hyphenated().to_string() == value)
 }
@@ -41,7 +41,7 @@ pub fn scope(state: &AppState, expected_library_id: &str) -> Result<LibraryScope
         .ok_or_else(|| "素材库已切换".into())
 }
 
-fn scoped<T>(
+pub(super) fn scoped<T>(
     state: &AppState,
     expected: &LibraryScope,
     f: impl FnOnce(&Connection) -> Result<T, String>,
@@ -77,22 +77,24 @@ pub fn create(state: &AppState, expected: &LibraryScope) -> Result<SourceProfile
 }
 
 pub fn get(state: &AppState, expected: &LibraryScope, id: &str) -> Result<SourceProfile, String> {
+    scoped(state, expected, |db| get_in(db, id))
+}
+
+pub(super) fn get_in(db: &Connection, id: &str) -> Result<SourceProfile, String> {
     if !valid_uuid(id) {
         return Err("来源身份无效".into());
     }
-    scoped(state, expected, |db| {
-        let profile = db.query_row("SELECT id,application,access_epoch,created_at FROM learning_source_profiles WHERE id=?1", [id], |row| {
-            Ok(SourceProfile { id:row.get(0)?, application:row.get(1)?, access_epoch:row.get(2)?, created_at:row.get(3)? })
-        }).optional().map_err(|_| "来源身份不可读取")?.ok_or("来源身份不存在")?;
-        if !valid_uuid(&profile.id)
-            || !valid_uuid(&profile.access_epoch)
-            || profile.application != "yingliu"
-            || chrono::DateTime::parse_from_rfc3339(&profile.created_at).is_err()
-        {
-            return Err("来源身份记录损坏".into());
-        }
-        Ok(profile)
-    })
+    let profile = db.query_row("SELECT id,application,access_epoch,created_at FROM learning_source_profiles WHERE id=?1", [id], |row| {
+        Ok(SourceProfile { id:row.get(0)?, application:row.get(1)?, access_epoch:row.get(2)?, created_at:row.get(3)? })
+    }).optional().map_err(|_| "来源身份不可读取")?.ok_or("来源身份不存在")?;
+    if !valid_uuid(&profile.id)
+        || !valid_uuid(&profile.access_epoch)
+        || profile.application != "yingliu"
+        || chrono::DateTime::parse_from_rfc3339(&profile.created_at).is_err()
+    {
+        return Err("来源身份记录损坏".into());
+    }
+    Ok(profile)
 }
 
 /// Restore keeps provenance but invalidates any future local grants bound to an old epoch.

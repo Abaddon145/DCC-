@@ -214,7 +214,7 @@ fn learning_analysis_v25_migration_and_competing_confirmation_keep_identity() {
             |r| r.get(0),
         )
         .unwrap();
-    db.execute_batch("DROP TABLE learning_source_profiles; DROP TABLE learning_analysis_stages; DROP TABLE learning_analyses; DROP TABLE learning_analysis_previews; UPDATE schema_meta SET value='25' WHERE key='schema_version';").unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles; DROP TABLE learning_analysis_stages; DROP TABLE learning_analyses; DROP TABLE learning_analysis_previews; UPDATE schema_meta SET value='25' WHERE key='schema_version';").unwrap();
     drop(db);
     let db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
     assert_eq!(
@@ -230,7 +230,7 @@ fn learning_analysis_v25_migration_and_competing_confirmation_keep_identity() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "31"
+        "32"
     );
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
     let barrier = std::sync::Barrier::new(2);

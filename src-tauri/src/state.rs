@@ -1399,7 +1399,9 @@ mod tests {
         ensure_library(&path, "旧测试库", false).unwrap();
         let connection = db::open_database(&path.join("library.db")).unwrap();
         connection
-            .execute_batch("DROP TABLE learning_source_profiles;")
+            .execute_batch(
+                "DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles;",
+            )
             .unwrap();
         connection
             .execute(
@@ -1541,7 +1543,7 @@ mod tests {
         let id = state.active_library_id().unwrap();
         state
             .with_library(|db, _| {
-                db.execute_batch("DROP TABLE learning_source_profiles;")
+                db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles;")
                     .map_err(|e| e.to_string())?;
                 db.execute(
                     "UPDATE schema_meta SET value='12' WHERE key='schema_version'",

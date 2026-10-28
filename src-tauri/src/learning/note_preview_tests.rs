@@ -180,7 +180,7 @@ fn learning_note_preview_backup_restores_bytes_but_revokes_old_approvals() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "31"
+                "32"
             );
             Ok(())
         })
@@ -218,7 +218,7 @@ fn learning_note_preview_v27_upgrade_keeps_note_json_and_raw_registration() {
     .unwrap();
     let receipt = apply(&mut db, root.path(), &p.id, &grants).unwrap();
     let before = crate::knowledge::get(&db, &receipt.note_id).unwrap();
-    db.execute_batch("DROP TABLE learning_source_profiles; DROP TABLE learning_note_previews; UPDATE schema_meta SET value='27' WHERE key='schema_version'").unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles; DROP TABLE learning_note_previews; UPDATE schema_meta SET value='27' WHERE key='schema_version'").unwrap();
     super::migrate(&db).unwrap();
     super::migrate(&db).unwrap();
     let after = crate::knowledge::get(&db, &before.id).unwrap();
@@ -236,7 +236,7 @@ fn learning_note_preview_v27_upgrade_keeps_note_json_and_raw_registration() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "31"
+        "32"
     );
 }
 

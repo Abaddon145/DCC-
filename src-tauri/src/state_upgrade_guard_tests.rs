@@ -5,7 +5,7 @@ use tempfile::tempdir;
 fn old_library(path: &Path) {
     ensure_library(path, "旧库", false).unwrap();
     let db = db::open_database(&path.join("library.db")).unwrap();
-    db.execute_batch("DROP TABLE learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
     db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
 }
@@ -46,7 +46,7 @@ fn upgrade_schema_guard_backs_up_old_schema_even_when_app_version_matches() {
         &mut None,
     )
     .unwrap();
-    assert_eq!(schema(&path), "31");
+    assert_eq!(schema(&path), "32");
     let record = settings
         .upgrade_backups
         .get(&upgrade_backup::library_key(&path).unwrap())
@@ -120,7 +120,7 @@ fn upgrade_schema_guard_failed_switch_keeps_the_current_library() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "31"
+                "32"
             );
             Ok(())
         })
@@ -414,7 +414,7 @@ fn upgrade_schema_guard_interrupted_restore_can_retry_after_backup_failure() {
     let path = dir.path().join("library");
     let state = test_state(&path);
     state.with_library_mut(|db, _| {
-        db.execute_batch("DROP TABLE learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
+        db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
         db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
         Ok(())
     }).unwrap();
@@ -441,5 +441,5 @@ fn upgrade_schema_guard_interrupted_restore_can_retry_after_backup_failure() {
     fs::remove_file(&blocker).unwrap();
     state.recover_interrupted_restore().unwrap();
     assert!(!marker.exists());
-    assert_eq!(schema(&path), "31");
+    assert_eq!(schema(&path), "32");
 }

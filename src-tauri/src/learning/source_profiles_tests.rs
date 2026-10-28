@@ -21,7 +21,7 @@ fn learning_source_profiles_migrate_v30_once_and_preserve_existing_notes_and_arc
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
     state.with_library_mut(|db, base| {
-        db.execute_batch("DROP TABLE IF EXISTS learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
+        db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version';").unwrap();
         let document = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"原有正文"}]}]});
         let note = knowledge::save(db, NoteInput { id:None, expected_revision:None, notebook_id:None, title:"原笔记".into(), document:document.clone(), tags:vec![], favorite:false, journal_date:None })?;
         let raw = b"\xef\xbb\xbf# original\r\n";
@@ -30,7 +30,7 @@ fn learning_source_profiles_migrate_v30_once_and_preserve_existing_notes_and_arc
         let archived = archive_bytes(db, base, &ArchiveSource { profile_id:&old_profile, source_key:"old/vault.md", version_key:"v1" }, raw, &sha)?;
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "31");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "32");
         assert_eq!(knowledge::get(db, &note.id)?.document, document);
         assert_eq!(read_archive(db, base, &archived.id)?, raw);
         assert_eq!(db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
@@ -46,7 +46,7 @@ fn learning_source_profiles_failed_upgrade_rolls_back_schema_and_version() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
     state.with_library_mut(|db, _| {
-        db.execute_batch("DROP TABLE IF EXISTS learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version'; CREATE TRIGGER reject_v31 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='31' BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+        db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_profiles; UPDATE schema_meta SET value='30' WHERE key='schema_version'; CREATE TRIGGER reject_v31 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='31' BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
         assert!(super::migrate(db).is_err());
         assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "30");
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='learning_source_profiles'", [], |r| r.get::<_,i64>(0)).unwrap(), 0);

@@ -10,7 +10,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 31;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 32;
 pub(crate) const FUTURE_SCHEMA_ERROR: &str = "此素材库由更新版本创建，请使用更新版本打开";
 
 pub(crate) fn schema_version(connection: &Connection) -> Result<u32, String> {
@@ -3436,7 +3436,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "31");
+        assert_eq!(version, "32");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");
