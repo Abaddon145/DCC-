@@ -233,6 +233,12 @@
 - [x] RED→GREEN：源上 `snapshot_synthetic` 仍失败闭合；拷出路径读到已提交 WAL 且源 sidecar 字节不变；缺失 sidecar 拒绝且不创建。
 - [x] 定向测试、格式及凭据检查，见 `docs/evidence/merge/task12c14-sidecar-copy-out.md`。
 
+## Task 12c15：拷出路径撕裂检测与静默点重试
+
+**范围：** 仅在临时合成 Windows WAL 库上，为 12c14 拷出路径增加拷贝前后 SHA-256+长度指纹比对、失败闭合清理与最多 3 次重试；测试钩子注入确定性中途变更。不打开源 SQLite 作产品读取，不接入用户路径；不宣称源上实时并发 RO 已解决。
+
+- [x] RED→GREEN：中途 SHM 变更拒绝且不留下不完整副本；稳定指纹集接受；定向测试见下方凭据。
+- [x] 定向测试、格式及凭据检查，见 `docs/evidence/merge/task12c15-torn-copy-detect.md`。
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

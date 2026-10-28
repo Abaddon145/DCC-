@@ -74,11 +74,64 @@ fn synthetic_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(out)
 }
 
-/// Byte-copy an existing source file while allowing concurrent writers (`FILE_SHARE_READ |
-/// FILE_SHARE_WRITE`, no delete share). Used only to build an isolated sidecar set; the
-/// source is never opened by SQLite on this path.
 #[cfg(windows)]
-fn copy_existing_sidecar_shared(src: &Path, dst: &Path) -> Result<(), String> {
+#[derive(Clone, PartialEq, Eq)]
+struct SidecarFingerprint {
+    len: u64,
+    sha256: [u8; 32],
+}
+
+/// Shared-read open + full-file SHA-256 for an existing sidecar. Fail-closed if missing.
+#[cfg(windows)]
+fn fingerprint_sidecar_shared(path: &Path) -> Result<SidecarFingerprint, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let failed = || "合成来源快照不可用，请重试".to_string();
+    if !path.is_file() {
+        return Err(failed());
+    }
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let mut file = options.open(path).map_err(|_| failed())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut len = 0u64;
+    loop {
+        let n = file.read(&mut buf).map_err(|_| failed())?;
+        if n == 0 {
+            break;
+        }
+        len = len.saturating_add(n as u64);
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&digest);
+    Ok(SidecarFingerprint { len, sha256 })
+}
+
+#[cfg(windows)]
+fn fingerprint_complete_sidecars(
+    source_db: &Path,
+) -> Result<(SidecarFingerprint, SidecarFingerprint, SidecarFingerprint), String> {
+    let wal = synthetic_sidecar_path(source_db, "-wal");
+    let shm = synthetic_sidecar_path(source_db, "-shm");
+    Ok((
+        fingerprint_sidecar_shared(source_db)?,
+        fingerprint_sidecar_shared(&wal)?,
+        fingerprint_sidecar_shared(&shm)?,
+    ))
+}
+
+/// Byte-copy an existing source file while allowing concurrent writers (`FILE_SHARE_READ |
+/// FILE_SHARE_WRITE`, no delete share). Returns the fingerprint of the bytes written.
+#[cfg(windows)]
+fn copy_existing_sidecar_shared(src: &Path, dst: &Path) -> Result<SidecarFingerprint, String> {
+    use sha2::{Digest, Sha256};
     use std::io::Read;
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
@@ -93,17 +146,36 @@ fn copy_existing_sidecar_shared(src: &Path, dst: &Path) -> Result<(), String> {
     let mut file = options.open(src).map_err(|_| failed())?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|_| failed())?;
-    fs::write(dst, bytes).map_err(|_| failed())
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&digest);
+    fs::write(dst, &bytes).map_err(|_| failed())?;
+    Ok(SidecarFingerprint {
+        len: bytes.len() as u64,
+        sha256,
+    })
 }
 
-/// Copy a complete live DB/WAL/SHM trio into `dest_db` (+ `-wal` / `-shm`) under shared-read
-/// leases. Fail-closed if any sidecar is missing; does not create missing source files and
-/// does not open SQLite against the live source. Torn copies under concurrent writers remain
-/// a residual — callers should copy after a committed quiet point when possible.
+/// Copy a complete live DB/WAL/SHM trio into `dest_db` under shared-read leases, then
+/// re-fingerprint the live sources. Fail-closed if any sidecar is missing or if any of
+/// DB/WAL/SHM changed during the copy (torn / mid-write). Does not open SQLite on the source.
 #[cfg(windows)]
 pub(super) fn copy_complete_sidecars_for_snapshot(
     source_db: &Path,
     dest_db: &Path,
+) -> Result<(), String> {
+    copy_complete_sidecars_for_snapshot_with_interference(source_db, dest_db, |_| {})
+}
+
+/// Testable copy path: `interfere` runs after the pre-copy fingerprint and before byte copies,
+/// so tests can mutate a live sidecar and prove torn copies fail closed.
+#[cfg(windows)]
+pub(super) fn copy_complete_sidecars_for_snapshot_with_interference(
+    source_db: &Path,
+    dest_db: &Path,
+    interfere: impl FnOnce(&Path),
 ) -> Result<(), String> {
     let failed = || "合成来源快照不可用，请重试".to_string();
     let source_wal = synthetic_sidecar_path(source_db, "-wal");
@@ -111,28 +183,58 @@ pub(super) fn copy_complete_sidecars_for_snapshot(
     if !source_db.is_file() || !source_wal.is_file() || !source_shm.is_file() {
         return Err(failed());
     }
+    let before = fingerprint_complete_sidecars(source_db)?;
+    interfere(source_db);
     if let Some(parent) = dest_db.parent() {
         fs::create_dir_all(parent).map_err(|_| failed())?;
     }
     let dest_wal = synthetic_sidecar_path(dest_db, "-wal");
     let dest_shm = synthetic_sidecar_path(dest_db, "-shm");
-    copy_existing_sidecar_shared(source_db, dest_db)?;
-    copy_existing_sidecar_shared(&source_wal, &dest_wal)?;
-    copy_existing_sidecar_shared(&source_shm, &dest_shm)?;
+    let copied_db = copy_existing_sidecar_shared(source_db, dest_db)?;
+    let copied_wal = copy_existing_sidecar_shared(&source_wal, &dest_wal)?;
+    let copied_shm = copy_existing_sidecar_shared(&source_shm, &dest_shm)?;
+    // Copied bytes must match the pre-copy quiet fingerprint (detect change mid-copy).
+    if (copied_db, copied_wal, copied_shm) != before {
+        let _ = fs::remove_file(dest_db);
+        let _ = fs::remove_file(&dest_wal);
+        let _ = fs::remove_file(&dest_shm);
+        return Err(failed());
+    }
+    let after = fingerprint_complete_sidecars(source_db)?;
+    if after != before {
+        let _ = fs::remove_file(dest_db);
+        let _ = fs::remove_file(&dest_wal);
+        let _ = fs::remove_file(&dest_shm);
+        return Err(failed());
+    }
     Ok(())
 }
 
-/// Safe concurrent path while a live writer may hold source SHM writable: copy complete
-/// sidecars out, then run the SHM deny-write snapshot against the copy only. Source files are
-/// not opened by SQLite, so this reader cannot mutate source SHM. Not a product grant.
+const SIDECAR_COPY_ATTEMPTS: u32 = 3;
+
+/// Safe concurrent path: copy complete sidecars with before/after SHA-256+size consistency,
+/// retrying a few times if the live writer mutates mid-copy, then deny-write snapshot the
+/// copy only. Fail-closed when every attempt sees a torn/inconsistent set. Not a product grant.
 #[cfg(windows)]
 pub(super) fn snapshot_synthetic_via_sidecar_copy(
     source_db: &Path,
     dest_db: &Path,
     timeout: Duration,
 ) -> Result<Connection, String> {
-    copy_complete_sidecars_for_snapshot(source_db, dest_db)?;
-    snapshot_synthetic(dest_db, timeout)
+    let failed = || "合成来源快照不可用，请重试".to_string();
+    let mut last_err = failed();
+    for _ in 0..SIDECAR_COPY_ATTEMPTS {
+        match copy_complete_sidecars_for_snapshot(source_db, dest_db) {
+            Ok(()) => return snapshot_synthetic(dest_db, timeout),
+            Err(err) => {
+                last_err = err;
+                let _ = fs::remove_file(dest_db);
+                let _ = fs::remove_file(synthetic_sidecar_path(dest_db, "-wal"));
+                let _ = fs::remove_file(synthetic_sidecar_path(dest_db, "-shm"));
+            }
+        }
+    }
+    Err(last_err)
 }
 
 pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Connection, String> {

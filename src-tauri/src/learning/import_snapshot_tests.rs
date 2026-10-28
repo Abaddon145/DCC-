@@ -1,5 +1,7 @@
 #[cfg(windows)]
-use super::import_snapshot::snapshot_synthetic_via_sidecar_copy;
+use super::import_snapshot::{
+    copy_complete_sidecars_for_snapshot_with_interference, snapshot_synthetic_via_sidecar_copy,
+};
 use super::import_snapshot::{snapshot_synthetic, snapshot_synthetic_connection};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -1022,4 +1024,97 @@ fn learning_import_windows_sidecar_copy_out_requires_complete_sidecars() {
     let mut missing_shm = copy_db.as_os_str().to_os_string();
     missing_shm.push("-shm");
     assert!(!std::path::PathBuf::from(missing_shm).exists());
+}
+/// Task12c15: mutating a sidecar after the pre-copy fingerprint must fail closed and leave
+/// no dest files (torn / mid-write detection via SHA-256+size).
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_sidecar_copy_rejects_torn_mid_write_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("torn.db");
+    {
+        let writer = source(&path);
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        writer
+            .execute("INSERT INTO video_notes VALUES(1,'quiet')", [])
+            .unwrap();
+    }
+    let (wal, shm) = sidecar_paths(&path);
+    let shm_before = fs::read(&shm).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let db_before = fs::read(&path).unwrap();
+    let copy_db = temp.path().join("dest").join("copy.db");
+    // Deterministic torn window: flip SHM after pre-copy fingerprint, before byte copies.
+    let err = copy_complete_sidecars_for_snapshot_with_interference(&path, &copy_db, |src| {
+        let mut shm = src.as_os_str().to_os_string();
+        shm.push("-shm");
+        let shm_path = std::path::PathBuf::from(shm);
+        let mut bytes = fs::read(&shm_path).unwrap();
+        if let Some(b) = bytes.last_mut() {
+            *b ^= 0xff;
+        } else {
+            bytes.push(1);
+        }
+        fs::write(&shm_path, bytes).unwrap();
+    });
+    assert!(err.is_err());
+    assert!(!copy_db.exists());
+    let mut missing_wal = copy_db.as_os_str().to_os_string();
+    missing_wal.push("-wal");
+    let mut missing_shm = copy_db.as_os_str().to_os_string();
+    missing_shm.push("-shm");
+    assert!(!std::path::PathBuf::from(missing_wal).exists());
+    assert!(!std::path::PathBuf::from(missing_shm).exists());
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_ne!(fs::read(&shm).unwrap(), shm_before);
+}
+
+/// Quiet-point copy still succeeds under the consistency gate and snapshots WAL rows.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_sidecar_copy_accepts_stable_fingerprint_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("stable.db");
+    let writer = source(&path);
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'stable')", [])
+        .unwrap();
+    let (wal, shm) = sidecar_paths(&path);
+    let before = (
+        fs::read(&path).unwrap(),
+        fs::read(&wal).unwrap(),
+        fs::read(&shm).unwrap(),
+    );
+    let copy_db = temp.path().join("ok.db");
+    let snapshot =
+        snapshot_synthetic_via_sidecar_copy(&path, &copy_db, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        (
+            fs::read(&path).unwrap(),
+            fs::read(&wal).unwrap(),
+            fs::read(&shm).unwrap(),
+        ),
+        before
+    );
+    drop(snapshot);
+    drop(writer);
 }
