@@ -8,6 +8,43 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
+fn learning_source_vault_selection_binds_root_scope_and_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("first.md"), b"first").unwrap();
+    fs::write(root.join("second.md"), b"second").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let selection = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
+    assert!(fs::rename(&root, temp.path().join("replaced")).is_err());
+    assert_eq!(
+        selection.inspect(&state, "first.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    assert_eq!(
+        selection.inspect(&state, "second.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    assert!(selection.inspect(&state, "FIRST.md").is_err());
+    state
+        .with_library(|db, _| source_profiles::invalidate_epochs(db))
+        .unwrap();
+    assert!(selection.inspect(&state, "first.md").is_err());
+    drop(selection);
+    fs::rename(&root, temp.path().join("replaced")).unwrap();
+}
+
+#[test]
 fn learning_source_markdown_checks_real_bytes_and_target_without_writing_either() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
@@ -17,17 +54,16 @@ fn learning_source_markdown_checks_real_bytes_and_target_without_writing_either(
     let state = test_state(&temp.path().join("library"));
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
     let profile = source_profiles::create(&state, &scope).unwrap();
-    let inspect = || {
-        source_markdown::inspect_markdown(
-            &state,
-            &scope,
-            &profile.id,
-            &profile.access_epoch,
-            &root,
-            "vault-id",
-            "note.md",
-        )
-    };
+    let selection = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault-id",
+        &root,
+    )
+    .unwrap();
+    let inspect = || selection.inspect(&state, "note.md");
     assert_eq!(
         inspect().unwrap().state,
         note_origins::NoteOriginState::Unmapped
@@ -91,16 +127,7 @@ fn learning_source_markdown_checks_real_bytes_and_target_without_writing_either(
         note_origins::NoteOriginState::TargetChanged(note_id)
     );
     assert_eq!(fs::read(source).unwrap(), b"original");
-    assert!(source_markdown::inspect_markdown(
-        &state,
-        &scope,
-        &profile.id,
-        &profile.access_epoch,
-        &root,
-        "vault-id",
-        "../other.md"
-    )
-    .is_err());
+    assert!(selection.inspect(&state, "../other.md").is_err());
     state
         .with_library(|db, _| source_profiles::invalidate_epochs(db))
         .unwrap();
@@ -114,16 +141,17 @@ fn learning_source_markdown_rejects_hardlinks_oversize_and_write_during_read() {
     fs::create_dir(&root).unwrap();
     let file = root.join("note.md");
     fs::write(&file, b"test").unwrap();
-    let lease = source_markdown::open_markdown(&root, "note.md").unwrap();
+    let canonical_root = root.canonicalize().unwrap();
+    let lease = source_markdown::open_markdown(&canonical_root, "note.md").unwrap();
     assert!(fs::write(&file, b"other").is_err());
     assert!(fs::rename(&root, temp.path().join("moved")).is_err());
     drop(lease);
     let link = root.join("link.md");
     fs::hard_link(&file, &link).unwrap();
-    assert!(source_markdown::open_markdown(&root, "note.md").is_err());
+    assert!(source_markdown::open_markdown(&canonical_root, "note.md").is_err());
     fs::remove_file(link).unwrap();
     fs::write(&file, vec![0u8; 5 * 1024 * 1024 + 1]).unwrap();
-    assert!(source_markdown::open_markdown(&root, "note.md").is_err());
+    assert!(source_markdown::open_markdown(&canonical_root, "note.md").is_err());
 }
 
 #[test]
@@ -136,6 +164,15 @@ fn learning_source_markdown_scope_does_not_revive_after_switch() {
     let state = test_state(&temp.path().join("library"));
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
     let profile = source_profiles::create(&state, &scope).unwrap();
+    let selection = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
     state
         .change_library(StorageChangeRequest {
             mode: "create".into(),
@@ -143,14 +180,13 @@ fn learning_source_markdown_scope_does_not_revive_after_switch() {
             name: Some("其他".into()),
         })
         .unwrap();
-    assert!(source_markdown::inspect_markdown(
-        &state,
-        &scope,
-        &profile.id,
-        &profile.access_epoch,
-        &root,
-        "vault",
-        "note.md"
-    )
-    .is_err());
+    assert!(selection.inspect(&state, "note.md").is_err());
+    state
+        .change_library(StorageChangeRequest {
+            mode: "open".into(),
+            path: temp.path().join("library").to_string_lossy().into_owned(),
+            name: None,
+        })
+        .unwrap();
+    assert!(selection.inspect(&state, "note.md").is_err());
 }

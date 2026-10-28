@@ -17,8 +17,8 @@ use std::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 const MAX_MARKDOWN: u64 = 5 * 1024 * 1024;
@@ -33,6 +33,76 @@ pub(super) struct MarkdownLease {
     _directories: Vec<File>,
 }
 
+pub(super) struct VaultSelection {
+    scope: LibraryScope,
+    profile: String,
+    epoch: String,
+    vault: String,
+    root: PathBuf,
+    _directories: Vec<File>,
+}
+
+/// In-memory selection only: the caller must obtain separate permission before invoking this.
+pub(super) fn select_vault(
+    state: &AppState,
+    scope: &LibraryScope,
+    profile: &str,
+    epoch: &str,
+    vault: &str,
+    root: &Path,
+) -> Result<VaultSelection, String> {
+    NoteOriginKey::new(profile, vault, "selection.md")?;
+    if source_profiles::get(state, scope, profile)?.access_epoch != epoch {
+        return Err("来源状态已变化，请重新检查".into());
+    }
+    if !root.is_absolute() {
+        return Err("来源目录无效".into());
+    }
+    crate::media_access::reject_links(root)?;
+    let canonical = root.canonicalize().map_err(|_| "来源目录不可用")?;
+    if canonical
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .starts_with(r"\\?\unc\")
+    {
+        return Err("不支持网络来源目录".into());
+    }
+    crate::media_access::reject_links(&canonical)?;
+    let mut parents: Vec<_> = canonical.ancestors().collect();
+    parents.reverse();
+    let mut directories = Vec::with_capacity(parents.len());
+    for parent in parents {
+        directories.push(open_checked(parent, true)?);
+    }
+    if root.canonicalize().map_err(|_| "来源目录已变化")? != canonical
+        || source_profiles::get(state, scope, profile)?.access_epoch != epoch
+    {
+        return Err("来源状态已变化，请重新检查".into());
+    }
+    Ok(VaultSelection {
+        scope: scope.clone(),
+        profile: profile.into(),
+        epoch: epoch.into(),
+        vault: vault.into(),
+        root: canonical,
+        _directories: directories,
+    })
+}
+
+impl VaultSelection {
+    pub(super) fn inspect(&self, state: &AppState, relative: &str) -> Result<Inspection, String> {
+        inspect_markdown(
+            state,
+            &self.scope,
+            &self.profile,
+            &self.epoch,
+            &self.root,
+            &self.vault,
+            relative,
+        )
+    }
+}
+
 fn open_checked(path: &Path, directory: bool) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true).share_mode(if directory {
@@ -41,7 +111,7 @@ fn open_checked(path: &Path, directory: bool) -> Result<File, String> {
         FILE_SHARE_READ
     });
     if directory {
-        options.access_mode(FILE_READ_ATTRIBUTES);
+        options.access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
     }
     options.custom_flags(
         FILE_FLAG_OPEN_REPARSE_POINT
@@ -96,7 +166,11 @@ pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease
         return Err("来源笔记路径无效".into());
     }
     crate::media_access::reject_links(root)?;
+    let expected_root = root;
     let root = root.canonicalize().map_err(|_| "来源目录不可用")?;
+    if root != expected_root {
+        return Err("来源目录已变化，请重新选择".into());
+    }
     if root
         .to_string_lossy()
         .to_ascii_lowercase()
@@ -110,6 +184,13 @@ pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease
     let canonical = path.canonicalize().map_err(|_| "来源笔记不可用")?;
     if !canonical.starts_with(&root) {
         return Err("来源笔记不在所选目录中".into());
+    }
+    if canonical
+        .strip_prefix(&root)
+        .map_err(|_| "来源笔记路径无效")?
+        != Path::new(relative)
+    {
+        return Err("来源笔记路径与实际文件名不一致".into());
     }
     let mut parents: Vec<_> = canonical
         .parent()
@@ -131,7 +212,7 @@ pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease
     })
 }
 
-pub(super) fn inspect_markdown(
+fn inspect_markdown(
     state: &AppState,
     scope: &LibraryScope,
     profile: &str,
