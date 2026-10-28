@@ -235,3 +235,100 @@ fn learning_import_windows_lease_does_not_protect_absent_sidecars() {
     assert_eq!(fs::read(&wal).unwrap(), b"new sidecar");
     drop((db_lease, root_lease));
 }
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_cross_process_child() {
+    if !std::env::args().any(|arg| arg == "--exact") {
+        return;
+    }
+    let Some(root) = std::env::var_os("STACKDCC_LEASE_TEST_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root).canonicalize().unwrap();
+    let temp = std::env::temp_dir().canonicalize().unwrap();
+    assert!(root.starts_with(&temp));
+    assert_eq!(root.file_name().unwrap(), "source");
+    assert_eq!(root.parent().unwrap().file_name().unwrap(), "parent");
+    let token = std::env::var("STACKDCC_LEASE_TEST_TOKEN").unwrap();
+    assert!(uuid::Uuid::parse_str(&token).is_ok());
+    assert_eq!(
+        fs::read_to_string(root.join(".lease-fixture")).unwrap(),
+        token
+    );
+    let parent = root.parent().unwrap();
+    assert!(fs::rename(parent, parent.with_file_name("replaced-parent")).is_err());
+    let db = root.join("synthetic.db");
+    assert!(fs::rename(&db, root.join("replaced.db")).is_err());
+    assert!(fs::rename(root.join("synthetic.db-wal"), root.join("replaced-wal")).is_err());
+    assert!(fs::rename(root.join("synthetic.db-shm"), root.join("replaced-shm")).is_err());
+    let writer = Connection::open(db).unwrap();
+    writer
+        .execute("INSERT INTO video_notes VALUES(2,'separate process')", [])
+        .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_cross_process_lease_allows_sqlite_writer() {
+    use std::process::{Command, Stdio};
+    let temp = tempfile::tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let root = parent.join("source");
+    fs::create_dir_all(&root).unwrap();
+    let token = uuid::Uuid::new_v4().to_string();
+    fs::write(root.join(".lease-fixture"), &token).unwrap();
+    let path = root.join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'first process')", [])
+        .unwrap();
+    let parent_lease = synthetic_windows_lease(&parent, true);
+    let root_lease = synthetic_windows_lease(&root, true);
+    let db_lease = synthetic_windows_lease(&path, false);
+    let wal_lease = synthetic_windows_lease(&root.join("synthetic.db-wal"), false);
+    let shm_lease = synthetic_windows_lease(&root.join("synthetic.db-shm"), false);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "learning::import_snapshot_tests::learning_import_windows_cross_process_child",
+            "--nocapture",
+        ])
+        .env("STACKDCC_LEASE_TEST_ROOT", &root)
+        .env("STACKDCC_LEASE_TEST_TOKEN", &token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("synthetic child exceeded deadline");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(snapshot);
+    drop((db_lease, wal_lease, shm_lease, root_lease, parent_lease));
+    drop(writer);
+}
