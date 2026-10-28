@@ -655,3 +655,148 @@ fn learning_import_windows_cross_process_lease_allows_sqlite_writer() {
     drop((db_lease, wal_lease, shm_lease, root_lease, parent_lease));
     drop(writer);
 }
+#[cfg(windows)]
+fn sidecar_paths(path: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    (std::path::PathBuf::from(wal), std::path::PathBuf::from(shm))
+}
+
+/// Documents the 12c11 residual hazard: a plain READ_ONLY open after the writer exits
+/// still mutates the existing -shm bytes on Windows bundled SQLite.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_default_readonly_open_mutates_shm_after_writer_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("hazard.db");
+    {
+        let writer = source(&path);
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        writer
+            .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+            .unwrap();
+    }
+    let (wal, shm) = sidecar_paths(&path);
+    assert!(wal.exists());
+    assert!(shm.exists());
+    let shm_before = fs::read(&shm).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let db_before = fs::read(&path).unwrap();
+    {
+        let reader = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        reader
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_ne!(
+        fs::read(&shm).unwrap(),
+        shm_before,
+        "plain READ_ONLY open must still be treated as SHM-mutating"
+    );
+}
+
+/// Safe synthetic path: deny-write SHM lease + plain READ_ONLY preserves closed-writer
+/// SHM bytes and still completes an online Backup of WAL-committed rows.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_shm_deny_write_lease_preserves_shm_and_snapshots_wal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("safe.db");
+    {
+        let writer = source(&path);
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        writer
+            .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+            .unwrap();
+    }
+    let (wal, shm) = sidecar_paths(&path);
+    let shm_before = fs::read(&shm).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let db_before = fs::read(&path).unwrap();
+    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(
+        fs::read(&shm).unwrap(),
+        shm_before,
+        "deny-write SHM lease must not allow reader write/truncate of closed-writer SHM"
+    );
+}
+
+/// Holding the SHM handle with FILE_SHARE_READ (deny write to others) also stops a
+/// plain READ_ONLY open from mutating SHM after the writer has exited.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_shm_share_read_lease_blocks_reader_shm_writes() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("lease.db");
+    {
+        let writer = source(&path);
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        writer
+            .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+            .unwrap();
+    }
+    let (_, shm) = sidecar_paths(&path);
+    let shm_before = fs::read(&shm).unwrap();
+    let mut options = fs::OpenOptions::new();
+    options.read(true).share_mode(FILE_SHARE_READ);
+    let _shm_lease = options.open(&shm).unwrap();
+    {
+        let reader = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(fs::read(&shm).unwrap(), shm_before);
+}

@@ -9,14 +9,68 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Connection, String> {
+#[cfg(windows)]
+use std::fs;
+
+/// Synthetic read-only connection plus an optional Windows `-shm` deny-write lease.
+/// The lease must outlive the connection so SQLite cannot reopen `-shm` for write/truncate.
+pub(super) struct SyntheticReadonlySource {
+    connection: Connection,
+    #[cfg(windows)]
+    _shm_deny_write: Option<std::fs::File>,
+}
+
+impl SyntheticReadonlySource {
+    pub(super) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+/// Open a synthetic source for isolated snapshots.
+///
+/// On Windows, when `-shm` already exists, hold it with `FILE_SHARE_READ` only before the
+/// plain `READ_ONLY` open. That stops the reader from writing or truncating closed-writer
+/// SHM while still allowing online Backup. (`readonly_shm=1` also freezes SHM bytes for
+/// queries, but hangs Backup on the bundled SQLite — do not use it for this path.)
+///
+/// Not a product grant. If an active writer already holds SHM writable, the deny-write
+/// lease is skipped and SHM may still change; that residual remains open.
+pub(super) fn open_synthetic_readonly_source(
+    path: &Path,
+) -> Result<SyntheticReadonlySource, String> {
     let failed = || "合成来源快照不可用，请重试".to_string();
-    let source = Connection::open_with_flags(
+    #[cfg(windows)]
+    let shm_deny_write = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let mut shm = path.as_os_str().to_os_string();
+        shm.push("-shm");
+        let shm_path = Path::new(&shm);
+        if shm_path.is_file() {
+            let mut options = fs::OpenOptions::new();
+            options.read(true).share_mode(FILE_SHARE_READ);
+            // Sharing violation means an active writer (or incompatible lease) already
+            // holds SHM writable; fall back to plain READ_ONLY and accept SHM may change.
+            options.open(shm_path).ok()
+        } else {
+            None
+        }
+    };
+    let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| failed())?;
-    snapshot_synthetic_connection(&source, timeout)
+    Ok(SyntheticReadonlySource {
+        connection,
+        #[cfg(windows)]
+        _shm_deny_write: shm_deny_write,
+    })
+}
+
+pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Connection, String> {
+    let source = open_synthetic_readonly_source(path)?;
+    snapshot_synthetic_connection(source.connection(), timeout)
 }
 
 pub(super) fn snapshot_synthetic_connection(

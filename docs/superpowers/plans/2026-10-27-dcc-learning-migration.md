@@ -209,6 +209,14 @@
 - [x] RED→GREEN：sidecar 齐全时可获取包含 WAL 的快照且写入继续；缺失时不打开 SQLite、不创建文件；路径替换失败。
 - [x] 定向测试、格式及凭据检查，测试环境与剩余边界见 `docs/evidence/merge/task12c11-sidecar-snapshot.md`。
 
+
+## Task 12c12：关闭写入端后的 SHM 只读控制
+
+**范围：** 仅在临时合成 Windows WAL 库上，验证写入端退出后普通只读打开仍会改写 `-shm`，并用 SHM 的 `FILE_SHARE_READ` deny-write 租约在 snapshot 路径上阻止该写入，同时保持 online Backup 可用。不接入用户路径或产品读取器；活动写入端已持有可写 SHM 时租约回退，该竞争未关闭。
+
+- [x] RED→GREEN：默认只读打开改写关闭写入端后的 SHM；deny-write 租约路径快照保留 SHM/WAL/DB 且读到 WAL 行；独立 SHARE_READ 租约同样挡住读者写 SHM。
+- [x] 记录 `readonly_shm=1` 与 Backup 不兼容、活动写入端残留；定向测试、格式及凭据检查，见 `docs/evidence/merge/task12c12-shm-readonly-control.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。
