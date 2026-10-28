@@ -68,6 +68,73 @@ pub(super) fn open_synthetic_readonly_source(
     })
 }
 
+fn synthetic_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut out = path.as_os_str().to_os_string();
+    out.push(suffix);
+    std::path::PathBuf::from(out)
+}
+
+/// Byte-copy an existing source file while allowing concurrent writers (`FILE_SHARE_READ |
+/// FILE_SHARE_WRITE`, no delete share). Used only to build an isolated sidecar set; the
+/// source is never opened by SQLite on this path.
+#[cfg(windows)]
+fn copy_existing_sidecar_shared(src: &Path, dst: &Path) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let failed = || "合成来源快照不可用，请重试".to_string();
+    if !src.is_file() {
+        return Err(failed());
+    }
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let mut file = options.open(src).map_err(|_| failed())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| failed())?;
+    fs::write(dst, bytes).map_err(|_| failed())
+}
+
+/// Copy a complete live DB/WAL/SHM trio into `dest_db` (+ `-wal` / `-shm`) under shared-read
+/// leases. Fail-closed if any sidecar is missing; does not create missing source files and
+/// does not open SQLite against the live source. Torn copies under concurrent writers remain
+/// a residual — callers should copy after a committed quiet point when possible.
+#[cfg(windows)]
+pub(super) fn copy_complete_sidecars_for_snapshot(
+    source_db: &Path,
+    dest_db: &Path,
+) -> Result<(), String> {
+    let failed = || "合成来源快照不可用，请重试".to_string();
+    let source_wal = synthetic_sidecar_path(source_db, "-wal");
+    let source_shm = synthetic_sidecar_path(source_db, "-shm");
+    if !source_db.is_file() || !source_wal.is_file() || !source_shm.is_file() {
+        return Err(failed());
+    }
+    if let Some(parent) = dest_db.parent() {
+        fs::create_dir_all(parent).map_err(|_| failed())?;
+    }
+    let dest_wal = synthetic_sidecar_path(dest_db, "-wal");
+    let dest_shm = synthetic_sidecar_path(dest_db, "-shm");
+    copy_existing_sidecar_shared(source_db, dest_db)?;
+    copy_existing_sidecar_shared(&source_wal, &dest_wal)?;
+    copy_existing_sidecar_shared(&source_shm, &dest_shm)?;
+    Ok(())
+}
+
+/// Safe concurrent path while a live writer may hold source SHM writable: copy complete
+/// sidecars out, then run the SHM deny-write snapshot against the copy only. Source files are
+/// not opened by SQLite, so this reader cannot mutate source SHM. Not a product grant.
+#[cfg(windows)]
+pub(super) fn snapshot_synthetic_via_sidecar_copy(
+    source_db: &Path,
+    dest_db: &Path,
+    timeout: Duration,
+) -> Result<Connection, String> {
+    copy_complete_sidecars_for_snapshot(source_db, dest_db)?;
+    snapshot_synthetic(dest_db, timeout)
+}
+
 pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Connection, String> {
     let source = open_synthetic_readonly_source(path)?;
     snapshot_synthetic_connection(source.connection(), timeout)

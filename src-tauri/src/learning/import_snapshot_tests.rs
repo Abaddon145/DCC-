@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use super::import_snapshot::snapshot_synthetic_via_sidecar_copy;
 use super::import_snapshot::{snapshot_synthetic, snapshot_synthetic_connection};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -63,44 +65,66 @@ fn learning_import_snapshot_reads_wal_without_changing_source_database_or_wal() 
     );
     drop(incomplete);
 
-    // Concurrent live-writer visibility still works via an explicitly non-SHM-safe open.
-    let live_reader = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .unwrap();
-    let live_snapshot =
-        snapshot_synthetic_connection(&live_reader, Duration::from_secs(2)).unwrap();
-    assert_eq!(
-        live_snapshot
-            .query_row("SELECT count(*) FROM video_notes", [], |r| r
-                .get::<_, u64>(0))
-            .unwrap(),
-        2
-    );
-    writer
-        .execute(
-            "INSERT INTO video_notes VALUES(3,'writer still active')",
-            [],
-        )
-        .unwrap();
-    assert_eq!(
-        live_snapshot
-            .query_row("SELECT count(*) FROM video_notes", [], |r| r
-                .get::<_, u64>(0))
-            .unwrap(),
-        2
-    );
-    drop(live_snapshot);
-    drop(live_reader);
-
     #[cfg(windows)]
     {
-        // Task12c13: SHM-safe helper must fail closed while the writer holds SHM writable.
+        // Task12c14: copy-out under shared leases, then SHM-safe snapshot on the copy only.
         assert!(shm.is_file());
         let shm_before = fs::read(&shm).unwrap();
+        let wal_live = fs::read(&wal).unwrap();
+        let db_live = fs::read(&path).unwrap();
         assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+        let copy_db = temp.path().join("sidecar-copy.db");
+        let live_snapshot =
+            snapshot_synthetic_via_sidecar_copy(&path, &copy_db, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            live_snapshot
+                .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(fs::read(&path).unwrap(), db_live);
+        assert_eq!(fs::read(&wal).unwrap(), wal_live);
         assert_eq!(fs::read(&shm).unwrap(), shm_before);
+        drop(live_snapshot);
+        writer
+            .execute(
+                "INSERT INTO video_notes VALUES(3,'writer still active')",
+                [],
+            )
+            .unwrap();
+    }
+    #[cfg(not(windows))]
+    {
+        let live_reader = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        let live_snapshot =
+            snapshot_synthetic_connection(&live_reader, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            live_snapshot
+                .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        writer
+            .execute(
+                "INSERT INTO video_notes VALUES(3,'writer still active')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            live_snapshot
+                .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        drop(live_snapshot);
+        drop(live_reader);
     }
 
     drop(writer);
@@ -927,4 +951,75 @@ fn learning_import_windows_active_writer_plain_readonly_still_reads_wal_unsafely
     drop(snapshot);
     drop(reader);
     drop(writer);
+}
+/// Task12c14: while a writer holds SHM writable, copy complete sidecars under shared-read
+/// leases and snapshot only the copy — source SHM/WAL/DB bytes stay unchanged.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_sidecar_copy_out_snapshots_wal_without_mutating_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("live.db");
+    let writer = source(&path);
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'committed')", [])
+        .unwrap();
+    let (wal, shm) = sidecar_paths(&path);
+    let shm_before = fs::read(&shm).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let db_before = fs::read(&path).unwrap();
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+    let copy_db = temp.path().join("out").join("copy.db");
+    let snapshot =
+        snapshot_synthetic_via_sidecar_copy(&path, &copy_db, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(fs::read(&shm).unwrap(), shm_before);
+    writer
+        .execute("INSERT INTO video_notes VALUES(2,'still writable')", [])
+        .unwrap();
+    drop(snapshot);
+    drop(writer);
+}
+
+/// Missing sidecars refuse copy-out without creating files or opening SQLite on the source.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_sidecar_copy_out_requires_complete_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("incomplete.db");
+    {
+        let writer = source(&path);
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        writer
+            .execute("INSERT INTO video_notes VALUES(1,'x')", [])
+            .unwrap();
+    }
+    let (wal, shm) = sidecar_paths(&path);
+    assert!(wal.exists() && shm.exists());
+    fs::remove_file(&shm).unwrap();
+    let copy_db = temp.path().join("copy.db");
+    assert!(snapshot_synthetic_via_sidecar_copy(&path, &copy_db, Duration::from_secs(2)).is_err());
+    assert!(!shm.exists());
+    assert!(!copy_db.exists());
+    let mut missing_shm = copy_db.as_os_str().to_os_string();
+    missing_shm.push("-shm");
+    assert!(!std::path::PathBuf::from(missing_shm).exists());
 }
