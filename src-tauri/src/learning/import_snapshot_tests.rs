@@ -153,3 +153,85 @@ fn learning_import_snapshot_busy_source_fails_in_bounded_time() {
     assert!(started.elapsed() < Duration::from_secs(5));
     writer.execute_batch("ROLLBACK;").unwrap();
 }
+
+#[cfg(windows)]
+fn synthetic_windows_lease(path: &Path, directory: bool) -> std::fs::File {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+    let file = options.open(path).unwrap();
+    let metadata = file.metadata().unwrap();
+    assert_eq!(metadata.file_attributes() & 0x400, 0);
+    assert_eq!(metadata.is_dir(), directory);
+    file
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_lease_protects_existing_files_while_sqlite_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let root = parent.join("source");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal')", [])
+        .unwrap();
+    let wal = root.join("synthetic.db-wal");
+    let shm = root.join("synthetic.db-shm");
+    assert!(wal.is_file() && shm.is_file());
+    let parent_lease = synthetic_windows_lease(&parent, true);
+    let root_lease = synthetic_windows_lease(&root, true);
+    let db_lease = synthetic_windows_lease(&path, false);
+    let wal_lease = synthetic_windows_lease(&wal, false);
+    let shm_lease = synthetic_windows_lease(&shm, false);
+    assert!(fs::rename(&parent, temp.path().join("replaced-parent")).is_err());
+    assert!(fs::rename(&path, root.join("replaced.db")).is_err());
+    assert!(fs::rename(&wal, root.join("replaced-wal")).is_err());
+    assert!(fs::rename(&shm, root.join("replaced-shm")).is_err());
+    writer
+        .execute("INSERT INTO video_notes VALUES(2,'still writable')", [])
+        .unwrap();
+    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(snapshot);
+    drop((db_lease, wal_lease, shm_lease, root_lease, parent_lease));
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_lease_does_not_protect_absent_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let db = root.join("synthetic.db");
+    let wal = root.join("synthetic.db-wal");
+    fs::write(&db, b"fixture").unwrap();
+    let root_lease = synthetic_windows_lease(&root, true);
+    let db_lease = synthetic_windows_lease(&db, false);
+    assert!(!wal.exists());
+    fs::write(&wal, b"new sidecar").unwrap();
+    assert_eq!(fs::read(&wal).unwrap(), b"new sidecar");
+    drop((db_lease, root_lease));
+}
