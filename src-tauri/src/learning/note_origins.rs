@@ -53,6 +53,14 @@ fn valid_hash(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+fn hash_piece<T: serde::Serialize>(hash: &mut Sha256, kind: u8, value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|_| "目标笔记不可读取")?;
+    hash.update([kind]);
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+    Ok(())
+}
+
 fn note_snapshot(db: &Connection, id: &str) -> Result<Option<(i64, String)>, String> {
     let deleted: Option<Option<String>> = db
         .query_row(
@@ -66,11 +74,42 @@ fn note_snapshot(db: &Connection, id: &str) -> Result<Option<(i64, String)>, Str
         return Ok(None);
     }
     let note = crate::knowledge::get(db, id).map_err(|_| "目标笔记不可读取")?;
-    let bytes = serde_json::to_vec(&note).map_err(|_| "目标笔记不可读取")?;
-    Ok(Some((
-        note.revision,
-        format!("{:x}", Sha256::digest(bytes)),
-    )))
+    let mut hash = Sha256::new();
+    hash.update(b"dcc-note-origin-v2");
+    hash_piece(&mut hash, 0, &note)?;
+    let mut attachments = db.prepare("SELECT id,filename,relative_path,mime,sha256,size,created_at FROM knowledge_attachments WHERE note_id=?1 ORDER BY id")
+        .map_err(|_| "目标笔记附件不可读取")?;
+    let rows = attachments
+        .query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|_| "目标笔记附件不可读取")?;
+    for row in rows {
+        hash_piece(&mut hash, 1, &row.map_err(|_| "目标笔记附件不可读取")?)?;
+    }
+    let mut references = db.prepare("SELECT target_kind,target_id,label FROM knowledge_references WHERE note_id=?1 ORDER BY target_kind,target_id")
+        .map_err(|_| "目标笔记引用不可读取")?;
+    let rows = references
+        .query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| "目标笔记引用不可读取")?;
+    for row in rows {
+        hash_piece(&mut hash, 2, &row.map_err(|_| "目标笔记引用不可读取")?)?;
+    }
+    Ok(Some((note.revision, format!("{:x}", hash.finalize()))))
 }
 
 fn check_epoch(db: &Connection, key: &NoteOriginKey, expected_epoch: &str) -> Result<(), String> {
@@ -89,8 +128,11 @@ pub(super) fn inspect_scoped(
     source_hash: &str,
 ) -> Result<NoteOriginState, String> {
     source_profiles::scoped(state, scope, |db| {
-        check_epoch(db, key, expected_epoch)?;
-        inspect(db, key, source_hash)
+        let tx = db.unchecked_transaction().map_err(|_| "无法检查笔记来源")?;
+        check_epoch(&tx, key, expected_epoch)?;
+        let result = inspect(&tx, key, source_hash)?;
+        tx.commit().map_err(|_| "无法检查笔记来源")?;
+        Ok(result)
     })
 }
 

@@ -4,6 +4,7 @@ use crate::{
     state::{test_state, AppState},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 fn profile(state: &AppState) -> source_profiles::SourceProfile {
     let scope = source_profiles::scope(state, &state.active_library_id().unwrap()).unwrap();
@@ -244,6 +245,44 @@ fn learning_note_origins_detect_source_target_trash_and_deletion() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn learning_note_origins_detect_attachment_and_reference_changes_without_note_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let source = profile(&state);
+    let first_key = note_origins::NoteOriginKey::new(&source.id, "vault", "first.md").unwrap();
+    let second_key = note_origins::NoteOriginKey::new(&source.id, "vault", "second.md").unwrap();
+    let sha = "a".repeat(64);
+    let attachment_path = temp.path().join("attachment.txt");
+    std::fs::write(&attachment_path, b"user attachment").unwrap();
+    state.with_library_mut(|db, base| {
+        let first = knowledge::save(db, input("附件笔记"))?;
+        let second = knowledge::save(db, input("引用笔记"))?;
+        let tx = db.transaction().unwrap();
+        note_origins::record_note_in(&tx, &first_key, &first.id, &sha, &source.access_epoch)?;
+        note_origins::record_note_in(&tx, &second_key, &second.id, &sha, &source.access_epoch)?;
+        tx.commit().unwrap();
+        assert_eq!(note_origins::inspect(db, &first_key, &sha)?, note_origins::NoteOriginState::Unchanged(first.id.clone()));
+        assert_eq!(note_origins::inspect(db, &first_key, &sha)?, note_origins::NoteOriginState::Unchanged(first.id.clone()));
+        let current_hash: String = db.query_row("SELECT target_sha256 FROM learning_origin_map WHERE target_id=?1", [&first.id], |row| row.get(0)).unwrap();
+        let old_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&first).unwrap()));
+        db.execute("UPDATE learning_origin_map SET target_sha256=?1 WHERE target_id=?2", rusqlite::params![old_hash, first.id]).unwrap();
+        assert_eq!(note_origins::inspect(db, &first_key, &sha)?, note_origins::NoteOriginState::TargetChanged(first.id.clone()));
+        db.execute("UPDATE learning_origin_map SET target_sha256=?1 WHERE target_id=?2", rusqlite::params![current_hash, first.id]).unwrap();
+        let attachment = crate::knowledge_files::import(db, base, &first.id, &attachment_path)?;
+        assert_eq!(knowledge::get(db, &first.id)?.revision, first.revision);
+        assert_eq!(note_origins::inspect(db, &first_key, &sha)?, note_origins::NoteOriginState::TargetChanged(first.id.clone()));
+        db.execute("INSERT INTO knowledge_references(note_id,target_kind,target_id,label) VALUES(?1,'asset','user-asset','用户引用')", [&second.id]).unwrap();
+        assert_eq!(knowledge::get(db, &second.id)?.revision, second.revision);
+        assert_eq!(note_origins::inspect(db, &second_key, &sha)?, note_origins::NoteOriginState::TargetChanged(second.id.clone()));
+        assert_eq!(knowledge::get(db, &first.id)?.document, first.document);
+        assert_eq!(knowledge::get(db, &second.id)?.document, second.document);
+        db.execute("UPDATE knowledge_attachments SET size='corrupt' WHERE id=?1", [&attachment.id]).unwrap();
+        assert!(note_origins::inspect(db, &first_key, &sha).is_err());
+        Ok(())
+    }).unwrap();
 }
 
 #[test]
