@@ -49,6 +49,15 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if version < 33 {
+        tx.execute_batch(include_str!("schema-v33.sql"))
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE schema_meta SET value='33' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;

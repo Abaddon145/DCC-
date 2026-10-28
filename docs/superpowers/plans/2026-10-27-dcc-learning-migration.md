@@ -174,6 +174,13 @@
 - [x] RED→GREEN：真实临时 Markdown 的转换内容与来源摘要一致；附件未解析和无效 UTF-8 保守待处理，原文件与目标库未修改。
 - [x] 定向和完整测试、构建及凭据检查，见 `docs/evidence/merge/task12c6-note-preflight.md`。
 
+## Task 12c7：来源 Vault 身份登记
+
+**范围：** schema v33 新建来源 profile + Vault 身份绑定；仅保存锁定目录句柄所得的本机卷与文件标识，不存源路径和访问授权。首次登记须在用户明确选择后的事务中完成；已有绑定只能匹配复用，旧 profile 已有笔记映射但没有 Vault 绑定时拒绝自动绑定。恢复仍轮换 epoch，身份不是读取授权或跨机器稳定标识。
+
+- [x] RED→GREEN：空库首次登记、相同身份重试、不同目录拒绝、旧映射不自动绑定；v32→v33、失败回滚和备份恢复保留映射。
+- [x] 保留旧素材与功能，完整回归、构建、凭据检查；真实目录选择 UI 和跨设备重定位仍待实现。详见 `docs/evidence/merge/task12c7-vault-identity.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

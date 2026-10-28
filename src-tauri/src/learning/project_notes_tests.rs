@@ -76,7 +76,7 @@ fn learning_project_notes_migration_backfills_real_project_references_once() {
     let other = project(&state, "项目二");
     let original = note(&state, Some(&first));
     let unrelated = note(&state, Some(&other));
-    state.with_library_mut(|db,_|{db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)",params![course,original.id]).unwrap();db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles;DROP TABLE IF EXISTS project_learning_notes;UPDATE schema_meta SET value='29' WHERE key='schema_version';").unwrap();super::migrate(db)?;Ok(())}).unwrap();
+    state.with_library_mut(|db,_|{db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)",params![course,original.id]).unwrap();db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles;DROP TABLE IF EXISTS project_learning_notes;UPDATE schema_meta SET value='29' WHERE key='schema_version';").unwrap();super::migrate(db)?;Ok(())}).unwrap();
     assert_eq!(
         list_in_library(&state, &library, &first, 0, 20)
             .unwrap()

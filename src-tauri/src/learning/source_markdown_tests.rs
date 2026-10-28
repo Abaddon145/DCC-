@@ -8,6 +8,175 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
+fn learning_source_vault_identity_cannot_be_silently_rebound() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let other = temp.path().join("other");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&other).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let selected = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &first,
+    )
+    .unwrap();
+    selected.register_identity(&state).unwrap();
+    selected.register_identity(&state).unwrap();
+    let replacement = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &other,
+    )
+    .unwrap();
+    assert!(replacement.register_identity(&state).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_vault_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_source_vault_identity_rejects_binding_old_note_mappings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::save(
+                db,
+                NoteInput {
+                    id: None,
+                    expected_revision: None,
+                    notebook_id: None,
+                    title: "保留".into(),
+                    document: json!({"type":"doc","content":[]}),
+                    tags: vec![],
+                    favorite: false,
+                    journal_date: None,
+                },
+            )?;
+            let key = note_origins::NoteOriginKey::new(&profile.id, "vault", "note.md")?;
+            let tx = db.transaction().unwrap();
+            note_origins::record_note_in(
+                &tx,
+                &key,
+                &note.id,
+                &"a".repeat(64),
+                &profile.access_epoch,
+            )?;
+            tx.commit().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let selected = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
+    assert!(selected.register_identity(&state).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_vault_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_origin_map", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_source_vault_identity_survives_backup_and_revokes_old_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let selected = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
+    selected.register_identity(&state).unwrap();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state
+        .with_active_mut(|active| crate::backup::restore_library(active, &backup))
+        .unwrap();
+    assert!(selected.register_identity(&state).is_err());
+    let restored = source_profiles::get(&state, &scope, &profile.id).unwrap();
+    assert_ne!(restored.access_epoch, profile.access_epoch);
+    let fresh = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &restored.access_epoch,
+        "vault",
+        &root,
+    )
+    .unwrap();
+    fresh.register_identity(&state).unwrap();
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_vault_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn learning_source_markdown_preview_converts_verified_bytes_without_writing() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");

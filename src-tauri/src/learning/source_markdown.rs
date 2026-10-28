@@ -91,6 +91,46 @@ pub(super) fn select_vault(
 }
 
 impl VaultSelection {
+    /// Record identity only after an explicit source choice; this is not an access grant.
+    pub(super) fn register_identity(&self, state: &AppState) -> Result<(), String> {
+        let root = self._directories.last().ok_or("来源目录不可用")?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(root.as_raw_handle(), &mut info) } == 0
+            || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0)
+        {
+            return Err("无法确认来源目录身份".into());
+        }
+        let identity = format!(
+            "win1:{:08x}:{:08x}{:08x}",
+            info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+        );
+        source_profiles::scoped(state, &self.scope, |db| {
+            let tx =
+                rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|_| "无法登记来源目录")?;
+            if source_profiles::get_in(&tx, &self.profile)?.access_epoch != self.epoch {
+                return Err("来源状态已变化，请重新检查".into());
+            }
+            let existing: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
+                "SELECT root_identity FROM learning_source_vault_bindings WHERE source_profile_id=?1 AND vault_id=?2",
+                rusqlite::params![self.profile, self.vault], |row| row.get(0),
+            )).map_err(|_| "无法检查来源目录身份")?;
+            match existing {
+                Some(value) if value == identity => {}
+                Some(_) => return Err("所选目录与原来源不同，请重新核对".into()),
+                None => {
+                    let prior: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM learning_origin_map WHERE source_profile_id=?1)", [&self.profile], |row| row.get(0)).map_err(|_| "无法检查原有来源映射")?;
+                    if prior {
+                        return Err("原有来源尚无目录身份，请先人工核对".into());
+                    }
+                    tx.execute("INSERT INTO learning_source_vault_bindings(source_profile_id,vault_id,root_identity) VALUES(?1,?2,?3)", rusqlite::params![self.profile, self.vault, identity]).map_err(|_| "无法登记来源目录")?;
+                }
+            }
+            tx.commit().map_err(|_| "无法保存来源目录身份")?;
+            Ok(())
+        })
+    }
+
     pub(super) fn inspect(&self, state: &AppState, relative: &str) -> Result<Inspection, String> {
         inspect_markdown(
             state,

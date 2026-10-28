@@ -964,7 +964,7 @@ fn prompt_trash_restore_purge_keeps_external_assets_and_shared_tags() {
 }
 fn downgrade_registry_to_v21(db: &Connection) {
     // v21 has no Shot synchronization trigger; don't leave a v23 trigger in this old-schema fixture.
-    db.execute_batch("DROP TRIGGER IF EXISTS shot_unit_sync; DROP TABLE IF EXISTS learning_origin_map; DROP TABLE learning_source_profiles;")
+    db.execute_batch("DROP TRIGGER IF EXISTS shot_unit_sync; DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles;")
         .unwrap();
     db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER asset_core_version_cleanup; CREATE TABLE registry_v21(id TEXT PRIMARY KEY,legacy_asset_id TEXT UNIQUE REFERENCES assets(id) ON DELETE CASCADE,media_entry_id TEXT UNIQUE REFERENCES media_entries(id) ON DELETE CASCADE,created_at TEXT NOT NULL,CHECK((legacy_asset_id IS NULL)<>(media_entry_id IS NULL))); INSERT INTO registry_v21(id,legacy_asset_id,media_entry_id,created_at) SELECT id,legacy_asset_id,media_entry_id,created_at FROM asset_core; DROP TABLE asset_core; ALTER TABLE registry_v21 RENAME TO asset_core;").unwrap();
     db.execute_batch(include_str!("schema.sql")).unwrap();
@@ -1490,7 +1490,7 @@ fn acceptance_asset_network_backup_restores_identity_analysis_and_soft_delete() 
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "32"
+        "33"
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM asset_relations", [], |r| r

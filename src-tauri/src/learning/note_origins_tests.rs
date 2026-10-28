@@ -292,7 +292,7 @@ fn learning_note_origins_upgrade_is_transactional() {
     let source = profile(&state);
     state.with_library_mut(|db, _| {
         let note = knowledge::save(db, input("旧笔记"))?;
-        db.execute_batch("DROP TABLE learning_origin_map; UPDATE schema_meta SET value='31' WHERE key='schema_version'; CREATE TRIGGER reject_v32 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='32' BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+        db.execute_batch("DROP TABLE learning_source_vault_bindings; DROP TABLE learning_origin_map; UPDATE schema_meta SET value='31' WHERE key='schema_version'; CREATE TRIGGER reject_v32 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='32' BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
         assert!(super::migrate(db).is_err());
         assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "31");
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='learning_origin_map'", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
@@ -300,7 +300,7 @@ fn learning_note_origins_upgrade_is_transactional() {
         db.execute_batch("DROP TRIGGER reject_v32;").unwrap();
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "32");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "33");
         assert_eq!(db.query_row("SELECT count(*) FROM learning_source_profiles WHERE id=?1", [&source.id], |r| r.get::<_,i64>(0)).unwrap(), 1);
         Ok(())
     }).unwrap();
