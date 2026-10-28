@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub struct LibraryScope {
     library_id: String,
     root_hash: String,
+    session_nonce: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,9 +34,14 @@ pub fn scope(state: &AppState, expected_library_id: &str) -> Result<LibraryScope
             if library_id != expected_library_id {
                 return Err("素材库身份已变化".into());
             }
+            let session_nonce = *state
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?;
             Ok(LibraryScope {
                 library_id,
                 root_hash,
+                session_nonce,
             })
         })?
         .ok_or_else(|| "素材库已切换".into())
@@ -54,6 +60,14 @@ pub(super) fn scoped<T>(
             let current = super::analysis_store::library_identity(base)?;
             if current != (expected.library_id.clone(), expected.root_hash.clone()) {
                 return Err("素材库身份已变化".into());
+            }
+            if *state
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?
+                != expected.session_nonce
+            {
+                return Err("素材库会话已变化，请重新检查来源".into());
             }
             f(db)
         })?

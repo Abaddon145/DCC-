@@ -79,6 +79,21 @@ fn learning_note_origins_check_library_scope_and_epoch() {
     assert!(
         note_origins::inspect_scoped(&state, &scope, &key, &source.access_epoch, &sha).is_err()
     );
+    state
+        .change_library(crate::models::StorageChangeRequest {
+            mode: "open".into(),
+            path: temp.path().join("library").to_string_lossy().into_owned(),
+            name: None,
+        })
+        .unwrap();
+    assert!(
+        note_origins::inspect_scoped(&state, &scope, &key, &source.access_epoch, &sha).is_err()
+    );
+    let fresh = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    assert_eq!(
+        note_origins::inspect_scoped(&state, &fresh, &key, &source.access_epoch, &sha).unwrap(),
+        note_origins::NoteOriginState::Unmapped
+    );
 }
 
 #[test]

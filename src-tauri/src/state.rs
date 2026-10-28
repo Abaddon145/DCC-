@@ -113,6 +113,7 @@ pub struct AppState {
     settings: Mutex<AppSettings>,
     startup_warning: Mutex<Option<String>>,
     pub active: Mutex<ActiveLibrary>,
+    pub(crate) source_scope_nonce: Mutex<Uuid>,
     link_check_job: Mutex<Option<Arc<AtomicBool>>>,
     pending_move_undo: Mutex<Option<PendingMoveUndo>>,
     reference_window_board: Mutex<Option<String>>,
@@ -311,6 +312,7 @@ impl AppState {
             settings: Mutex::new(settings),
             startup_warning: Mutex::new(warning),
             active: Mutex::new(active),
+            source_scope_nonce: Mutex::new(Uuid::new_v4()),
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
@@ -783,6 +785,11 @@ impl AppState {
         // Enqueue takes this same lock: a switch cannot pass an idle check while a task submits.
         self.tasks
             .ensure_library_change_allowed(&active.marker.library_id, migration_task)?;
+        // Lock order: active library first, then the source-session nonce.
+        let mut source_scope_nonce = self
+            .source_scope_nonce
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
         self.cancel_link_check()?;
         if let Ok(mut pending) = self.pending_move_undo.lock() {
             *pending = None;
@@ -830,6 +837,8 @@ impl AppState {
         touch_recent(&mut settings, &target);
         write_settings(&self.settings_path, &settings)?;
         *active = next;
+        *source_scope_nonce = Uuid::new_v4();
+        drop(source_scope_nonce);
         crate::note_moves::clear_undo();
         drop(settings);
         drop(active);
@@ -1377,6 +1386,7 @@ pub(crate) fn test_state(path: &Path) -> AppState {
         settings: Mutex::new(settings),
         startup_warning: Mutex::new(warning),
         active: Mutex::new(active),
+        source_scope_nonce: Mutex::new(Uuid::new_v4()),
         link_check_job: Mutex::new(None),
         pending_move_undo: Mutex::new(None),
         reference_window_board: Mutex::new(None),

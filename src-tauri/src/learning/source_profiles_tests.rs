@@ -129,6 +129,103 @@ fn learning_source_profiles_scope_root_and_switch_without_authorizing_a_source()
 }
 
 #[test]
+fn learning_source_profiles_scope_cannot_cross_state_instances_or_failed_switch() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("library");
+    let first = test_state(&path);
+    let first_scope = scope(&first);
+    let profile = source_profiles::create(&first, &first_scope).unwrap();
+    let second = test_state(&path);
+    assert!(source_profiles::get(&second, &first_scope, &profile.id).is_err());
+    assert_eq!(
+        source_profiles::get(&second, &scope(&second), &profile.id)
+            .unwrap()
+            .id,
+        profile.id
+    );
+    assert!(first
+        .change_library(StorageChangeRequest {
+            mode: "open".into(),
+            path: temp.path().join("missing").to_string_lossy().into_owned(),
+            name: None,
+        })
+        .is_err());
+    assert_eq!(
+        source_profiles::get(&first, &first_scope, &profile.id)
+            .unwrap()
+            .id,
+        profile.id
+    );
+    let blocked_parent = temp.path().join("blocked");
+    fs::create_dir(&blocked_parent).unwrap();
+    let blocked_path = blocked_parent.join("library");
+    drop(test_state(&blocked_path));
+    let old = Connection::open(blocked_path.join("library.db")).unwrap();
+    old.execute_batch("DROP TABLE learning_origin_map; UPDATE schema_meta SET value='31' WHERE key='schema_version';").unwrap();
+    drop(old);
+    fs::write(blocked_parent.join("升级前自动备份"), b"not a directory").unwrap();
+    assert!(first
+        .change_library(StorageChangeRequest {
+            mode: "open".into(),
+            path: blocked_path.to_string_lossy().into_owned(),
+            name: None,
+        })
+        .is_err());
+    assert_eq!(
+        source_profiles::get(&first, &first_scope, &profile.id)
+            .unwrap()
+            .id,
+        profile.id
+    );
+}
+
+#[test]
+fn learning_source_profiles_scope_and_switch_serialize_without_deadlock() {
+    use std::{
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let state = Arc::new(test_state(&temp.path().join("first")));
+    let old_scope = scope(&state);
+    let profile = source_profiles::create(&state, &old_scope).unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let reading = Arc::clone(&state);
+    let reading_scope = old_scope.clone();
+    let reader = std::thread::spawn(move || {
+        source_profiles::scoped(&reading, &reading_scope, |_| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| "测试超时".to_string())?;
+            Ok(())
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let switching = Arc::clone(&state);
+    let target = temp.path().join("other");
+    let (done_tx, done_rx) = mpsc::channel();
+    let switcher = std::thread::spawn(move || {
+        let result = switching.change_library(StorageChangeRequest {
+            mode: "create".into(),
+            path: target.to_string_lossy().into_owned(),
+            name: Some("另一库".into()),
+        });
+        done_tx.send(result.map(|_| ())).unwrap();
+    });
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    release_tx.send(()).unwrap();
+    reader.join().unwrap().unwrap();
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    switcher.join().unwrap();
+    assert!(source_profiles::get(&state, &old_scope, &profile.id).is_err());
+}
+
+#[test]
 fn learning_source_profiles_reject_corrupt_records_and_missing_table() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
