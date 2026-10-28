@@ -58,6 +58,15 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if version < 34 {
+        tx.execute_batch(include_str!("schema-v34.sql"))
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE schema_meta SET value='34' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;
@@ -108,6 +117,9 @@ mod import_file_check_tests;
 mod import_manifest;
 #[cfg(test)]
 mod import_manifest_tests;
+mod import_ops;
+#[cfg(test)]
+mod import_ops_tests;
 #[cfg(test)]
 mod import_snapshot;
 #[cfg(test)]

@@ -10,6 +10,20 @@ pub struct LibraryScope {
     session_nonce: Uuid,
 }
 
+impl LibraryScope {
+    pub(crate) fn library_id(&self) -> &str {
+        &self.library_id
+    }
+
+    pub(crate) fn root_hash(&self) -> &str {
+        &self.root_hash
+    }
+
+    pub(crate) fn session_nonce(&self) -> Uuid {
+        self.session_nonce
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceProfile {
     pub id: String,

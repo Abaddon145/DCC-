@@ -239,6 +239,23 @@
 
 - [x] RED→GREEN：中途 SHM 变更拒绝且不留下不完整副本；稳定指纹集接受；定向测试见下方凭据。
 - [x] 定向测试、格式及凭据检查，见 `docs/evidence/merge/task12c15-torn-copy-detect.md`。
+## Task 12d1：持久迁入批次与条目恢复底稿
+
+**Files:** 新 `src-tauri/src/learning/schema-v34.sql`、`import_ops.rs`、`import_ops_tests.rs`；更新 `learning/mod.rs`（schema 33→34）、`source_profiles.rs`（scope 只读访问器）；同步现有“当前 schema=33”断言到 34。无 Tauri 命令、无 UI、无真实映流路径读取；调用方必须已提供核验过的字节与摘要。
+
+**Interface（内部 `pub(super)`）：**
+- `create_batch(state, scope, profile_id, epoch, request_sha256) -> Batch`：校验 scope/epoch；同库同请求摘要的 pending/committed 批次幂等返回；不授权来源读取。
+- `add_item(state, scope, batch_id, NewItem{source_key, source_sha256, title, document_json, expected_target?}) -> Item`：仅 pending 批次；`source_key` 为 Markdown 结构化键；同批次同键拒绝冲突登记。
+- `stage_item_bytes(state, scope, batch_id, item_id, bytes)`：写入库根下 `.dcc/runtime/imports/<batch>/<item>.md`（原子写入），核对 SHA-256 与声明一致后标 `staged`；超限/摘要不符失败闭合且不留半份成功登记。
+- `commit_batch(state, scope, batch_id)`：逐项在同一库事务外按项处理——`Unmapped` 用 `knowledge::save_in` 新建笔记并 `record_note_in`；`Unchanged` 不改正文仅标已提交；`SourceChanged`/`TargetChanged`/`BothChanged`/`TargetUnavailable` 标 `conflict` **绝不覆盖正文**；已提交项删除对应暂存。批次写入 receipt（计数），状态 `committed`（可含冲突项）。
+- `cancel_batch(state, scope, batch_id)`：pending/staged/conflict 项改为 cancelled，删除暂存文件，批次 `cancelled`。
+- `list_batches(state, scope) -> Vec<Batch>`：只读列出本库批次（含中断遗留的 pending）。
+
+**范围边界：** 不接入任务中心 UI（12d2/12e）；不打开真实用户 Vault/SQLite；不把清单路径当授权；暂存属 runtime 可清理，不是原文归档。
+
+- [x] RED→GREEN：v33→v34 升级与失败回滚；幂等批次；暂存/取消清理；新建提交登记来源；目标修订冲突不覆盖正文；中断后 pending 可列表并取消恢复。
+- [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d1-import-ops.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。
