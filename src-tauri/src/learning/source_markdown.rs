@@ -56,6 +56,21 @@ pub(super) fn select_vault(
     if source_profiles::get(state, scope, profile)?.access_epoch != epoch {
         return Err("来源状态已变化，请重新检查".into());
     }
+    let (canonical, directories) = lock_vault_root(root)?;
+    if source_profiles::get(state, scope, profile)?.access_epoch != epoch {
+        return Err("来源状态已变化，请重新检查".into());
+    }
+    Ok(VaultSelection {
+        scope: scope.clone(),
+        profile: profile.into(),
+        epoch: epoch.into(),
+        vault: vault.into(),
+        root: canonical,
+        _directories: directories,
+    })
+}
+
+fn lock_vault_root(root: &Path) -> Result<(PathBuf, Vec<File>), String> {
     if !root.is_absolute() {
         return Err("来源目录无效".into());
     }
@@ -75,19 +90,61 @@ pub(super) fn select_vault(
     for parent in parents {
         directories.push(open_checked(parent, true)?);
     }
-    if root.canonicalize().map_err(|_| "来源目录已变化")? != canonical
-        || source_profiles::get(state, scope, profile)?.access_epoch != epoch
-    {
-        return Err("来源状态已变化，请重新检查".into());
+    if root.canonicalize().map_err(|_| "来源目录已变化")? != canonical {
+        return Err("来源目录已变化，请重新选择".into());
     }
-    Ok(VaultSelection {
+    Ok((canonical, directories))
+}
+
+/// The caller must obtain explicit permission before selecting a source directory.
+pub(super) fn create_vault_source(
+    state: &AppState,
+    scope: &LibraryScope,
+    vault: &str,
+    root: &Path,
+) -> Result<VaultSelection, String> {
+    let candidate = uuid::Uuid::new_v4().to_string();
+    NoteOriginKey::new(&candidate, vault, "selection.md")?;
+    source_profiles::scoped(state, scope, |_| Ok(()))?;
+    let (canonical, directories) = lock_vault_root(root)?;
+    let mut selection = VaultSelection {
         scope: scope.clone(),
-        profile: profile.into(),
-        epoch: epoch.into(),
+        profile: candidate,
+        epoch: uuid::Uuid::new_v4().to_string(),
         vault: vault.into(),
         root: canonical,
         _directories: directories,
-    })
+    };
+    let identity = selection.root_identity()?;
+    let profile = source_profiles::scoped(state, scope, |db| {
+        let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| "无法登记来源目录")?;
+        let ids = {
+            let mut statement = tx.prepare("SELECT source_profile_id FROM learning_source_vault_bindings WHERE vault_id=?1 AND root_identity=?2 LIMIT 2").map_err(|_| "无法检查来源身份")?;
+            let rows = statement
+                .query_map(rusqlite::params![vault, identity], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|_| "无法检查来源身份")?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "无法检查来源身份")?
+        };
+        let profile = match ids.as_slice() {
+            [id] => source_profiles::get_in(&tx, id)?,
+            [] => {
+                let created = chrono::Utc::now().to_rfc3339();
+                tx.execute("INSERT INTO learning_source_profiles(id,application,access_epoch,created_at) VALUES(?1,'yingliu',?2,?3)", rusqlite::params![selection.profile, selection.epoch, created]).map_err(|_| "无法保存来源身份")?;
+                tx.execute("INSERT INTO learning_source_vault_bindings(source_profile_id,vault_id,root_identity) VALUES(?1,?2,?3)", rusqlite::params![selection.profile, vault, identity]).map_err(|_| "无法登记来源目录")?;
+                source_profiles::get_in(&tx, &selection.profile)?
+            }
+            _ => return Err("来源身份存在多个匹配，请人工核对".into()),
+        };
+        tx.commit().map_err(|_| "无法保存来源身份")?;
+        Ok(profile)
+    })?;
+    selection.profile = profile.id;
+    selection.epoch = profile.access_epoch;
+    Ok(selection)
 }
 
 impl VaultSelection {

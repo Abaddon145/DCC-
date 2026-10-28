@@ -8,6 +8,177 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
+fn learning_source_vault_create_concurrent_choices_reuse_one_profile() {
+    use std::sync::{Arc, Barrier};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    let state = Arc::new(test_state(&temp.path().join("library")));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|threads| {
+        let calls = (0..2)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                let scope = scope.clone();
+                let root = root.clone();
+                threads.spawn(move || {
+                    barrier.wait();
+                    source_markdown::create_vault_source(&state, &scope, "vault", &root).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert!(call.join().unwrap());
+        }
+    });
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_vault_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_source_vault_create_rejects_ambiguous_existing_bindings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    for _ in 0..2 {
+        let profile = source_profiles::create(&state, &scope).unwrap();
+        let selected = source_markdown::select_vault(
+            &state,
+            &scope,
+            &profile.id,
+            &profile.access_epoch,
+            "vault",
+            &root,
+        )
+        .unwrap();
+        selected.register_identity(&state).unwrap();
+    }
+    assert!(source_markdown::create_vault_source(&state, &scope, "vault", &root).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_source_vault_create_is_atomic_and_reuses_same_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("note.md"), b"# UE").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    state.with_library(|db, _| { db.execute_batch("CREATE TRIGGER fail_binding BEFORE INSERT ON learning_source_vault_bindings BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap(); Ok(()) }).unwrap();
+    assert!(source_markdown::create_vault_source(&state, &scope, "vault", &root).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            db.execute_batch("DROP TRIGGER fail_binding;").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let first = source_markdown::create_vault_source(&state, &scope, "vault", &root).unwrap();
+    assert_eq!(
+        first.inspect(&state, "note.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    let again = source_markdown::create_vault_source(&state, &scope, "vault", &root).unwrap();
+    assert_eq!(
+        again.inspect(&state, "note.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_vault_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    let backup = temp.path().join("source.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state
+        .with_active_mut(|active| crate::backup::restore_library(active, &backup))
+        .unwrap();
+    assert!(first.inspect(&state, "note.md").is_err());
+    let after_restore =
+        source_markdown::create_vault_source(&state, &scope, "vault", &root).unwrap();
+    assert_eq!(
+        after_restore.inspect(&state, "note.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn learning_source_vault_inspect_requires_registered_matching_identity() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("first");
@@ -462,6 +633,7 @@ fn learning_source_markdown_scope_does_not_revive_after_switch() {
         })
         .unwrap();
     assert!(selection.inspect(&state, "note.md").is_err());
+    assert!(source_markdown::create_vault_source(&state, &scope, "vault", &root).is_err());
     state
         .change_library(StorageChangeRequest {
             mode: "open".into(),
