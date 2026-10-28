@@ -139,6 +139,10 @@ mod note_preview_tests;
 pub mod project_notes;
 #[cfg(test)]
 mod project_notes_tests;
+#[cfg(windows)]
+mod source_markdown;
+#[cfg(all(test, windows))]
+mod source_markdown_tests;
 pub mod source_profiles;
 #[cfg(test)]
 mod source_profiles_tests;

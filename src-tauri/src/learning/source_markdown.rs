@@ -1,0 +1,163 @@
+//! Internal Markdown preflight; not a filesystem authorization or import API.
+use super::{
+    note_origins::{self, NoteOriginKey, NoteOriginState},
+    source_profiles::{self, LibraryScope},
+};
+use crate::state::AppState;
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{File, OpenOptions},
+    io::Read,
+    os::windows::{
+        ffi::OsStringExt,
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    },
+    path::{Path, PathBuf},
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
+
+const MAX_MARKDOWN: u64 = 5 * 1024 * 1024;
+
+pub(super) struct Inspection {
+    pub state: NoteOriginState,
+    pub sha256: String,
+}
+
+pub(super) struct MarkdownLease {
+    file: File,
+    _directories: Vec<File>,
+}
+
+fn open_checked(path: &Path, directory: bool) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).share_mode(if directory {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    } else {
+        FILE_SHARE_READ
+    });
+    if directory {
+        options.access_mode(FILE_READ_ATTRIBUTES);
+    }
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+    let file = options.open(path).map_err(|_| "来源文件不可用或正在写入")?;
+    let meta = file.metadata().map_err(|_| "无法检查来源文件")?;
+    if meta.file_attributes() & 0x400 != 0
+        || meta.is_dir() != directory
+        || (!directory && !meta.is_file())
+    {
+        return Err("来源路径包含链接或不是普通文件".into());
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
+        || (!directory && info.nNumberOfLinks != 1)
+    {
+        return Err("来源文件身份不可验证".into());
+    }
+    let mut buffer = vec![0u16; 32768];
+    let count = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            0,
+        )
+    } as usize;
+    let actual = PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..count.min(buffer.len())],
+    ));
+    if count == 0 || count >= buffer.len() || actual != path {
+        return Err("来源路径已变化".into());
+    }
+    Ok(file)
+}
+
+pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease, String> {
+    if !root.is_absolute()
+        || relative.is_empty()
+        || relative.contains(['\\', ':'])
+        || relative.chars().any(char::is_control)
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !relative.to_ascii_lowercase().ends_with(".md")
+    {
+        return Err("来源笔记路径无效".into());
+    }
+    crate::media_access::reject_links(root)?;
+    let root = root.canonicalize().map_err(|_| "来源目录不可用")?;
+    if root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .starts_with(r"\\?\unc\")
+    {
+        return Err("不支持网络来源目录".into());
+    }
+    crate::media_access::reject_links(&root)?;
+    let path = root.join(relative);
+    crate::media_access::reject_links(&path)?;
+    let canonical = path.canonicalize().map_err(|_| "来源笔记不可用")?;
+    if !canonical.starts_with(&root) {
+        return Err("来源笔记不在所选目录中".into());
+    }
+    let mut parents: Vec<_> = canonical
+        .parent()
+        .ok_or("来源目录不可用")?
+        .ancestors()
+        .collect();
+    parents.reverse();
+    let mut directories = Vec::with_capacity(parents.len());
+    for parent in parents {
+        directories.push(open_checked(parent, true)?);
+    }
+    let file = open_checked(&canonical, false)?;
+    if file.metadata().map_err(|_| "无法检查来源笔记")?.len() > MAX_MARKDOWN {
+        return Err("来源笔记超过 5 MiB".into());
+    }
+    Ok(MarkdownLease {
+        file,
+        _directories: directories,
+    })
+}
+
+pub(super) fn inspect_markdown(
+    state: &AppState,
+    scope: &LibraryScope,
+    profile: &str,
+    epoch: &str,
+    root: &Path,
+    vault: &str,
+    relative: &str,
+) -> Result<Inspection, String> {
+    let key = NoteOriginKey::new(profile, vault, relative)?;
+    if source_profiles::get(state, scope, profile)?.access_epoch != epoch {
+        return Err("来源状态已变化，请重新检查".into());
+    }
+    let mut lease = open_markdown(root, relative)?;
+    let expected_size = lease.file.metadata().map_err(|_| "无法检查来源笔记")?.len();
+    let mut bytes = Vec::new();
+    (&mut lease.file)
+        .take(MAX_MARKDOWN + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取来源笔记")?;
+    if bytes.len() as u64 > MAX_MARKDOWN
+        || bytes.len() as u64 != expected_size
+        || lease.file.metadata().map_err(|_| "无法检查来源笔记")?.len() != expected_size
+    {
+        return Err("来源笔记超过 5 MiB".into());
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let state = note_origins::inspect_scoped(state, scope, &key, epoch, &sha256)?;
+    Ok(Inspection { state, sha256 })
+}
