@@ -29,12 +29,14 @@ impl SyntheticReadonlySource {
 /// Open a synthetic source for isolated snapshots.
 ///
 /// On Windows, when `-shm` already exists, hold it with `FILE_SHARE_READ` only before the
-/// plain `READ_ONLY` open. That stops the reader from writing or truncating closed-writer
-/// SHM while still allowing online Backup. (`readonly_shm=1` also freezes SHM bytes for
-/// queries, but hangs Backup on the bundled SQLite — do not use it for this path.)
+/// plain `READ_ONLY` open. That stops the reader from writing or truncating SHM while
+/// still allowing online Backup. (`readonly_shm=1` freezes SHM for queries but hangs
+/// Backup on the bundled SQLite — do not use it here.)
 ///
-/// Not a product grant. If an active writer already holds SHM writable, the deny-write
-/// lease is skipped and SHM may still change; that residual remains open.
+/// Fail-closed: if `-shm` exists and the deny-write lease cannot be taken (typical when
+/// an active writer already holds SHM writable), return an error and do not open SQLite.
+/// Silent plain-`READ_ONLY` fallback is forbidden because it can mutate SHM. Not a
+/// product grant; concurrent live-writer reads need a different, explicitly unsafe path.
 pub(super) fn open_synthetic_readonly_source(
     path: &Path,
 ) -> Result<SyntheticReadonlySource, String> {
@@ -49,9 +51,7 @@ pub(super) fn open_synthetic_readonly_source(
         if shm_path.is_file() {
             let mut options = fs::OpenOptions::new();
             options.read(true).share_mode(FILE_SHARE_READ);
-            // Sharing violation means an active writer (or incompatible lease) already
-            // holds SHM writable; fall back to plain READ_ONLY and accept SHM may change.
-            options.open(shm_path).ok()
+            Some(options.open(shm_path).map_err(|_| failed())?)
         } else {
             None
         }

@@ -1,4 +1,4 @@
-use super::import_snapshot::snapshot_synthetic;
+use super::import_snapshot::{snapshot_synthetic, snapshot_synthetic_connection};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     fs,
@@ -36,8 +36,15 @@ fn learning_import_snapshot_reads_wal_without_changing_source_database_or_wal() 
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("synthetic.db");
     let writer = source(&path);
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
     writer.execute_batch("BEGIN; INSERT INTO video_notes VALUES(1,'a'); INSERT INTO video_notes VALUES(2,'b'); COMMIT;").unwrap();
     let wal = temp.path().join("synthetic.db-wal");
+    let shm = temp.path().join("synthetic.db-shm");
     let db_before = fs::read(&path).unwrap();
     let wal_before = fs::read(&wal).unwrap();
     assert!(!wal_before.is_empty());
@@ -56,6 +63,51 @@ fn learning_import_snapshot_reads_wal_without_changing_source_database_or_wal() 
     );
     drop(incomplete);
 
+    // Concurrent live-writer visibility still works via an explicitly non-SHM-safe open.
+    let live_reader = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let live_snapshot =
+        snapshot_synthetic_connection(&live_reader, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        live_snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        2
+    );
+    writer
+        .execute(
+            "INSERT INTO video_notes VALUES(3,'writer still active')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        live_snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        2
+    );
+    drop(live_snapshot);
+    drop(live_reader);
+
+    #[cfg(windows)]
+    {
+        // Task12c13: SHM-safe helper must fail closed while the writer holds SHM writable.
+        assert!(shm.is_file());
+        let shm_before = fs::read(&shm).unwrap();
+        assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+        assert_eq!(fs::read(&shm).unwrap(), shm_before);
+    }
+
+    drop(writer);
+    let db_after_writer = fs::read(&path).unwrap();
+    let wal_after_writer = fs::read(&wal).unwrap();
+    #[cfg(windows)]
+    let shm_after_writer = fs::read(&shm).unwrap();
     let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
     assert_eq!(
         snapshot
@@ -68,23 +120,12 @@ fn learning_import_snapshot_reads_wal_without_changing_source_database_or_wal() 
             .query_row("SELECT count(*) FROM video_notes", [], |r| r
                 .get::<_, u64>(0))
             .unwrap(),
-        2
+        3
     );
-    assert_eq!(fs::read(&path).unwrap(), db_before);
-    assert_eq!(fs::read(&wal).unwrap(), wal_before);
-    writer
-        .execute(
-            "INSERT INTO video_notes VALUES(3,'writer still active')",
-            [],
-        )
-        .unwrap();
-    assert_eq!(
-        snapshot
-            .query_row("SELECT count(*) FROM video_notes", [], |r| r
-                .get::<_, u64>(0))
-            .unwrap(),
-        2
-    );
+    assert_eq!(fs::read(&path).unwrap(), db_after_writer);
+    assert_eq!(fs::read(&wal).unwrap(), wal_after_writer);
+    #[cfg(windows)]
+    assert_eq!(fs::read(&shm).unwrap(), shm_after_writer);
 }
 
 #[test]
@@ -489,8 +530,10 @@ fn learning_import_windows_sqlite_handles_match_leased_database_and_wal() {
             [],
         )
         .unwrap();
+    // Live writer holds SHM writable; SHM-safe snapshot_synthetic must fail closed.
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
     assert_eq!(
-        snapshot_synthetic(&path, Duration::from_secs(2))
+        snapshot_synthetic_connection(&reader, Duration::from_secs(2))
             .unwrap()
             .query_row("SELECT count(*) FROM video_notes", [], |r| r
                 .get::<_, i64>(0))
@@ -529,7 +572,13 @@ fn learning_import_windows_lease_protects_existing_files_while_sqlite_writes() {
     writer
         .execute("INSERT INTO video_notes VALUES(2,'still writable')", [])
         .unwrap();
-    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+    let reader = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let snapshot = snapshot_synthetic_connection(&reader, Duration::from_secs(2)).unwrap();
     assert_eq!(
         snapshot
             .query_row("SELECT count(*) FROM video_notes", [], |r| r
@@ -538,6 +587,7 @@ fn learning_import_windows_lease_protects_existing_files_while_sqlite_writes() {
         2
     );
     drop(snapshot);
+    drop(reader);
     drop((db_lease, wal_lease, shm_lease, root_lease, parent_lease));
     drop(writer);
 }
@@ -643,7 +693,13 @@ fn learning_import_windows_cross_process_lease_allows_sqlite_writer() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+    let reader = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let snapshot = snapshot_synthetic_connection(&reader, Duration::from_secs(2)).unwrap();
     assert_eq!(
         snapshot
             .query_row("SELECT count(*) FROM video_notes", [], |r| r
@@ -652,6 +708,7 @@ fn learning_import_windows_cross_process_lease_allows_sqlite_writer() {
         2
     );
     drop(snapshot);
+    drop(reader);
     drop((db_lease, wal_lease, shm_lease, root_lease, parent_lease));
     drop(writer);
 }
@@ -799,4 +856,75 @@ fn learning_import_windows_shm_share_read_lease_blocks_reader_shm_writes() {
         );
     }
     assert_eq!(fs::read(&shm).unwrap(), shm_before);
+}
+/// Task12c13: while an active writer holds SHM writable, the SHM-safe helper refuses to
+/// open (fail closed) and therefore does not mutate SHM. Plain READ_ONLY is left for
+/// explicit concurrent experiments only.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_active_writer_fails_closed_without_mutating_shm() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("live.db");
+    let writer = source(&path);
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'live')", [])
+        .unwrap();
+    let (wal, shm) = sidecar_paths(&path);
+    assert!(wal.exists() && shm.exists());
+    let shm_before = fs::read(&shm).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let db_before = fs::read(&path).unwrap();
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(
+        fs::read(&shm).unwrap(),
+        shm_before,
+        "fail-closed must not open SQLite and must not mutate SHM"
+    );
+    drop(writer);
+    let snapshot = snapshot_synthetic(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+/// Documents that the unsafe plain READ_ONLY path can still see live WAL commits while a
+/// writer is active; that path is not SHM-safe and must not be used by snapshot_synthetic.
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_active_writer_plain_readonly_still_reads_wal_unsafely() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("unsafe.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'a')", [])
+        .unwrap();
+    assert!(snapshot_synthetic(&path, Duration::from_secs(2)).is_err());
+    let reader = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let snapshot = snapshot_synthetic_connection(&reader, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(snapshot);
+    drop(reader);
+    drop(writer);
 }
