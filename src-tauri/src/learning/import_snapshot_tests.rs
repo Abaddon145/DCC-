@@ -180,6 +180,196 @@ fn synthetic_windows_lease(path: &Path, directory: bool) -> std::fs::File {
 }
 
 #[cfg(windows)]
+fn snapshot_complete_sidecars(
+    path: &Path,
+    after_leases: impl FnOnce(),
+) -> Result<Connection, String> {
+    use std::{
+        ffi::c_void,
+        fs::OpenOptions,
+        os::windows::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawHandle,
+        },
+        ptr,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    let error = || "合成 sidecar 不完整或身份不匹配".to_owned();
+    let root = path.parent().ok_or_else(error)?;
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let lease = |file: &Path, directory: bool| -> Result<std::fs::File, String> {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        if directory {
+            options.access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY);
+        }
+        options.custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+        );
+        let lease = options.open(file).map_err(|_| error())?;
+        let metadata = lease.metadata().map_err(|_| error())?;
+        if metadata.file_attributes() & 0x400 != 0 || metadata.is_dir() != directory {
+            return Err(error());
+        }
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(lease.as_raw_handle(), &mut info) } == 0
+            || (!directory && info.nNumberOfLinks != 1)
+        {
+            return Err(error());
+        }
+        Ok(lease)
+    };
+    let _root_lease = lease(root, true)?;
+    let db_lease = lease(path, false)?;
+    let wal_lease = lease(Path::new(&wal), false)?;
+    let _shm_lease = lease(Path::new(&shm), false)?;
+    after_leases();
+    let identity = |handle: *mut c_void| -> Result<(u32, u32, u32), String> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+            return Err(error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    };
+    let reader = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| error())?;
+    reader
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(|_| error())?;
+    reader.busy_timeout(Duration::ZERO).map_err(|_| error())?;
+    reader.execute_batch("BEGIN").map_err(|_| error())?;
+    reader
+        .query_row("SELECT count(*) FROM schema_version", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map_err(|_| error())?;
+    let mut main_handle: *mut c_void = ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            reader.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+            (&mut main_handle as *mut *mut c_void).cast(),
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK
+        || main_handle.is_null()
+        || identity(main_handle)? != identity(db_lease.as_raw_handle())?
+    {
+        return Err(error());
+    }
+    let mut journal: *mut rusqlite::ffi::sqlite3_file = ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            reader.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_JOURNAL_POINTER,
+            (&mut journal as *mut *mut rusqlite::ffi::sqlite3_file).cast(),
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK || journal.is_null() {
+        return Err(error());
+    }
+    let methods = unsafe { (*journal).pMethods };
+    if methods.is_null() {
+        return Err(error());
+    }
+    let control = unsafe { (*methods).xFileControl }.ok_or_else(error)?;
+    let mut wal_handle: *mut c_void = ptr::null_mut();
+    let rc = unsafe {
+        control(
+            journal,
+            rusqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+            (&mut wal_handle as *mut *mut c_void).cast(),
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK
+        || wal_handle.is_null()
+        || identity(wal_handle)? != identity(wal_lease.as_raw_handle())?
+    {
+        return Err(error());
+    }
+    let snapshot =
+        super::import_snapshot::snapshot_synthetic_connection(&reader, Duration::from_secs(2))?;
+    reader.execute_batch("ROLLBACK").map_err(|_| error())?;
+    Ok(snapshot)
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_windows_complete_sidecars_are_required_before_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let missing = root.join("missing.db");
+    fs::write(&missing, b"untouched").unwrap();
+    assert!(snapshot_complete_sidecars(&missing, || panic!("missing sidecar accepted")).is_err());
+    assert_eq!(fs::read(&missing).unwrap(), b"untouched");
+    assert!(!root.join("missing.db-wal").exists());
+    assert!(!root.join("missing.db-shm").exists());
+    fs::write(root.join("missing.db-wal"), b"fixture").unwrap();
+    assert!(snapshot_complete_sidecars(&missing, || panic!("missing SHM accepted")).is_err());
+    assert!(!root.join("missing.db-shm").exists());
+    fs::remove_file(root.join("missing.db-wal")).unwrap();
+    fs::write(root.join("missing.db-shm"), b"fixture").unwrap();
+    assert!(snapshot_complete_sidecars(&missing, || panic!("missing WAL accepted")).is_err());
+    assert!(!root.join("missing.db-wal").exists());
+    let path = root.join("active.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+        .unwrap();
+    let snapshot = snapshot_complete_sidecars(&path, || {
+        for name in ["active.db", "active.db-wal", "active.db-shm"] {
+            assert!(fs::rename(root.join(name), root.join(format!("{name}.moved"))).is_err());
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    writer
+        .execute("INSERT INTO video_notes VALUES(2,'still active')", [])
+        .unwrap();
+    assert_eq!(
+        snapshot_complete_sidecars(&path, || {})
+            .unwrap()
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[cfg(windows)]
 #[test]
 fn learning_import_windows_sqlite_journal_pointer_does_not_guarantee_open_wal() {
     use std::ptr;

@@ -11,12 +11,20 @@ use std::{
 
 pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Connection, String> {
     let failed = || "合成来源快照不可用，请重试".to_string();
-    let started = Instant::now();
     let source = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| failed())?;
+    snapshot_synthetic_connection(&source, timeout)
+}
+
+pub(super) fn snapshot_synthetic_connection(
+    source: &Connection,
+    timeout: Duration,
+) -> Result<Connection, String> {
+    let failed = || "合成来源快照不可用，请重试".to_string();
+    let started = Instant::now();
     // SQLite may otherwise checkpoint the WAL when the last connection closes.
     if !source
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
@@ -33,7 +41,7 @@ pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Conne
         .pragma_update(None, "page_size", page_size)
         .map_err(|_| failed())?;
     {
-        let backup = Backup::new(&source, &mut snapshot).map_err(|_| failed())?;
+        let backup = Backup::new(source, &mut snapshot).map_err(|_| failed())?;
         loop {
             if started.elapsed() >= timeout {
                 return Err(failed());
@@ -46,7 +54,6 @@ pub(super) fn snapshot_synthetic(path: &Path, timeout: Duration) -> Result<Conne
             }
         }
     }
-    drop(source);
     let integrity: String = snapshot
         .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
         .map_err(|_| failed())?;

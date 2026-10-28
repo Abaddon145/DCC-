@@ -202,6 +202,13 @@
 - [x] 测试主库和 WAL 的 SQLite 句柄确实对应锁定的合成文件，错误文件身份被拒绝，活动写入和 WAL 快照可用。
 - [x] 定向测试、格式及凭据检查，具体限制见 `docs/evidence/merge/task12c10-sqlite-handles.md`。
 
+## Task 12c11：齐全 sidecar 的隔离快照验证
+
+**范围：** 仅在临时合成目录中，先对已存在的主库、WAL、SHM 和目录持有 Windows 句柄，不存在任一文件时拒绝而不创建；用同一个 SQLite 只读连接核对实际主库/WAL 句柄后创建在线快照。实验不提供产品路径读取或用户授权，不宣称 SHM 对象身份和全部重解析竞态已获证明。
+
+- [x] RED→GREEN：sidecar 齐全时可获取包含 WAL 的快照且写入继续；缺失时不打开 SQLite、不创建文件；路径替换失败。
+- [x] 定向测试、格式及凭据检查，测试环境与剩余边界见 `docs/evidence/merge/task12c11-sidecar-snapshot.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。
