@@ -91,8 +91,7 @@ pub(super) fn select_vault(
 }
 
 impl VaultSelection {
-    /// Record identity only after an explicit source choice; this is not an access grant.
-    pub(super) fn register_identity(&self, state: &AppState) -> Result<(), String> {
+    fn root_identity(&self) -> Result<String, String> {
         let root = self._directories.last().ok_or("来源目录不可用")?;
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(root.as_raw_handle(), &mut info) } == 0
@@ -100,10 +99,29 @@ impl VaultSelection {
         {
             return Err("无法确认来源目录身份".into());
         }
-        let identity = format!(
+        Ok(format!(
             "win1:{:08x}:{:08x}{:08x}",
             info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
-        );
+        ))
+    }
+
+    fn check_identity(&self, db: &rusqlite::Connection, identity: &str) -> Result<(), String> {
+        if source_profiles::get_in(db, &self.profile)?.access_epoch != self.epoch {
+            return Err("来源状态已变化，请重新检查".into());
+        }
+        let stored: Option<String> = rusqlite::OptionalExtension::optional(db.query_row(
+            "SELECT root_identity FROM learning_source_vault_bindings WHERE source_profile_id=?1 AND vault_id=?2",
+            rusqlite::params![self.profile, self.vault], |row| row.get(0),
+        )).map_err(|_| "无法检查来源目录身份")?;
+        if stored.as_deref() != Some(identity) {
+            return Err("来源目录尚未登记或与原来源不同".into());
+        }
+        Ok(())
+    }
+
+    /// Record identity only after an explicit source choice; this is not an access grant.
+    pub(super) fn register_identity(&self, state: &AppState) -> Result<(), String> {
+        let identity = self.root_identity()?;
         source_profiles::scoped(state, &self.scope, |db| {
             let tx =
                 rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
@@ -132,15 +150,7 @@ impl VaultSelection {
     }
 
     pub(super) fn inspect(&self, state: &AppState, relative: &str) -> Result<Inspection, String> {
-        inspect_markdown(
-            state,
-            &self.scope,
-            &self.profile,
-            &self.epoch,
-            &self.root,
-            &self.vault,
-            relative,
-        )
+        inspect_markdown(state, self, relative)
     }
 }
 
@@ -255,18 +265,15 @@ pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease
 
 fn inspect_markdown(
     state: &AppState,
-    scope: &LibraryScope,
-    profile: &str,
-    epoch: &str,
-    root: &Path,
-    vault: &str,
+    selection: &VaultSelection,
     relative: &str,
 ) -> Result<Inspection, String> {
-    let key = NoteOriginKey::new(profile, vault, relative)?;
-    if source_profiles::get(state, scope, profile)?.access_epoch != epoch {
-        return Err("来源状态已变化，请重新检查".into());
-    }
-    let mut lease = open_markdown(root, relative)?;
+    let key = NoteOriginKey::new(&selection.profile, &selection.vault, relative)?;
+    let identity = selection.root_identity()?;
+    source_profiles::scoped(state, &selection.scope, |db| {
+        selection.check_identity(db, &identity)
+    })?;
+    let mut lease = open_markdown(&selection.root, relative)?;
     let expected_size = lease.file.metadata().map_err(|_| "无法检查来源笔记")?.len();
     let mut bytes = Vec::new();
     (&mut lease.file)
@@ -285,7 +292,13 @@ fn inspect_markdown(
         &super::note_conversion::AttachmentMap::new(),
         &super::note_conversion::MediaMap::new(),
     )?;
-    let state = note_origins::inspect_scoped(state, scope, &key, epoch, &sha256)?;
+    let state = source_profiles::scoped(state, &selection.scope, |db| {
+        let tx = db.unchecked_transaction().map_err(|_| "无法检查笔记来源")?;
+        selection.check_identity(&tx, &identity)?;
+        let result = note_origins::inspect(&tx, &key, &sha256)?;
+        tx.commit().map_err(|_| "无法检查笔记来源")?;
+        Ok(result)
+    })?;
     Ok(Inspection {
         state,
         sha256,

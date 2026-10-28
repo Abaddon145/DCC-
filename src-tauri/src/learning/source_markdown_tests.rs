@@ -8,6 +8,58 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
+fn learning_source_vault_inspect_requires_registered_matching_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let other = temp.path().join("other");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&other).unwrap();
+    fs::write(first.join("note.md"), b"first").unwrap();
+    fs::write(other.join("note.md"), b"other").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let selected = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &first,
+    )
+    .unwrap();
+    assert!(selected.inspect(&state, "note.md").is_err());
+    selected.register_identity(&state).unwrap();
+    assert_eq!(
+        selected.inspect(&state, "note.md").unwrap().state,
+        note_origins::NoteOriginState::Unmapped
+    );
+    let wrong = source_markdown::select_vault(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        "vault",
+        &other,
+    )
+    .unwrap();
+    assert!(wrong.inspect(&state, "note.md").is_err());
+    state.with_library(|db, _| { db.execute("UPDATE learning_source_vault_bindings SET root_identity='corrupt' WHERE source_profile_id=?1", [&profile.id]).unwrap(); Ok(()) }).unwrap();
+    assert!(selected.inspect(&state, "note.md").is_err());
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "DELETE FROM learning_source_vault_bindings WHERE source_profile_id=?1",
+                [&profile.id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(selected.inspect(&state, "note.md").is_err());
+}
+
+#[test]
 fn learning_source_vault_identity_cannot_be_silently_rebound() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("first");
@@ -196,6 +248,7 @@ fn learning_source_markdown_preview_converts_verified_bytes_without_writing() {
         &root,
     )
     .unwrap();
+    selection.register_identity(&state).unwrap();
     let result = selection.inspect(&state, "note.md").unwrap();
     assert_eq!(result.state, note_origins::NoteOriginState::Unmapped);
     assert_eq!(result.sha256, result.conversion.archive_hash);
@@ -251,6 +304,7 @@ fn learning_source_vault_selection_binds_root_scope_and_epoch() {
         &root,
     )
     .unwrap();
+    selection.register_identity(&state).unwrap();
     assert!(fs::rename(&root, temp.path().join("replaced")).is_err());
     assert_eq!(
         selection.inspect(&state, "first.md").unwrap().state,
@@ -288,6 +342,7 @@ fn learning_source_markdown_checks_real_bytes_and_target_without_writing_either(
         &root,
     )
     .unwrap();
+    selection.register_identity(&state).unwrap();
     let inspect = || selection.inspect(&state, "note.md");
     assert_eq!(
         inspect().unwrap().state,
@@ -398,6 +453,7 @@ fn learning_source_markdown_scope_does_not_revive_after_switch() {
         &root,
     )
     .unwrap();
+    selection.register_identity(&state).unwrap();
     state
         .change_library(StorageChangeRequest {
             mode: "create".into(),
