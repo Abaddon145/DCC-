@@ -10,8 +10,70 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 31;
+pub(crate) const FUTURE_SCHEMA_ERROR: &str = "此素材库由更新版本创建，请使用更新版本打开";
+
+pub(crate) fn schema_version(connection: &Connection) -> Result<u32, String> {
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM sqlite_schema WHERE name='schema_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    match kind.as_deref() {
+        None => return Ok(0),
+        Some("table") => {}
+        _ => return Err("数据库版本记录无效，已停止升级".into()),
+    }
+    let mut statement = connection
+        .prepare("SELECT value FROM schema_meta WHERE key='schema_version'")
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    let version: Option<String> = rows
+        .next()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+        .map(|row| row.get(0))
+        .transpose()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    if rows
+        .next()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+        .is_some()
+    {
+        return Err("数据库版本记录重复，已停止升级".into());
+    }
+    match version {
+        None => Ok(0),
+        Some(value) => value
+            .parse()
+            .map_err(|_| "数据库版本无效，已停止升级".into()),
+    }
+}
+
 pub fn open_database(path: &Path) -> Result<Connection, String> {
     let connection = Connection::open(path).map_err(|e| e.to_string())?;
+    if !connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+    {
+        return Err("无法启用数据库检查保护，已停止打开".into());
+    }
+    if schema_version(&connection)? > CURRENT_SCHEMA_VERSION {
+        return Err(FUTURE_SCHEMA_ERROR.into());
+    }
+    connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            false,
+        )
+        .map_err(|e| format!("配置数据库失败：{e}"))?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")
         .map_err(|e| format!("配置数据库失败：{e}"))?;

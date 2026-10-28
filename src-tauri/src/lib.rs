@@ -113,6 +113,26 @@ fn main_window_action(label: &str, close_requested: bool) -> MainWindowAction {
     }
 }
 
+fn show_startup_error(error: &str) {
+    let message = format!("素材库无法打开。\n\n{error}\n\n请检查上述原因后重新启动栈藏。");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let title: Vec<u16> = "栈藏启动失败\0".encode_utf16().collect();
+        let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("{message}");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _instance = match browser_capture::application_lock() {
@@ -140,7 +160,13 @@ pub fn run() {
     if let Ok(entry) = keyring::Entry::new("DCCAssetLibrary.BaiduNetdisk", "default") {
         let _ = entry.delete_credential();
     }
-    let state = AppState::initialize().unwrap_or_else(|error| panic!("无法启动素材库：{error}"));
+    let state = match AppState::initialize() {
+        Ok(state) => state,
+        Err(error) => {
+            show_startup_error(&error);
+            return;
+        }
+    };
     application_builder(state, None)
         .run(context)
         .expect("运行 Tauri 应用失败");

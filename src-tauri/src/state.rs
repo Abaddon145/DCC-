@@ -22,6 +22,7 @@ use walkdir::WalkDir;
 
 const SETTINGS_FILE: &str = "app-settings.json";
 const MARKER_FILE: &str = "library.json";
+const SCHEMA_PROTECTION_PREFIX: &str = "素材库升级保护未完成：";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,7 +146,8 @@ impl AppState {
                 .lock()
                 .map_err(|_| "启动提示锁已损坏")?;
             crate::backup::recover_interrupted_restore(active, |path| {
-                protect_existing_library(path, &self.settings_path, &mut settings, &mut warning);
+                protect_existing_library(path, &self.settings_path, &mut settings, &mut warning)
+                    .map(|_| ())
             })
         })
     }
@@ -241,6 +243,10 @@ impl AppState {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .ok_or("无法定位 LOCALAPPDATA")?;
+        Self::initialize_in(&local)
+    }
+
+    fn initialize_in(local: &Path) -> Result<Self, String> {
         let config_dir = local.join("DCCAssetLibrary");
         fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
         let settings_path = config_dir.join(SETTINGS_FILE);
@@ -266,6 +272,12 @@ impl AppState {
             .and_then(|_| open_library(&desired, &settings_path, &mut settings, &mut warning))
         {
             Ok(active) => active,
+            Err(error)
+                if error.starts_with(SCHEMA_PROTECTION_PREFIX)
+                    || error == db::FUTURE_SCHEMA_ERROR =>
+            {
+                return Err(error);
+            }
             Err(error) if desired != default_path => {
                 merge_warning(
                     &mut warning,
@@ -980,7 +992,7 @@ fn validate_library(path: &Path) -> Result<(), String> {
     if marker.format_version != 1 {
         return Err("素材库格式版本不受支持".into());
     }
-    let connection = Connection::open(path.join("library.db")).map_err(|e| e.to_string())?;
+    let connection = upgrade_backup::open_readonly(&path.join("library.db"))?;
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -1009,11 +1021,20 @@ fn open_library(
         return Err("素材库格式版本不受支持".into());
     }
     let db_path = path.join("library.db");
-    if db_path.exists() {
+    let upgrading = if db_path.exists() {
         validate_library(path)?;
-        protect_existing_library(path, settings_path, settings, warning);
-    }
-    let connection = db::open_database(&db_path)?;
+        protect_existing_library(path, settings_path, settings, warning)
+            .map_err(|error| format!("{SCHEMA_PROTECTION_PREFIX}{error}"))?
+    } else {
+        false
+    };
+    let connection = db::open_database(&db_path).map_err(|error| {
+        if upgrading || error == db::FUTURE_SCHEMA_ERROR {
+            format!("{SCHEMA_PROTECTION_PREFIX}{error}")
+        } else {
+            error
+        }
+    })?;
     Ok(ActiveLibrary {
         base_dir: path.to_path_buf(),
         db_path,
@@ -1038,12 +1059,16 @@ fn protect_existing_library(
     settings_path: &Path,
     settings: &mut AppSettings,
     warning: &mut Option<String>,
-) {
+) -> Result<bool, String> {
+    let schema_upgrade = upgrade_backup::schema_needs_upgrade(path)?;
     let key = match upgrade_backup::library_key(path) {
         Ok(key) => key,
         Err(error) => {
+            if schema_upgrade {
+                return Err(format!("升级前保护未完成，已停止升级：{error}"));
+            }
             merge_warning(warning, format!("升级前数据库保护未完成：{error}"));
-            return;
+            return Ok(false);
         }
     };
     let version = env!("CARGO_PKG_VERSION");
@@ -1052,16 +1077,16 @@ fn protect_existing_library(
         .get(&key)
         .cloned()
         .unwrap_or_default();
-    if previous.last_success_app_version == version {
-        return;
+    if !schema_upgrade && previous.last_success_app_version == version {
+        return Ok(false);
     }
     let mut record = previous.clone();
-    let result = upgrade_backup::run_upgrade_backup(
-        path,
-        version,
-        settings.auto_backup_keep.clamp(1, 20) as usize,
-        &mut record,
-    );
+    let keep = settings.auto_backup_keep.clamp(1, 20) as usize;
+    let result = if schema_upgrade {
+        upgrade_backup::run_schema_upgrade_backup(path, version, keep, &mut record)
+    } else {
+        upgrade_backup::run_upgrade_backup(path, version, keep, &mut record)
+    };
     match &result {
         Ok(status)
             if status
@@ -1073,7 +1098,11 @@ fn protect_existing_library(
         }
         Err(error) => merge_warning(
             warning,
-            format!("升级前数据库保护未完成，已继续打开；请检查目录权限和磁盘空间：{error}"),
+            if schema_upgrade {
+                format!("升级前数据库保护未完成，已停止升级：{error}")
+            } else {
+                format!("升级前数据库保护未完成，已继续打开；请检查目录权限和磁盘空间：{error}")
+            },
         ),
         _ => {}
     }
@@ -1089,13 +1118,23 @@ fn protect_existing_library(
             record.last_success_app_version = previous.last_success_app_version;
             record.snapshots = previous.snapshots;
             record.result = Some("failed".into());
-            let message =
-                format!("升级前保护记录未能保存到设置，下次打开会重试；已生成的文件保留：{error}");
+            let message = if result.is_ok() {
+                format!("升级前保护记录未能保存到设置，下次打开会重试；已生成的文件保留：{error}")
+            } else {
+                format!("升级前保护结果未能保存到设置，下次打开会重试：{error}")
+            };
             record.message = Some(message.clone());
             settings.upgrade_backups.insert(key, record);
-            merge_warning(warning, message);
+            merge_warning(warning, message.clone());
+            if schema_upgrade {
+                return Err(format!("升级前保护记录未保存，已停止升级：{message}"));
+            }
         }
     }
+    if schema_upgrade {
+        result.map_err(|error| format!("升级前保护未完成，已停止升级：{error}"))?;
+    }
+    Ok(schema_upgrade)
 }
 
 fn migrate_library(
@@ -1344,6 +1383,10 @@ pub(crate) fn test_state(path: &Path) -> AppState {
         glossary: Mutex::new(GlossaryStore::load(path.join("translation-glossary.json"))),
     }
 }
+
+#[cfg(test)]
+#[path = "state_upgrade_guard_tests.rs"]
+mod schema_guard_tests;
 
 #[cfg(test)]
 mod tests {

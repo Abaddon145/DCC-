@@ -185,7 +185,7 @@ struct RestoreCheckpoint {
 
 pub fn recover_interrupted_restore(
     active: &mut ActiveLibrary,
-    before_migration: impl FnOnce(&Path),
+    before_migration: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let marker = active.base_dir.join(RESTORE_MARKER);
     let value: RestoreCheckpoint =
@@ -242,7 +242,7 @@ pub fn recover_interrupted_restore(
     if !active.db_path.is_file() {
         return Err("原库数据库缺失，已保留中断记录".into());
     }
-    before_migration(&active.base_dir);
+    before_migration(&active.base_dir)?;
     let restored = db::open_database(&active.db_path)?;
     crate::media_access::invalidate_external_grants(&restored)?;
     crate::learning::source_profiles::invalidate_epochs(&restored)?;
@@ -890,7 +890,7 @@ mod tests {
             connection: None,
         };
         assert!(base.join("images/new.txt").exists());
-        recover_interrupted_restore(&mut active, |_| {}).unwrap();
+        recover_interrupted_restore(&mut active, |_| Ok(())).unwrap();
         assert_eq!(
             fs::read(base.join("images/original.txt")).unwrap(),
             b"original"

@@ -214,7 +214,7 @@ fn learning_source_profiles_interrupted_restore_rotates_access_epoch() {
                 .unwrap(),
             )
             .unwrap();
-            crate::backup::recover_interrupted_restore(active, |_| {})
+            crate::backup::recover_interrupted_restore(active, |_| Ok(()))
         })
         .unwrap();
     let restored = source_profiles::get(&state, &library_scope, &profile.id).unwrap();
