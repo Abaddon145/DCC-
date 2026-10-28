@@ -270,6 +270,21 @@
 
 - [x] RED→GREEN：Prepare→Commit 经 TaskRegistry；冲突不覆盖正文；去重与取消 Prepare；坏载荷拒入队；晚取消保留已提交。
 - [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d2-task-registry.md`。
+
+## Task 12d3：迁入批次中途失败恢复
+
+**Files:** 更新 `src-tauri/src/learning/import_ops.rs`、`import_ops_tests.rs`。无 schema 升级、无 Tauri/UI、无真实路径读取。
+
+**Interface：**
+- `commit_batch` 可恢复：跳过已终态项并计入 receipt；每项成功/冲突后立即清理 `.dcc/runtime/imports/<batch>/<item>.md`；中断后批次保持 `pending`。
+- `cancel_batch`：保留已提交笔记/冲突登记；取消未完成项；清理全部 runtime 暂存（含孤儿）并移除空批次目录。
+- `list_items(state, scope, batch_id)`：只读列出批次日记供恢复检视。
+- 测试钩子 `set_commit_fail_after_applies`（cfg(test)）注入中途失败。
+
+**范围边界：** 不接 12e UI；不打开真实用户 Vault/SQLite；不自动撤回已创建笔记（撤回属后续任务）。
+
+- [x] RED→GREEN：中途失败后 resume 无孤儿暂存且 receipt 计数正确；cancel 保留已提交并清理 staging；list_items 可见中断状态。
+- [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d3-mid-batch-recovery.md`。
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

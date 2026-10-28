@@ -292,3 +292,185 @@ fn learning_import_ops_pending_survives_for_interrupt_cancel() {
         .unwrap();
     assert_eq!(mapped, note_origins::NoteOriginState::Unmapped);
 }
+
+fn add_staged(
+    state: &crate::state::AppState,
+    sc: &source_profiles::LibraryScope,
+    batch_id: &str,
+    vault: &str,
+    path: &str,
+    bytes: &[u8],
+    title: &str,
+) -> import_ops::ImportItem {
+    let item = import_ops::add_item(
+        state,
+        sc,
+        batch_id,
+        NewImportItem {
+            vault: vault.into(),
+            relative_path: path.into(),
+            source_sha256: sha(bytes),
+            title: title.into(),
+            document: doc(),
+            expected_target_id: None,
+            expected_target_revision: None,
+            expected_target_sha256: None,
+        },
+    )
+    .unwrap();
+    import_ops::stage_item_bytes(state, sc, batch_id, &item.id, bytes).unwrap()
+}
+
+#[test]
+fn learning_import_ops_mid_commit_failure_resumes_without_orphan_stages() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"mid-resume"),
+    )
+    .unwrap();
+    let a = add_staged(&state, &sc, &batch.id, "vault", "a.md", b"body-a", "条目甲");
+    let b = add_staged(&state, &sc, &batch.id, "vault", "b.md", b"body-b", "条目乙");
+    let stage_a = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, a.id));
+    let stage_b = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, b.id));
+    assert!(stage_a.is_file() && stage_b.is_file());
+
+    import_ops::set_commit_fail_after_applies(Some(1));
+    let err = import_ops::commit_batch(&state, &sc, &batch.id).unwrap_err();
+    assert!(err.contains("中断"));
+    let mid = import_ops::list_batches(&state, &sc)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.id == batch.id)
+        .unwrap();
+    assert_eq!(mid.status, "pending");
+    let items = import_ops::list_items(&state, &sc, &batch.id).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].status, "committed");
+    assert!(items[0].stage_relative.is_none());
+    assert!(!stage_a.exists());
+    assert_eq!(items[1].status, "staged");
+    assert!(stage_b.is_file());
+    let note_a = items[0].target_id.clone().unwrap();
+    let before = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_a)?))
+        .unwrap();
+    assert_eq!(before.title, "条目甲");
+
+    let done = import_ops::commit_batch(&state, &sc, &batch.id).unwrap();
+    assert_eq!(done.status, "committed");
+    let receipt: serde_json::Value =
+        serde_json::from_str(done.receipt_json.as_deref().unwrap()).unwrap();
+    assert_eq!(receipt["committed"], 2);
+    assert_eq!(receipt["conflicts"], 0);
+    let items = import_ops::list_items(&state, &sc, &batch.id).unwrap();
+    assert!(items
+        .iter()
+        .all(|i| i.status == "committed" && i.stage_relative.is_none()));
+    assert!(!stage_a.exists());
+    assert!(!stage_b.exists());
+    assert!(!library
+        .join(format!(".dcc/runtime/imports/{}", batch.id))
+        .exists());
+    let note_b = items[1].target_id.clone().unwrap();
+    let after_a = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_a)?))
+        .unwrap();
+    let after_b = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_b)?))
+        .unwrap();
+    assert_eq!(after_a.title, "条目甲");
+    assert_eq!(after_b.title, "条目乙");
+    // Idempotent re-commit leaves durable receipt.
+    let again = import_ops::commit_batch(&state, &sc, &batch.id).unwrap();
+    assert_eq!(again.status, "committed");
+    assert_eq!(again.receipt_json, done.receipt_json);
+}
+
+#[test]
+fn learning_import_ops_mid_commit_failure_cancel_keeps_committed_and_cleans_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"mid-cancel"),
+    )
+    .unwrap();
+    let a = add_staged(
+        &state,
+        &sc,
+        &batch.id,
+        "vault",
+        "keep.md",
+        b"keep-body",
+        "保留",
+    );
+    let b = add_staged(
+        &state,
+        &sc,
+        &batch.id,
+        "vault",
+        "drop.md",
+        b"drop-body",
+        "放弃",
+    );
+    // Simulate legacy orphan stage left on an already-committed row after crash.
+    import_ops::set_commit_fail_after_applies(Some(1));
+    assert!(import_ops::commit_batch(&state, &sc, &batch.id).is_err());
+    let committed = import_ops::get_item(&state, &sc, &a.id).unwrap();
+    assert_eq!(committed.status, "committed");
+    let note_id = committed.target_id.clone().unwrap();
+    let orphan = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, a.id));
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, b"orphan-stage").unwrap();
+    let orphan_rel = format!(".dcc/runtime/imports/{}/{}.md", batch.id, a.id);
+    state
+        .with_library_mut(|db, _| {
+            db.execute(
+                "UPDATE learning_import_items SET stage_relative=?1 WHERE id=?2",
+                [orphan_rel.as_str(), a.id.as_str()],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    let cancelled = import_ops::cancel_batch(&state, &sc, &batch.id).unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    let items = import_ops::list_items(&state, &sc, &batch.id).unwrap();
+    let keep = items.iter().find(|i| i.id == a.id).unwrap();
+    let drop = items.iter().find(|i| i.id == b.id).unwrap();
+    assert_eq!(keep.status, "committed");
+    assert!(keep.stage_relative.is_none());
+    assert_eq!(drop.status, "cancelled");
+    assert!(drop.stage_relative.is_none());
+    assert!(!orphan.exists());
+    assert!(!library
+        .join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, b.id))
+        .exists());
+    assert!(!library
+        .join(format!(".dcc/runtime/imports/{}", batch.id))
+        .exists());
+    let note = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_id)?))
+        .unwrap();
+    assert_eq!(note.title, "保留");
+    let key_drop = note_origins::NoteOriginKey::new(&source.id, "vault", "drop.md").unwrap();
+    let mapped = state
+        .with_library(|db, _| note_origins::inspect(db, &key_drop, &sha(b"drop-body")))
+        .unwrap();
+    assert_eq!(mapped, note_origins::NoteOriginState::Unmapped);
+}

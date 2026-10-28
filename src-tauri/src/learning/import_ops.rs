@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::Cell,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -15,6 +16,31 @@ use std::{
 use uuid::Uuid;
 
 const MAX_STAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_FAIL_AFTER_APPLIES: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Test-only: after this many newly applied items in one `commit_batch` call, fail closed.
+/// `None` disables. Used to prove mid-batch resume / cancel recovery.
+#[cfg(test)]
+pub(super) fn set_commit_fail_after_applies(after: Option<u32>) {
+    COMMIT_FAIL_AFTER_APPLIES.with(|c| c.set(after));
+}
+
+#[cfg(test)]
+fn note_commit_apply_and_maybe_fail(applied_in_call: u32) -> Result<(), String> {
+    COMMIT_FAIL_AFTER_APPLIES.with(|c| {
+        if let Some(limit) = c.get() {
+            if applied_in_call >= limit {
+                c.set(None);
+                return Err("迁入提交中断（测试注入）".into());
+            }
+        }
+        Ok(())
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ImportBatch {
@@ -178,6 +204,31 @@ fn remove_stage(base: &Path, relative: Option<&str>) {
             }
         }
     }
+}
+
+/// Drop runtime staging bytes. Clears DB pointer only when schema allows
+/// (`staged` rows must keep a non-NULL `stage_relative` until status changes).
+fn clear_item_stage(db: &Connection, base: &Path, item: &ImportItem) -> Result<(), String> {
+    if let Some(rel) = item.stage_relative.as_deref() {
+        remove_stage(base, Some(rel));
+    } else {
+        // Crashed write may leave a file without a DB pointer.
+        let relative = stage_relative(&item.batch_id, &item.id);
+        remove_stage(base, Some(relative.as_str()));
+    }
+    if item.status != "staged" && item.stage_relative.is_some() {
+        db.execute(
+            "UPDATE learning_import_items SET stage_relative=NULL WHERE id=?1 AND status!='staged'",
+            [&item.id],
+        )
+        .map_err(|_| "无法清理迁入暂存登记")?;
+    }
+    Ok(())
+}
+
+fn remove_batch_stage_dir(base: &Path, batch_id: &str) {
+    let dir = base.join(".dcc/runtime/imports").join(batch_id);
+    let _ = fs::remove_dir(&dir);
 }
 
 fn write_stage(base: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
@@ -449,15 +500,24 @@ pub(super) fn commit_batch(
         }
         let mut committed = 0u32;
         let mut conflicts = 0u32;
-        let mut cleanup: Vec<Option<String>> = Vec::new();
+        let mut applied_in_call = 0u32;
         for item_id in items.drain(..) {
             let item = load_item(db, &item_id)?;
-            if item.status == "committed" || item.status == "cancelled" || item.status == "conflict"
-            {
-                continue;
-            }
-            if item.status != "staged" && item.status != "pending" {
-                return Err("迁入条目状态无效".into());
+            match item.status.as_str() {
+                "committed" => {
+                    // Resume/repair: keep durable note, drop leftover runtime staging.
+                    clear_item_stage(db, base, &item)?;
+                    committed += 1;
+                    continue;
+                }
+                "conflict" => {
+                    clear_item_stage(db, base, &item)?;
+                    conflicts += 1;
+                    continue;
+                }
+                "cancelled" => continue,
+                "staged" | "pending" => {}
+                _ => return Err("迁入条目状态无效".into()),
             }
             let key = key_from_item(&batch.source_profile_id, &item.source_key_json)?;
             let state_now = note_origins::inspect(db, &key, &item.source_sha256)?;
@@ -469,8 +529,12 @@ pub(super) fn commit_batch(
                         params![id, json!({"action":"unchanged"}).to_string(), item.id],
                     )
                     .map_err(|_| "无法提交迁入条目")?;
-                    cleanup.push(item.stage_relative.clone());
+                    let refreshed = load_item(db, &item.id)?;
+                    clear_item_stage(db, base, &refreshed)?;
                     committed += 1;
+                    applied_in_call += 1;
+                    #[cfg(test)]
+                    note_commit_apply_and_maybe_fail(applied_in_call)?;
                     continue;
                 }
                 note_origins::NoteOriginState::SourceChanged(_) => Some("source_changed"),
@@ -484,7 +548,12 @@ pub(super) fn commit_batch(
                     params![code, item.id],
                 )
                 .map_err(|_| "无法记录迁入冲突")?;
+                let refreshed = load_item(db, &item.id)?;
+                clear_item_stage(db, base, &refreshed)?;
                 conflicts += 1;
+                applied_in_call += 1;
+                #[cfg(test)]
+                note_commit_apply_and_maybe_fail(applied_in_call)?;
                 continue;
             }
             // Unmapped: create note + origin in one transaction.
@@ -532,18 +601,14 @@ pub(super) fn commit_batch(
             )
             .map_err(|_| "无法提交迁入条目")?;
             tx.commit().map_err(|_| "无法提交迁入事务")?;
-            cleanup.push(item.stage_relative.clone());
+            let refreshed = load_item(db, &item.id)?;
+            clear_item_stage(db, base, &refreshed)?;
             committed += 1;
+            applied_in_call += 1;
+            #[cfg(test)]
+            note_commit_apply_and_maybe_fail(applied_in_call)?;
         }
-        for relative in cleanup {
-            remove_stage(base, relative.as_deref());
-            if let Some(rel) = relative {
-                let _ = db.execute(
-                    "UPDATE learning_import_items SET stage_relative=NULL WHERE batch_id=?1 AND stage_relative=?2",
-                    params![batch.id, rel],
-                );
-            }
-        }
+        remove_batch_stage_dir(base, &batch.id);
         let receipt = json!({
             "committed": committed,
             "conflicts": conflicts,
@@ -573,29 +638,29 @@ pub(super) fn cancel_batch(
             return load_batch(db, batch_id);
         }
         let items = db
-            .prepare("SELECT id,stage_relative,status FROM learning_import_items WHERE batch_id=?1")
+            .prepare(
+                "SELECT id FROM learning_import_items WHERE batch_id=?1 ORDER BY created_at,id",
+            )
             .map_err(|_| "无法读取迁入条目")?
-            .query_map([&batch.id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
+            .query_map([&batch.id], |row| row.get::<_, String>(0))
             .map_err(|_| "无法读取迁入条目")?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "无法读取迁入条目")?;
-        for (id, relative, status) in items {
-            if status == "committed" {
+        for id in items {
+            let item = load_item(db, &id)?;
+            // Always drop runtime staging, including orphans left by a mid-commit crash.
+            clear_item_stage(db, base, &item)?;
+            if item.status == "committed" || item.status == "conflict" {
+                // Durable outcomes stay; cancel only abandons unfinished work.
                 continue;
             }
-            remove_stage(base, relative.as_deref());
             db.execute(
                 "UPDATE learning_import_items SET status='cancelled', stage_relative=NULL, conflict_code=NULL WHERE id=?1",
                 [&id],
             )
             .map_err(|_| "无法取消迁入条目")?;
         }
+        remove_batch_stage_dir(base, &batch.id);
         let finished = now();
         db.execute(
             "UPDATE learning_import_batches SET status='cancelled', finished_at=?1 WHERE id=?2",
@@ -631,4 +696,28 @@ pub(super) fn get_item(
     item_id: &str,
 ) -> Result<ImportItem, String> {
     scoped_base(state, scope, |db, _| load_item(db, item_id))
+}
+
+/// Recovery read: list durable item journal rows for a batch (includes mid-apply leftovers).
+pub(super) fn list_items(
+    state: &AppState,
+    scope: &source_profiles::LibraryScope,
+    batch_id: &str,
+) -> Result<Vec<ImportItem>, String> {
+    scoped_base(state, scope, |db, _| {
+        let batch = load_batch(db, batch_id)?;
+        if batch.library_id != scope.library_id() {
+            return Err("迁入批次不属于当前素材库".into());
+        }
+        let ids = db
+            .prepare(
+                "SELECT id FROM learning_import_items WHERE batch_id=?1 ORDER BY created_at,id",
+            )
+            .map_err(|_| "无法列出迁入条目")?
+            .query_map([&batch.id], |row| row.get::<_, String>(0))
+            .map_err(|_| "无法列出迁入条目")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法列出迁入条目")?;
+        ids.into_iter().map(|id| load_item(db, &id)).collect()
+    })
 }
