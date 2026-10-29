@@ -1,5 +1,35 @@
 use super::{course_batch::create_course_batch, import_ops, source_profiles};
 use crate::state::test_state;
+use sha2::{Digest, Sha256};
+
+const NOTE_OP: &str = "课程迁入批次不能使用笔记操作";
+
+fn note_input(path: &str, bytes: &[u8]) -> import_ops::NewImportItem {
+    import_ops::NewImportItem {
+        vault: "vault".into(),
+        relative_path: path.into(),
+        source_sha256: format!("{:x}", Sha256::digest(bytes)),
+        title: "note".into(),
+        document: serde_json::json!({"type":"doc","content":[]}),
+        expected_target_id: None,
+        expected_target_revision: None,
+        expected_target_sha256: None,
+    }
+}
+
+fn batch_field(state: &crate::state::AppState, id: &str, column: &str) -> String {
+    let sql = match column {
+        "batch_kind" => "SELECT batch_kind FROM learning_import_batches WHERE id=?1",
+        "status" => "SELECT status FROM learning_import_batches WHERE id=?1",
+        _ => panic!("unknown batch column"),
+    };
+    state
+        .with_library(|db, _| {
+            db.query_row(sql, [id], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap()
+}
 
 #[test]
 fn learning_import_course_batch_isolated_from_markdown_lifecycle() {
@@ -27,69 +57,154 @@ fn learning_import_course_batch_isolated_from_markdown_lifecycle() {
         .unwrap(),
         course_id
     );
-    assert!(import_ops::commit_batch(&state, &scope, &course_id)
-        .unwrap_err()
-        .contains("课程"));
-    let note_input = import_ops::NewImportItem {
-        vault: "vault".into(),
-        relative_path: "note.md".into(),
-        source_sha256: "a".repeat(64),
-        title: "note".into(),
-        document: serde_json::json!({"type":"doc","content":[]}),
-        expected_target_id: None,
-        expected_target_revision: None,
-        expected_target_sha256: None,
-    };
-    assert!(import_ops::add_item(&state, &scope, &course_id, note_input)
-        .unwrap_err()
-        .contains("课程"));
-    assert!(import_ops::stage_item_bytes(
-        &state,
-        &scope,
-        &course_id,
-        &uuid::Uuid::new_v4().to_string(),
-        b"x"
-    )
-    .unwrap_err()
-    .contains("课程"));
-    assert!(import_ops::cancel_batch(&state, &scope, &course_id)
-        .unwrap_err()
-        .contains("课程"));
-    assert!(
-        import_ops::revert_batch(&state, &scope, &profile.access_epoch, &course_id)
-            .unwrap_err()
-            .contains("课程")
+    assert_eq!(batch_field(&state, &course_id, "batch_kind"), "courses");
+    assert_eq!(batch_field(&state, &course_id, "status"), "pending");
+    let bytes = b"hello note";
+    assert_eq!(
+        import_ops::commit_batch(&state, &scope, &course_id).unwrap_err(),
+        NOTE_OP
     );
-    assert!(import_ops::create_batch(
-        &state,
-        &scope,
-        &profile.id,
-        &profile.access_epoch,
-        &course_request
-    )
-    .is_err());
+    assert_eq!(
+        import_ops::add_item(&state, &scope, &course_id, note_input("note.md", bytes)).unwrap_err(),
+        NOTE_OP
+    );
+    assert_eq!(
+        import_ops::stage_item_bytes(
+            &state,
+            &scope,
+            &course_id,
+            &uuid::Uuid::new_v4().to_string(),
+            bytes
+        )
+        .unwrap_err(),
+        NOTE_OP
+    );
+    assert_eq!(
+        import_ops::cancel_batch(&state, &scope, &course_id).unwrap_err(),
+        NOTE_OP
+    );
+    assert_eq!(
+        import_ops::revert_batch(&state, &scope, &profile.access_epoch, &course_id).unwrap_err(),
+        NOTE_OP
+    );
+    assert_eq!(
+        import_ops::list_items(&state, &scope, &course_id).unwrap_err(),
+        NOTE_OP
+    );
+    assert_eq!(
+        import_ops::create_batch(
+            &state,
+            &scope,
+            &profile.id,
+            &profile.access_epoch,
+            &course_request
+        )
+        .unwrap_err(),
+        NOTE_OP
+    );
+    assert!(import_ops::list_batches(&state, &scope)
+        .unwrap()
+        .iter()
+        .all(|batch| batch.id != course_id));
+
+    let note_request = "b".repeat(64);
     let note = import_ops::create_batch(
         &state,
         &scope,
         &profile.id,
         &profile.access_epoch,
-        &"b".repeat(64),
+        &note_request,
     )
     .unwrap();
+    assert_eq!(batch_field(&state, &note.id, "batch_kind"), "notes");
+    assert_eq!(
+        create_course_batch(
+            &state,
+            &scope,
+            &profile.id,
+            &profile.access_epoch,
+            &note_request
+        )
+        .unwrap_err(),
+        "迁入请求已被其他批次使用"
+    );
+    let staged =
+        import_ops::add_item(&state, &scope, &note.id, note_input("note.md", bytes)).unwrap();
+    import_ops::stage_item_bytes(&state, &scope, &note.id, &staged.id, bytes).unwrap();
+    let listed = import_ops::list_batches(&state, &scope).unwrap();
+    assert!(listed.iter().any(|batch| batch.id == note.id));
+    assert!(listed.iter().all(|batch| batch.id != course_id));
     assert_eq!(
         import_ops::cancel_batch(&state, &scope, &note.id)
             .unwrap()
             .status,
         "cancelled"
     );
-    assert!(create_course_batch(
+    assert_eq!(batch_field(&state, &course_id, "status"), "pending");
+    assert_eq!(batch_field(&state, &course_id, "batch_kind"), "courses");
+    let reused = create_course_batch(
         &state,
         &scope,
         &profile.id,
         &profile.access_epoch,
-        &"b".repeat(64)
+        &note_request,
     )
-    .is_ok());
+    .unwrap();
+    assert_eq!(batch_field(&state, &reused, "batch_kind"), "courses");
+
+    let commit_request = "d".repeat(64);
+    let commit_bytes = b"committed note";
+    let live = import_ops::create_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &commit_request,
+    )
+    .unwrap();
+    assert_eq!(
+        create_course_batch(
+            &state,
+            &scope,
+            &profile.id,
+            &profile.access_epoch,
+            &commit_request
+        )
+        .unwrap_err(),
+        "迁入请求已被其他批次使用"
+    );
+    let live_item = import_ops::add_item(
+        &state,
+        &scope,
+        &live.id,
+        note_input("other.md", commit_bytes),
+    )
+    .unwrap();
+    import_ops::stage_item_bytes(&state, &scope, &live.id, &live_item.id, commit_bytes).unwrap();
+    assert_eq!(
+        import_ops::commit_batch(&state, &scope, &live.id)
+            .unwrap()
+            .status,
+        "committed"
+    );
+    assert_eq!(batch_field(&state, &live.id, "batch_kind"), "notes");
+    assert_eq!(batch_field(&state, &course_id, "status"), "pending");
+    import_ops::revert_batch(&state, &scope, &profile.access_epoch, &live.id).unwrap();
+    assert_eq!(batch_field(&state, &course_id, "batch_kind"), "courses");
+    assert_eq!(batch_field(&state, &course_id, "status"), "pending");
+    assert_eq!(
+        import_ops::commit_batch(&state, &scope, &course_id).unwrap_err(),
+        NOTE_OP
+    );
+    let freed = create_course_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &commit_request,
+    )
+    .unwrap();
+    assert_eq!(batch_field(&state, &freed, "batch_kind"), "courses");
     assert!(create_course_batch(&state, &scope, &profile.id, "wrong", &"c".repeat(64)).is_err());
 }
 
@@ -149,9 +264,10 @@ fn learning_import_course_batch_backup_keeps_kind_and_invalidates_epoch() {
     assert!(
         create_course_batch(&state, &scope, &profile.id, &profile.access_epoch, &request).is_err()
     );
-    assert!(import_ops::cancel_batch(&state, &scope, &id)
-        .unwrap_err()
-        .contains("课程"));
+    assert_eq!(
+        import_ops::cancel_batch(&state, &scope, &id).unwrap_err(),
+        NOTE_OP
+    );
     state
         .with_library(|db, _| {
             assert_eq!(

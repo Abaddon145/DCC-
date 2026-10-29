@@ -3,7 +3,7 @@ use crate::state::test_state;
 use rusqlite::params;
 
 #[test]
-fn learning_import_course_origin_series_preview_uses_existing_mapping() {
+fn learning_import_course_origins_series_preview_uses_existing_mapping() {
     use super::import_course_preview::preview_courses_from_profile;
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
@@ -38,7 +38,7 @@ fn learning_import_course_origin_series_preview_uses_existing_mapping() {
 }
 
 #[test]
-fn learning_import_course_origin_series_mapping_preserves_changes_and_identity() {
+fn learning_import_course_origins_series_mapping_preserves_changes_and_identity() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
@@ -52,6 +52,10 @@ fn learning_import_course_origin_series_mapping_preserves_changes_and_identity()
         assert!(record_series_in(db,&key,&series,&hash,&profile.access_epoch).is_err());
         let tx = db.transaction().unwrap();
         assert!(record_series_in(&tx,&key,&series,&hash,"wrong").is_err());
+        assert_eq!(
+            record_series_in(&tx,&key,&uuid::Uuid::new_v4().to_string(),&hash,&profile.access_epoch).unwrap_err(),
+            "目标系列不可用"
+        );
         record_series_in(&tx,&key,&series,&hash,&profile.access_epoch)?;
         record_series_in(&tx,&key,&series,&hash,&profile.access_epoch)?;
         tx.commit().unwrap();
@@ -66,7 +70,7 @@ fn learning_import_course_origin_series_mapping_preserves_changes_and_identity()
 }
 
 #[test]
-fn learning_import_course_origin_preview_reports_existing_mapping_and_changes() {
+fn learning_import_course_origins_preview_reports_existing_mapping_and_changes() {
     use super::import_course_preview::{
         preview_courses_from_profile, recheck_preview_from_profile, CourseMediaBinding,
     };
@@ -125,7 +129,7 @@ fn learning_import_course_origin_preview_reports_existing_mapping_and_changes() 
 }
 
 #[test]
-fn learning_import_course_origin_preserves_identity_and_detects_conflicts() {
+fn learning_import_course_origins_preserves_identity_and_detects_conflicts() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
@@ -152,6 +156,10 @@ fn learning_import_course_origin_preserves_identity_and_detects_conflicts() {
         {
             let tx = db.transaction().unwrap();
             assert!(record_in(&tx,&source_a,&course,&hash,"wrong-epoch").is_err());
+            assert_eq!(
+                record_in(&tx,&source_a,&uuid::Uuid::new_v4().to_string(),&hash,&profile.access_epoch).unwrap_err(),
+                "目标课程不可用"
+            );
             record_in(&tx,&source_a,&course,&hash,&profile.access_epoch)?;
             record_in(&tx,&source_a,&course,&hash,&profile.access_epoch)?;
             record_in(&tx,&source_b,&course,&hash,&profile.access_epoch)?;
@@ -170,7 +178,7 @@ fn learning_import_course_origin_preserves_identity_and_detects_conflicts() {
 }
 
 #[test]
-fn learning_import_course_origin_backup_keeps_mapping_and_rotates_epoch() {
+fn learning_import_course_origins_backup_keeps_mapping_and_rotates_epoch() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();

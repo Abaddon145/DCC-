@@ -387,7 +387,7 @@ pub(super) fn create_batch(
             revert_report_json: None,
         };
         db.execute(
-            "INSERT INTO learning_import_batches(id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,finished_at,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,NULL,NULL)",
+            "INSERT INTO learning_import_batches(id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,finished_at,receipt_json,batch_kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,NULL,NULL,'notes')",
             params![
                 batch.id,
                 batch.library_id,
@@ -783,7 +783,7 @@ pub(super) fn list_batches(
     scoped_base(state, scope, |db, _| {
         let mut stmt = db
             .prepare(
-                "SELECT id FROM learning_import_batches WHERE library_id=?1 ORDER BY created_at DESC,id",
+                "SELECT id FROM learning_import_batches WHERE library_id=?1 AND batch_kind='notes' ORDER BY created_at DESC,id",
             )
             .map_err(|_| "无法列出迁入批次")?;
         let ids = stmt
@@ -811,6 +811,7 @@ pub(super) fn list_items(
 ) -> Result<Vec<ImportItem>, String> {
     scoped_base(state, scope, |db, _| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() {
             return Err("迁入批次不属于当前素材库".into());
         }

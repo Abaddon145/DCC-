@@ -51,3 +51,7 @@ Windows Rust 全量 701 通过、0 失败、2 忽略，日志 `release-artifacts
 依据映流 schema 8 输入协议，预检额外保留系列说明、课程条目的可空时长，以及来源进度的最后播放时间、更新时间和会话序号。没有来源进度时元数据保持缺失；课程时长为 NULL 时保持未知，负时长失败闭合。来源序号只作为来源数据保留，不当作目标修订号。来源字段指纹使用 v2 域，覆盖这些新增值；目标指纹域不变。
 
 合成测试先因字段缺失失败，补充读取后通过，并验证只改变源会话序号也会拒绝旧预检。Windows Rust 全量 702 通过、0 失败、2 忽略，日志 `release-artifacts/yingliu-merge/course-preview-source-metadata-rust-full.log`；迁入专项 Rust 118 通过、前端 19 通过，日志 `release-artifacts/yingliu-merge/migration-qa-lROZaV/`。此步没有实现这些元数据的持久迁入，也没有开放真实源库读取。
+
+## 课程批次
+
+课程批次种类隔离、schema v36 回归断点复核和本机补测见 `docs/evidence/merge/task12k-course-batch.md`。上面的预检边界不变：仍是内部只读函数，不授权读取真实来源或执行迁入。

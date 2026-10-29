@@ -237,9 +237,19 @@ fn record_kind(
     if super::source_profiles::get_in(db, &key.profile)?.access_epoch != epoch {
         return Err("来源状态已变化，请重新检查".into());
     }
-    let (revision, target_hash) = target_snapshot_kind(db, target, kind)?.ok_or("目标不可用")?;
+    let unavailable = if kind == "series" {
+        "目标系列不可用"
+    } else {
+        "目标课程不可用"
+    };
+    let occupied = if kind == "series" {
+        "系列来源已关联或无法登记"
+    } else {
+        "课程来源已关联或无法登记"
+    };
+    let (revision, target_hash) = target_snapshot_kind(db, target, kind)?.ok_or(unavailable)?;
     match inspect_kind(db, key, hash, kind)? {
-        CourseOriginState::Unmapped => db.execute("INSERT INTO learning_origin_map(source_profile_id,source_key_json,target_kind,target_id,source_sha256,target_revision,target_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![key.profile,key.encoded,kind,target,hash,revision,target_hash]).map(|_| ()).map_err(|_| "来源无法登记".into()),
+        CourseOriginState::Unmapped => db.execute("INSERT INTO learning_origin_map(source_profile_id,source_key_json,target_kind,target_id,source_sha256,target_revision,target_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![key.profile,key.encoded,kind,target,hash,revision,target_hash]).map(|_| ()).map_err(|_| occupied.into()),
         CourseOriginState::Unchanged(existing) if existing == target => Ok(()),
         _ => Err("课程来源或目标已变化，请重新检查".into()),
     }
