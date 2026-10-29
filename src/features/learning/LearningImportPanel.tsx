@@ -1,5 +1,4 @@
 import {useEffect,useRef,useState} from "react";
-import {open} from "@tauri-apps/plugin-dialog";
 import {learningApi,type ImportBatchView,type ImportItemView,type ImportNotePreview,type ImportSourceBinding} from "./api";
 import {api} from "../../lib/api";
 import "./noteArchives.css";
@@ -59,9 +58,8 @@ function ImportPanel({libraryId,onClose}:Props){
   async function pickSource(){
     setBusy(true);setError("");setPreview(null);
     try{
-      const path=await open({directory:true,multiple:false,title:"选择学习资料来源目录"});
-      if(!path||typeof path!=="string"){setStatus("已取消目录选择；未绑定来源。");return;}
-      const next=await learningApi.bindImportSource(libraryId,"vault-ui",path);
+      const next=await learningApi.bindImportSource(libraryId,"vault-ui");
+      if(!next){setBinding(null);setStatus("已取消目录选择；未绑定来源。");return;}
       setBinding(next);
       setStatus(`已绑定来源。范围：${next.boundary}`);
     }catch(reason){
@@ -149,7 +147,7 @@ function ImportPanel({libraryId,onClose}:Props){
         <button type="button" className="secondary-button" autoFocus onClick={onClose}>关闭</button>
       </header>
       <p className="learning-import-boundary" role="note">
-        授权边界：只读取你通过系统目录对话框明确选择的本地文件夹；不会打开真实映流用户 Vault/数据库，也不会根据清单提示路径自动授权（清单提示路径不构成授权）。冲突可暂存并提交回执，但 <strong>willOverwrite 恒为 false</strong>，已有笔记正文绝不被改写。
+        授权边界：只读取你通过系统目录对话框明确选择的本地文件夹；仅在预检或准备时读取所选目录中的指定 Markdown；不会自动读取映流数据库，也不会根据清单提示路径自动授权（清单提示路径不构成授权）。冲突可暂存并提交回执，但 <strong>willOverwrite 恒为 false</strong>，已有笔记正文绝不被改写。
       </p>
       <p className="learning-import-boundary" role="note">
         费用边界：迁入只在本机进行 Markdown 读取、转换、暂存与提交，不调用付费 AI 或云端服务，不产生费用。准备、提交、取消都作为任务进入任务中心，可在那里查看进度与失败原因。

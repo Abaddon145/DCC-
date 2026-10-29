@@ -2285,3 +2285,46 @@ mod tests {
         assert!(registry.cancel(&backup.id).is_err());
     }
 }
+
+/// Enqueue a verified learning import only while its original library session is active.
+pub(crate) fn submit_scoped_learning_import(
+    state: &crate::state::AppState,
+    payload: TaskRequest,
+    scope: &crate::learning::source_profiles::LibraryScope,
+) -> Result<(LibraryTask, bool), String> {
+    if !matches!(payload, TaskRequest::LearningImport(_)) {
+        return Err("迁入任务类型无效".into());
+    }
+    state.with_active_mut(|active| {
+        let current = crate::learning::analysis_store::library_identity(&active.base_dir)?;
+        if current
+            != (
+                scope.library_id().to_string(),
+                scope.root_hash().to_string(),
+            )
+            || *state
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?
+                != scope.session_nonce()
+        {
+            return Err("素材库会话已变化，未提交迁入任务".into());
+        }
+        state
+            .tasks
+            .submit(active.marker.library_id.clone(), payload)
+    })
+}
+
+pub(crate) fn start_scoped_learning_import(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    payload: TaskRequest,
+    scope: &crate::learning::source_profiles::LibraryScope,
+) -> Result<LibraryTask, String> {
+    let (task, launch) = submit_scoped_learning_import(&state, payload, scope)?;
+    if launch {
+        tauri::async_runtime::spawn(dispatch(app));
+    }
+    Ok(task)
+}

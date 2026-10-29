@@ -114,6 +114,9 @@ pub struct AppState {
     startup_warning: Mutex<Option<String>>,
     pub active: Mutex<ActiveLibrary>,
     pub(crate) source_scope_nonce: Mutex<Uuid>,
+    #[cfg(windows)]
+    pub(crate) learning_import_selection:
+        Mutex<Option<crate::learning::import_access::AuthorizedSource>>,
     link_check_job: Mutex<Option<Arc<AtomicBool>>>,
     pending_move_undo: Mutex<Option<PendingMoveUndo>>,
     reference_window_board: Mutex<Option<String>>,
@@ -313,6 +316,8 @@ impl AppState {
             startup_warning: Mutex::new(warning),
             active: Mutex::new(active),
             source_scope_nonce: Mutex::new(Uuid::new_v4()),
+            #[cfg(windows)]
+            learning_import_selection: Mutex::new(None),
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
@@ -1387,6 +1392,8 @@ pub(crate) fn test_state(path: &Path) -> AppState {
         startup_warning: Mutex::new(warning),
         active: Mutex::new(active),
         source_scope_nonce: Mutex::new(Uuid::new_v4()),
+        #[cfg(windows)]
+        learning_import_selection: Mutex::new(None),
         link_check_job: Mutex::new(None),
         pending_move_undo: Mutex::new(None),
         reference_window_board: Mutex::new(None),

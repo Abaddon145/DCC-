@@ -90,7 +90,7 @@ export const learningApi={
   listSubtitles:(expectedLibraryId:string,courseId:string)=>invoke<LearningSubtitle[]>("list_learning_subtitles",{expectedLibraryId,courseId}),
   transcriptPage:(expectedLibraryId:string,courseId:string,subtitleId:string,offset=0,limit=50)=>invoke<Page<TranscriptCue>>("transcript_page",{expectedLibraryId,courseId,subtitleId,offset,limit}),
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
-  bindImportSource:(expectedLibraryId:string,vault:string,selectedRoot:string)=>invoke<ImportSourceBinding>("bind_learning_import_source",{expectedLibraryId,vault,selectedRoot}),
+  bindImportSource:(expectedLibraryId:string,vault:string)=>invoke<ImportSourceBinding|null>("bind_learning_import_source",{expectedLibraryId,vault}),
   previewImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<ImportNotePreview>("preview_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
   queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
   listImportBatches:(expectedLibraryId:string)=>invoke<ImportBatchView[]>("list_learning_import_batches",{expectedLibraryId}),

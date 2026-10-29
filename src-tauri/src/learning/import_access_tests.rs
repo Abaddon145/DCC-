@@ -184,3 +184,134 @@ fn learning_import_access_rejects_pending_conversion_and_wrong_library() {
     )
     .is_err());
 }
+
+#[test]
+fn learning_import_access_requires_current_session_native_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library_id = state.active_library_id().unwrap();
+    let root = vault.to_str().unwrap();
+    let fake = import_access::bind_in_library(&state, &library_id, "vault-ui", root).unwrap();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &fake.profile_id,
+        &fake.epoch,
+        &fake.vault,
+        &fake.root,
+        "note.md"
+    )
+    .is_err());
+    let bound =
+        import_access::bind_with_picker(&state, &library_id, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &bound.profile_id,
+        &bound.epoch,
+        &bound.vault,
+        &bound.root,
+        "note.md"
+    )
+    .is_ok());
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &bound.profile_id,
+        &bound.epoch,
+        &bound.vault,
+        &bound.root,
+        "note.md"
+    )
+    .is_err());
+    assert!(
+        import_access::bind_with_picker(&state, &library_id, "vault-ui", || None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn learning_import_access_selection_cancel_and_library_change_do_not_grant_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(
+        import_access::bind_with_picker(&state, &library, "vault-ui", || None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md"
+    )
+    .is_err());
+    assert!(
+        import_access::bind_with_picker(&state, &library, "vault-ui", || {
+            *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+            Some(vault.clone())
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn learning_import_enqueue_rejects_stale_library_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let payload = TaskRequest::LearningImport(ImportTaskRequest::Cancel {
+        batch_id: uuid::Uuid::new_v4().to_string(),
+    });
+    assert!(crate::tasks::submit_scoped_learning_import(&state, payload.clone(), &scope).is_ok());
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(crate::tasks::submit_scoped_learning_import(&state, payload, &scope).is_err());
+}
+
+#[test]
+fn learning_import_prepared_payload_keeps_its_original_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let (payload, scope) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    assert!(matches!(
+        payload,
+        TaskRequest::LearningImport(ImportTaskRequest::Prepare { .. })
+    ));
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(crate::tasks::submit_scoped_learning_import(&state, payload, &scope).is_err());
+}

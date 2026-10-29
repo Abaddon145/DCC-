@@ -4,7 +4,6 @@ import {StrictMode} from "react";
 import LearningImportPanel from "./LearningImportPanel";
 import {learningApi} from "./api";
 import {api} from "../../lib/api";
-import {open} from "@tauri-apps/plugin-dialog";
 
 vi.mock("./api",()=>({learningApi:{
   bindImportSource:vi.fn(),
@@ -14,7 +13,6 @@ vi.mock("./api",()=>({learningApi:{
   listImportItems:vi.fn(),
 }}));
 vi.mock("../../lib/api",()=>({api:{startLibraryTask:vi.fn(),getLibraryTask:vi.fn()}}));
-vi.mock("@tauri-apps/plugin-dialog",()=>({open:vi.fn()}));
 
 const binding={
   profileId:"11111111-1111-4111-8111-111111111111",
@@ -74,27 +72,26 @@ beforeEach(()=>{
     phase:"",current:0,total:0,currentName:"",createdAt:"",updatedAt:"",
     cancellable:true,message:"",result:null,payload:{kind:"learningImport",request:{action:"prepare"}},
   } as never);
-  vi.mocked(open).mockResolvedValue(null);
 });
 
 it("shows authorization boundary and does not bind without a native directory choice",async()=>{
+  vi.mocked(learningApi.bindImportSource).mockResolvedValueOnce(null as never);
   render(<StrictMode><LearningImportPanel libraryId="lib" onClose={vi.fn()}/></StrictMode>);
   expect(await screen.findByText(/授权边界/)).toBeInTheDocument();
   expect(screen.getByText(/清单提示路径不构成授权|不会根据清单提示路径/)).toBeInTheDocument();
   expect(screen.getByText(/费用边界：.*不调用付费 AI/)).toBeInTheDocument();
   expect(screen.getByText(/尚未绑定来源/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
-  await waitFor(()=>expect(open).toHaveBeenCalled());
-  expect(learningApi.bindImportSource).not.toHaveBeenCalled();
+  await waitFor(()=>expect(learningApi.bindImportSource).toHaveBeenCalledWith("lib","vault-ui"));
+  expect(await screen.findByText(/已取消目录选择/)).toBeInTheDocument();
 });
 
 it("binds a user-selected folder, previews conflict without overwrite, and queues prepare",async()=>{
-  vi.mocked(open).mockResolvedValueOnce("C:/synthetic/vault");
   vi.mocked(learningApi.previewImportNote).mockResolvedValueOnce(structuredClone(previewConflict));
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
   expect(await screen.findByText(/C:\/synthetic\/vault/)).toBeInTheDocument();
-  expect(learningApi.bindImportSource).toHaveBeenCalledWith("lib","vault-ui","C:/synthetic/vault");
+  expect(learningApi.bindImportSource).toHaveBeenCalledWith("lib","vault-ui");
   fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
   expect(await screen.findByText(/不会静默覆盖/)).toBeInTheDocument();
   expect(screen.getByText(/会覆盖正文：否/)).toBeInTheDocument();
@@ -105,7 +102,6 @@ it("binds a user-selected folder, previews conflict without overwrite, and queue
 });
 
 it("refuses prepare when conversion is pending and surfaces recovery for batches",async()=>{
-  vi.mocked(open).mockResolvedValueOnce("C:/synthetic/vault");
   vi.mocked(learningApi.previewImportNote).mockResolvedValueOnce({
     ...previewOk,pendingConversion:true,canPrepare:false,message:"转换仍有未解析内容或缺少正文，已失败闭合，不能进入暂存。",
   });
@@ -134,7 +130,6 @@ it("refuses prepare when conversion is pending and surfaces recovery for batches
 });
 
 it("shows bind failure and allows retry without opening a real vault path from the list",async()=>{
-  vi.mocked(open).mockResolvedValueOnce("C:/synthetic/vault");
   vi.mocked(learningApi.bindImportSource).mockRejectedValueOnce(new Error("素材库已切换，请在当前库重新选择来源"));
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));

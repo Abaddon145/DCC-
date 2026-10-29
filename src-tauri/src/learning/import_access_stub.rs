@@ -67,8 +67,7 @@ pub async fn bind_learning_import_source(
     _app: AppHandle,
     _expected_library_id: String,
     _vault: String,
-    _selected_root: String,
-) -> Result<ImportSourceBinding, String> {
+) -> Result<Option<ImportSourceBinding>, String> {
     Err(unsupported())
 }
 
