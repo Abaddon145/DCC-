@@ -20,6 +20,12 @@ const UE_TASK_HISTORY_ONLY: &str =
 pub enum TaskRequest {
     CourseExcerpt(crate::learning::excerpt_runner::ExcerptTaskRequest),
     LearningImport(crate::learning::import_runner::ImportTaskRequest),
+    ArchiveExternalVideo {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
     CourseTranscription(crate::learning::transcription::CourseTranscriptionRequest),
     CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest),
     #[serde(rename = "aiAnalyze")]
@@ -76,6 +82,7 @@ impl TaskRequest {
         match self {
             Self::CourseExcerpt(request) => request.label(),
             Self::LearningImport(request) => request.label(),
+            Self::ArchiveExternalVideo { .. } => "归档外部视频",
             Self::CourseTranscription(_) => "本地课程转写",
             Self::CourseAnalysis(r) => {
                 if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
@@ -146,6 +153,14 @@ impl TaskRequest {
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
             Self::Translation { ids } if ids.len() > 5000 => Err("单次翻译最多 5000 项".into()),
             Self::Migration(r) if r.mode != "migrate" => Err("任务中心只接受复制迁移操作".into()),
+            Self::ArchiveExternalVideo {
+                entry_id,
+                operation_id,
+            } => {
+                Uuid::parse_str(entry_id).map_err(|_| "媒体条目无效")?;
+                Uuid::parse_str(operation_id).map_err(|_| "归档操作无效")?;
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -588,6 +603,23 @@ impl TaskRegistry {
                 return Ok((existing.clone(), false));
             }
         }
+        if let TaskRequest::ArchiveExternalVideo {
+            entry_id,
+            operation_id,
+        } = &task.payload
+        {
+            if let Some(existing) = store.entries.iter().find(|t| {
+                t.library_id == task.library_id
+                    && active(&t.status)
+                    && matches!(&t.payload, TaskRequest::ArchiveExternalVideo { entry_id: saved, .. } if saved == entry_id)
+            }) {
+                if matches!(&existing.payload, TaskRequest::ArchiveExternalVideo { operation_id: saved, .. } if saved == operation_id)
+                {
+                    return Ok((existing.clone(), false));
+                }
+                return Err("该视频已有进行中的归档，请重试原操作".into());
+            }
+        }
         if let TaskRequest::AIAnalyze(request) = &task.payload {
             if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
         }
@@ -765,6 +797,11 @@ impl TaskRegistry {
                     (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert { batch_id, .. }), Ok(value))
                         if value["status"] == "reverted" && value["batchId"].as_str() == Some(batch_id.as_str())
                 );
+                let archived_external = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::ArchiveExternalVideo { .. }, Ok(value))
+                        if matches!(value["status"].as_str(), Some("archived" | "alreadyManaged"))
+                );
                 if committed_excerpt && task.stop_requested {
                     task.message = "摘录已提交，停止请求晚于保存；目标内容保留".into();
                 }
@@ -774,7 +811,14 @@ impl TaskRegistry {
                 if reverted_import && task.stop_requested {
                     task.message = "撤回已完成，停止请求晚于保存；请查看撤回报告".into();
                 }
-                task.status = if committed_excerpt || committed_import || reverted_import {
+                if archived_external && task.stop_requested {
+                    task.message = "归档已完成，停止请求晚于保存；源文件仍保留".into();
+                }
+                task.status = if committed_excerpt
+                    || committed_import
+                    || reverted_import
+                    || archived_external
+                {
                     "completed"
                 } else if task.stop_requested {
                     if matches!(task.payload, TaskRequest::Download(_)) {
@@ -1215,6 +1259,9 @@ pub(crate) fn ensure_generic_ipc_payload(payload: &TaskRequest) -> Result<(), St
     ) {
         return Err("学习资料迁入准备只能经来源绑定与预检入口排队".into());
     }
+    if matches!(payload, TaskRequest::ArchiveExternalVideo { .. }) {
+        return Err("外部视频归档只能经归档入口排队".into());
+    }
     Ok(())
 }
 pub fn start_library_task_for_library(
@@ -1232,6 +1279,7 @@ pub fn start_library_task_for_library(
             | TaskRequest::CourseAnalysis(_)
             | TaskRequest::CourseTranscription(_)
             | TaskRequest::LearningImport(_)
+            | TaskRequest::ArchiveExternalVideo { .. }
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -1341,7 +1389,7 @@ fn retain_incomplete_core_import(
         request.scan_task_id = None;
     }
 }
-async fn dispatch(app: AppHandle) {
+pub(crate) async fn dispatch(app: AppHandle) {
     loop {
         let limit = app
             .state::<AppState>()
@@ -1688,6 +1736,47 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+        }
+        TaskRequest::ArchiveExternalVideo {
+            entry_id,
+            operation_id,
+        } => {
+            let worker_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = worker_app.state::<AppState>();
+                let stop_app = worker_app.clone();
+                let stop_id = task.id.clone();
+                let _control = crate::media::ProcessControl::new(move || {
+                    stop_app.state::<AppState>().tasks.should_stop(&stop_id)
+                });
+                state.tasks.update(
+                    &task.id,
+                    0,
+                    1,
+                    String::new(),
+                    "复制并校验外部视频".into(),
+                    None,
+                );
+                let report = crate::media_archive::perform(
+                    &state,
+                    &task.library_id,
+                    &entry_id,
+                    &operation_id,
+                    &crate::media_archive::ArchiveOptions::default(),
+                )?;
+                let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    String::new(),
+                    "归档完成".into(),
+                    Some(value.clone()),
+                );
+                Ok(value)
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
         TaskRequest::MediaImport(request) => {
             let worker_app = app.clone();

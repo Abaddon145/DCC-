@@ -372,6 +372,7 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     #[test]
     fn learning_transcription_process_preserves_unicode_cwd_and_precancel() {
         let root = tempfile::tempdir().unwrap();
@@ -413,6 +414,7 @@ mod tests {
         .is_err());
         assert!(!cwd.join("cancelled.txt").exists());
     }
+    #[cfg(windows)]
     #[test]
     fn learning_transcription_process_timeout_does_not_wait_for_sleeping_child() {
         let root = tempfile::tempdir().unwrap();
@@ -433,6 +435,7 @@ mod tests {
         assert!(result.unwrap_err().contains("超时"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
+    #[cfg(windows)]
     #[test]
     fn learning_native_process_drop_reaps_owned_tree() {
         use std::io::{BufRead, BufReader};
@@ -456,6 +459,7 @@ mod tests {
             }
         }
     }
+    #[cfg(windows)]
     #[test]
     fn download_progress_is_streamed_without_retained_history() {
         let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -477,6 +481,7 @@ mod tests {
         assert!(!output.contains("DCC_PROGRESS"));
         assert!(output.contains("DCC_FILE"));
     }
+    #[cfg(windows)]
     #[test]
     fn download_cancel_terminates_grandchildren() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -512,6 +517,7 @@ mod tests {
         assert_eq!(quote_argument("C:\\我的下载\\"), "\"C:\\我的下载\\\\\"");
         assert_eq!(quote_argument("say \"yes\""), "\"say \\\"yes\\\"\"");
     }
+    #[cfg(windows)]
     #[test]
     fn download_process_reads_utf8_and_cancels() {
         let exe = Path::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");

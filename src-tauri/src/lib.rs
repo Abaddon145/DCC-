@@ -22,6 +22,7 @@ mod learning;
 mod link_checker;
 mod media;
 mod media_access;
+mod media_archive;
 mod media_engine;
 mod media_library;
 mod model_access;
@@ -412,6 +413,7 @@ fn application_builder(
                     commands::get_external_backup_summary,
                     commands::commit_external_video,
                     commands::relocate_external_video,
+                    commands::archive_external_video,
                     asset::commands::search_core_assets,
                     asset::commands::create_asset_relation,
                     asset::commands::delete_asset_relation,

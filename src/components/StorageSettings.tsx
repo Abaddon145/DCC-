@@ -22,7 +22,7 @@ export function ExternalOriginalsNotice({libraryId}:{libraryId:string}) {
     return()=>{active=false};
   },[libraryId]);
   return <section aria-label="外部视频备份范围"><div role="status" aria-atomic="true" className={summary?.count||error?"settings-warning":"empty-mini"}>
-    {error?<p>无法核对外部原件，请重新打开设置核对；不要据此认为所有视频已备份。</p>:!summary?<p>正在核对外部原件…</p>:summary.count>0?<><strong>外部原件未归档：{summary.count} 个 · {formatBytes(summary.bytes)}</strong><p>备份仅包含登记信息，不含这些视频原件；恢复后需重新确认访问。请另外保留原视频。</p></>:<p>当前库没有外部视频引用。</p>}
+    {error?<p>无法核对外部原件，请重新打开设置核对；不要据此认为所有视频已备份。</p>:!summary?<p>正在核对外部原件…</p>:summary.count>0?<><strong>外部原件未归档：{summary.count} 个 · {formatBytes(summary.bytes)}</strong><p>备份仅包含登记信息，不含这些视频原件；恢复后需重新确认访问。请另外保留原视频。可在视频详情中把原件归档复制进本库，源文件不会被删除。</p></>:<p>当前库没有外部视频引用。</p>}
   </div></section>;
 }
 interface Props { onClose: () => void; onLibraryChanged: () => Promise<void>; notify: (message: string, error?: boolean) => void; libraryLocked?: boolean; initialTab?: SettingsTab; onPersonalizationChanged?: (value: PersonalizationState) => void }
