@@ -862,11 +862,30 @@ pub(super) fn revert_batch(
                     let key = key_from_item(&batch.source_profile_id, &item.source_key_json)?;
                     match note_origins::inspect(&tx, &key, &item.source_sha256)? {
                         note_origins::NoteOriginState::Unchanged(current) if current == note_id => {
-                            note_origins::forget_note_in(&tx, &key, &note_id)?;
-                            let note = knowledge::trash_in(&tx, &note_id)
-                                .map_err(|_| "无法将迁入笔记移入回收站")?;
-                            note_revision = Some(note.revision);
-                            "reverted"
+                            // ponytail: target_id has no index; add one if bulk import is introduced.
+                            let reused: bool = tx.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM learning_import_items WHERE target_kind='note' AND target_id=?1 AND id<>?2 AND status='committed')",
+                                params![note_id, item.id], |row| row.get(0),
+                            ).map_err(|_| "无法检查笔记是否被其他批次复用")?;
+                            let used: bool = tx.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM project_learning_notes WHERE note_id=?1)
+                                  OR EXISTS(SELECT 1 FROM learning_course_notes WHERE note_id=?1)
+                                  OR EXISTS(SELECT 1 FROM knowledge_references WHERE target_kind='note' AND target_id=?1 AND note_id<>?1)
+                                  OR EXISTS(SELECT 1 FROM knowledge_reviews WHERE note_id=?1)
+                                  OR EXISTS(SELECT 1 FROM knowledge_note_order WHERE note_id=?1)",
+                                [&note_id], |row| row.get(0),
+                            ).map_err(|_| "无法检查笔记后续使用情况")?;
+                            if reused {
+                                "kept_reused"
+                            } else if used {
+                                "kept_modified"
+                            } else {
+                                note_origins::forget_note_in(&tx, &key, &note_id)?;
+                                let note = knowledge::trash_in(&tx, &note_id)
+                                    .map_err(|_| "无法将迁入笔记移入回收站")?;
+                                note_revision = Some(note.revision);
+                                "reverted"
+                            }
                         }
                         note_origins::NoteOriginState::TargetUnavailable(_) => "kept_missing",
                         _ => "kept_modified",

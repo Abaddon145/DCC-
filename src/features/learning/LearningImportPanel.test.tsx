@@ -66,7 +66,7 @@ beforeAll(()=>{
 
 beforeEach(()=>{
   vi.clearAllMocks();
-  vi.mocked(learningApi.listImportBatches).mockResolvedValue([]);
+  vi.mocked(learningApi.listImportBatches).mockReset().mockResolvedValue([]);
   vi.mocked(learningApi.listImportItems).mockResolvedValue([]);
   vi.mocked(learningApi.bindImportSource).mockResolvedValue(structuredClone(binding));
   vi.mocked(learningApi.pickImportNote).mockResolvedValue(null);
@@ -116,7 +116,7 @@ it("refuses prepare when conversion is pending and surfaces recovery for batches
     sourceSha256:"a".repeat(64),stageRelative:"stage/item-1.md",
   }]);
   vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task-commit",status:"queued"} as never);
-  vi.mocked(api.getLibraryTask).mockResolvedValue({id:"task-commit",status:"completed",message:""} as never);
+  vi.mocked(api.getLibraryTask).mockResolvedValue({id:"task-commit",status:"completed",message:"",result:{batchId:batch.id,status:"committed"}} as never);
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
   await screen.findByText(/C:\/synthetic\/vault/);
@@ -134,6 +134,45 @@ it("refuses prepare when conversion is pending and surfaces recovery for batches
     "lib",
   ));
 });
+
+it("refreshes batches on every click after a prepare task changes state",async()=>{
+  vi.mocked(learningApi.listImportBatches)
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([{...batch,status:"pending"}])
+    .mockResolvedValueOnce([{...batch,status:"committed"}]);
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  await waitFor(()=>expect(learningApi.listImportBatches).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button",{name:"刷新批次"}));
+  await screen.findByRole("button",{name:/pending/});
+  fireEvent.click(screen.getByRole("button",{name:"刷新批次"}));
+  expect(await screen.findByRole("button",{name:/committed/})).toBeInTheDocument();
+  expect(learningApi.listImportBatches).toHaveBeenCalledTimes(3);
+});
+
+it.each([
+  ["提交批次", "cancelled", /批次已取消，未提交/],
+  ["取消未完成项", "committed", /批次已提交，无法取消/],
+])("reports the durable batch state when %s races with another action",async(button,status,message)=>{
+  vi.mocked(learningApi.listImportBatches).mockResolvedValue([structuredClone(batch)]);
+  vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task",status:"queued"} as never);
+  vi.mocked(api.getLibraryTask).mockResolvedValue({id:"task",status:"completed",result:{batchId:batch.id,status}} as never);
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:/staged/}));
+  fireEvent.click(screen.getByRole("button",{name:button}));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+});
+
+it.each([null,{batchId:"other-batch",status:"committed"},{batchId:batch.id,status:"pending"}])(
+  "does not claim success without a matching terminal batch result %#",async(result)=>{
+    vi.mocked(learningApi.listImportBatches).mockResolvedValue([structuredClone(batch)]);
+    vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task",status:"queued"} as never);
+    vi.mocked(api.getLibraryTask).mockResolvedValue({id:"task",status:"completed",result} as never);
+    render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/staged/}));
+    fireEvent.click(screen.getByRole("button",{name:"提交批次"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/无法确认批次结果/);
+  },
+);
 
 it("shows bind failure and allows retry without opening a real vault path from the list",async()=>{
   vi.mocked(learningApi.bindImportSource).mockRejectedValueOnce(new Error("素材库已切换，请在当前库重新选择来源"));

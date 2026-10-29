@@ -181,6 +181,141 @@ fn learning_import_recovery_revert_keeps_reused_note_from_earlier_batch() {
 }
 
 #[test]
+fn learning_import_recovery_revert_keeps_created_note_reused_by_a_later_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let raw = b"# shared later\n";
+    let (first, original) = commit_one(&state, &sc, &profile, b"first", "shared.md", raw);
+    let (_second, reused) = commit_one(&state, &sc, &profile, b"second", "shared.md", raw);
+    let note_id = original.target_id.unwrap();
+    assert_eq!(reused.target_id.as_deref(), Some(note_id.as_str()));
+
+    let report = import_ops::revert_batch(&state, &sc, &first).unwrap();
+    assert_eq!(report["reverted"], json!([]));
+    assert_eq!(report["kept"][0]["outcome"], "kept_reused");
+    assert!(deleted_at(&state, &note_id).is_none());
+    assert_eq!(
+        origin(&state, &profile.id, "shared.md", raw),
+        note_origins::NoteOriginState::Unchanged(note_id)
+    );
+}
+
+#[test]
+fn learning_import_recovery_revert_keeps_created_note_linked_to_a_project_later() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let (batch, item) = commit_one(&state, &sc, &profile, b"project", "p.md", b"# project\n");
+    let note_id = item.target_id.unwrap();
+    let project_id = state
+        .with_library_mut(|db, _| {
+            Ok(crate::projects::upsert_project(
+                db,
+                crate::models::ProjectInput {
+                    id: None,
+                    name: "我的项目".into(),
+                    description: String::new(),
+                    project_type: "scene".into(),
+                    status: "active".into(),
+                    target_tools: vec![],
+                    versions: vec![],
+                    resolution_width: None,
+                    resolution_height: None,
+                    frame_rate: None,
+                    cover_asset_id: None,
+                    cover_media_entry_id: None,
+                },
+            )?
+            .summary
+            .id)
+        })
+        .unwrap();
+    super::project_notes::link_in_library(&state, sc.library_id(), &project_id, &note_id).unwrap();
+
+    let report = import_ops::revert_batch(&state, &sc, &batch).unwrap();
+    assert_eq!(report["reverted"], json!([]));
+    assert_eq!(report["kept"][0]["outcome"], "kept_modified");
+    assert!(deleted_at(&state, &note_id).is_none());
+    assert_eq!(
+        super::project_notes::list_in_library(&state, sc.library_id(), &project_id, 0, 20)
+            .unwrap()
+            .total,
+        1
+    );
+}
+
+#[test]
+fn learning_import_recovery_revert_keeps_created_note_referenced_by_another_note() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let (batch, item) = commit_one(
+        &state,
+        &sc,
+        &profile,
+        b"reference",
+        "r.md",
+        b"# referenced\n",
+    );
+    let note_id = item.target_id.unwrap();
+    state.with_library_mut(|db, _| {
+        knowledge::save(db, NoteInput {
+            id: None, expected_revision: None, notebook_id: None, title: "后来的笔记".into(),
+            document: json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"reference","attrs":{"kind":"note","targetId":note_id,"label":"引用的笔记"}}]}]}),
+            tags: vec![], favorite: false, journal_date: None,
+        })?;
+        Ok(())
+    }).unwrap();
+
+    let report = import_ops::revert_batch(&state, &sc, &batch).unwrap();
+    assert_eq!(report["reverted"], json!([]));
+    assert_eq!(report["kept"][0]["outcome"], "kept_modified");
+    assert!(deleted_at(&state, &note_id).is_none());
+    state
+        .with_library(|db, _| {
+            assert_eq!(knowledge::backlinks(db, &note_id)?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_recovery_revert_keeps_created_note_used_by_course_review_or_order() {
+    for usage in ["course", "review", "order"] {
+        let (_root, state, _library, course_id, _) = super::excerpt_runtime_tests::fixture(false);
+        let sc = scope(&state);
+        let profile = source_profiles::create(&state, &sc).unwrap();
+        let (batch, item) = commit_one(
+            &state,
+            &sc,
+            &profile,
+            usage.as_bytes(),
+            "note.md",
+            b"# note\n",
+        );
+        let note_id = item.target_id.unwrap();
+        state.with_library_mut(|db, _| {
+            match usage {
+                "course" => db.execute("INSERT INTO learning_course_notes(course_id,note_id) VALUES(?1,?2)", rusqlite::params![course_id,note_id]),
+                "review" => db.execute("INSERT INTO knowledge_reviews(note_id,due_date,status) VALUES(?1,'2026-10-30','waiting')", [&note_id]),
+                "order" => db.execute("INSERT INTO knowledge_note_order(scope,note_id,position) VALUES('__all__',?1,0)", [&note_id]),
+                _ => unreachable!(),
+            }.map_err(|error| error.to_string())?;
+            Ok(())
+        }).unwrap();
+
+        let report = import_ops::revert_batch(&state, &sc, &batch).unwrap();
+        assert_eq!(report["reverted"], json!([]), "{usage}");
+        assert_eq!(report["kept"][0]["outcome"], "kept_modified", "{usage}");
+        assert!(deleted_at(&state, &note_id).is_none(), "{usage}");
+    }
+}
+
+#[test]
 fn learning_import_recovery_revert_is_idempotent_and_rejects_unfinished_batch() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));

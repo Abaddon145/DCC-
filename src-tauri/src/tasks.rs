@@ -752,13 +752,11 @@ impl TaskRegistry {
                             crate::learning::excerpt_runner::ExcerptTaskRequest::Commit { .. }
                         )
                     );
-                let committed_import = result.is_ok()
-                    && matches!(
-                        &task.payload,
-                        TaskRequest::LearningImport(
-                            crate::learning::import_runner::ImportTaskRequest::Commit { .. }
-                        )
-                    );
+                let committed_import = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Commit { batch_id }), Ok(value))
+                        if value["status"] == "committed" && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
                 if committed_excerpt && task.stop_requested {
                     task.message = "摘录已提交，停止请求晚于保存；目标内容保留".into();
                 }
@@ -884,19 +882,45 @@ mod import_lifecycle_tests {
         use crate::learning::import_runner::ImportTaskRequest;
         let root = tempfile::tempdir().unwrap();
         let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch_id = Uuid::new_v4().to_string();
         let payload = TaskRequest::LearningImport(ImportTaskRequest::Commit {
-            batch_id: Uuid::new_v4().to_string(),
+            batch_id: batch_id.clone(),
         });
         let (task, _) = registry.submit("library".into(), payload).unwrap();
         registry.claim().unwrap();
         registry.cancel(&task.id).unwrap();
         registry.finish(
             &task.id,
-            Ok(serde_json::json!({"batchId":Uuid::new_v4().to_string(),"status":"committed"})),
+            Ok(serde_json::json!({"batchId":batch_id,"status":"committed"})),
         );
         let finished = registry.get(&task.id).unwrap();
         assert_eq!(finished.status, "completed");
         assert!(finished.message.contains("迁入已提交"));
+    }
+
+    #[test]
+    fn learning_import_task_does_not_report_cancelled_batch_as_committed() {
+        use crate::learning::import_runner::ImportTaskRequest;
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch_id = Uuid::new_v4().to_string();
+        let (task, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::LearningImport(ImportTaskRequest::Commit {
+                    batch_id: batch_id.clone(),
+                }),
+            )
+            .unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch_id,"status":"cancelled"})),
+        );
+        let finished = registry.get(&task.id).unwrap();
+        assert_eq!(finished.status, "stopped");
+        assert!(!finished.message.contains("迁入已提交"));
     }
 }
 #[cfg(test)]

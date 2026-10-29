@@ -30,6 +30,7 @@ function ImportPanel({libraryId,onClose}:Props){
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   const [status,setStatus]=useState("尚未绑定来源：选择本地来源目录后才会读取任何 Markdown。");
+  const [refresh,setRefresh]=useState(0);
 
   useEffect(()=>{
     const element=dialog.current!;
@@ -44,7 +45,7 @@ function ImportPanel({libraryId,onClose}:Props){
       if(active)setBatches(value);
     }).catch(reason=>{if(active)setError(String(reason));});
     return()=>{active=false;};
-  },[libraryId,status]);
+  },[libraryId,status,refresh]);
 
   useEffect(()=>{
     if(!selectedBatch){setItems([]);return;}
@@ -53,7 +54,7 @@ function ImportPanel({libraryId,onClose}:Props){
       if(active)setItems(value);
     }).catch(reason=>{if(active)setError(String(reason));});
     return()=>{active=false;};
-  },[libraryId,selectedBatch,status]);
+  },[libraryId,selectedBatch,status,refresh]);
 
   async function pickSource(){
     setBusy(true);setError("");setPreview(null);setRelativePath("");
@@ -133,7 +134,14 @@ function ImportPanel({libraryId,onClose}:Props){
       for(;;){
         const task=await api.getLibraryTask(created.id);
         if(task.status==="completed"){
-          setStatus(action==="commit"?`批次 ${batchId} 已提交（冲突仅留回执，不覆盖正文）。`:`批次 ${batchId} 已取消未完成项；已提交条目保留。`);
+          const result=task.result;
+          if(!result||typeof result!=="object"||!("batchId" in result)||result.batchId!==batchId||!("status" in result)||!["committed","cancelled"].includes(String(result.status)))
+            throw new Error("无法确认批次结果，请刷新批次并查看任务中心。");
+          if(result.status==="committed"){
+            setStatus(action==="commit"?`批次 ${batchId} 已提交（冲突仅留回执，不覆盖正文）。`:`批次已提交，无法取消；已提交内容保留（${batchId}）。`);
+          }else{
+            setStatus(action==="commit"?`批次已取消，未提交的条目未写入；此前已提交内容保留（${batchId}）。`:`批次 ${batchId} 已取消未完成项；已提交条目保留。`);
+          }
           setSelectedBatch(batchId);
           break;
         }
@@ -199,7 +207,7 @@ function ImportPanel({libraryId,onClose}:Props){
       <div className="knowledge-archive-body learning-import-batches">
         <nav aria-label="迁入批次">
           <h3>批次</h3>
-          <button type="button" className="secondary-button" disabled={busy} onClick={()=>setStatus(s=>s.endsWith("（已刷新批次）")?s:`${s}（已刷新批次）`)}>刷新批次</button>
+          <button type="button" className="secondary-button" disabled={busy} onClick={()=>setRefresh(value=>value+1)}>刷新批次</button>
           {batches.length===0?<p>尚无迁入批次。预检通过后可排队准备。</p>:batches.map(batch=>
             <button key={batch.id} type="button" aria-pressed={selectedBatch===batch.id} onClick={()=>setSelectedBatch(batch.id)}>
               <strong>{batch.status}</strong>

@@ -245,3 +245,67 @@ fn learning_import_runner_replays_committed_batch_receipt_without_restaging() {
         "committed replay must not add or stage items"
     );
 }
+
+#[test]
+fn learning_import_runner_reports_the_actual_terminal_batch_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    for (tag, first_action, second_action, expected_state, expected_phase) in [
+        (
+            "first-cancel",
+            "cancel",
+            "commit",
+            "cancelled",
+            "批次已取消，未提交的条目未写入，已提交内容保留",
+        ),
+        (
+            "first-commit",
+            "commit",
+            "cancel",
+            "committed",
+            "批次已提交，无法取消；已提交内容保留",
+        ),
+    ] {
+        let prepare = prepare_request(&profile, tag, &format!("{tag}.md"), "# 内容\n");
+        let (task, _) = state
+            .tasks
+            .submit(
+                library.clone(),
+                TaskRequest::LearningImport(prepare.clone()),
+            )
+            .unwrap();
+        let prepared = super::import_runner::run_local(&state, &task, &prepare).unwrap();
+        let batch_id = prepared["batchId"].as_str().unwrap().to_string();
+        let action = |name| {
+            if name == "commit" {
+                ImportTaskRequest::Commit {
+                    batch_id: batch_id.clone(),
+                }
+            } else {
+                ImportTaskRequest::Cancel {
+                    batch_id: batch_id.clone(),
+                }
+            }
+        };
+        let first = action(first_action);
+        let (first_task, _) = state
+            .tasks
+            .submit(library.clone(), TaskRequest::LearningImport(first.clone()))
+            .unwrap();
+        super::import_runner::run_local(&state, &first_task, &first).unwrap();
+        let second = action(second_action);
+        let (second_task, _) = state
+            .tasks
+            .submit(library.clone(), TaskRequest::LearningImport(second.clone()))
+            .unwrap();
+        let result = super::import_runner::run_local(&state, &second_task, &second).unwrap();
+        assert_eq!(result["status"], expected_state);
+        assert_eq!(
+            state.tasks.get(&second_task.id).unwrap().phase,
+            expected_phase
+        );
+    }
+}

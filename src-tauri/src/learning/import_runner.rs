@@ -215,6 +215,11 @@ pub(crate) fn run_local(
         }
         ImportTaskRequest::Commit { batch_id } => {
             let batch = import_ops::commit_batch(state, &scope, batch_id)?;
+            let phase = match batch.status.as_str() {
+                "committed" => "迁入已提交",
+                "cancelled" => "批次已取消，未提交的条目未写入，已提交内容保留",
+                _ => return Err("无法确认迁入批次状态".into()),
+            };
             let value = json!({
                 "batchId": batch.id,
                 "status": batch.status,
@@ -226,13 +231,18 @@ pub(crate) fn run_local(
                 1,
                 1,
                 String::new(),
-                "迁入已提交".into(),
+                phase.into(),
                 Some(value.clone()),
             );
             Ok(value)
         }
         ImportTaskRequest::Cancel { batch_id } => {
             let batch = import_ops::cancel_batch(state, &scope, batch_id)?;
+            let phase = match batch.status.as_str() {
+                "cancelled" => "迁入已取消",
+                "committed" => "批次已提交，无法取消；已提交内容保留",
+                _ => return Err("无法确认迁入批次状态".into()),
+            };
             let value = json!({
                 "batchId": batch.id,
                 "status": batch.status,
@@ -242,7 +252,7 @@ pub(crate) fn run_local(
                 1,
                 1,
                 String::new(),
-                "迁入已取消".into(),
+                phase.into(),
                 Some(value.clone()),
             );
             Ok(value)
