@@ -152,6 +152,9 @@ impl TaskRequest {
     fn ensure_retryable(&self) -> Result<(), String> {
         match self {
             Self::CourseAnalysis(_) => Err("课程分析必须重新预览并确认费用，不能重放旧批准".into()),
+            Self::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert {
+                ..
+            }) => Err("请返回迁入页面重新检查并确认撤回".into()),
             Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             _ => Ok(()),
         }
@@ -757,13 +760,21 @@ impl TaskRegistry {
                     (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Commit { batch_id }), Ok(value))
                         if value["status"] == "committed" && value["batchId"].as_str() == Some(batch_id.as_str())
                 );
+                let reverted_import = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert { batch_id, .. }), Ok(value))
+                        if value["status"] == "reverted" && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
                 if committed_excerpt && task.stop_requested {
                     task.message = "摘录已提交，停止请求晚于保存；目标内容保留".into();
                 }
                 if committed_import && task.stop_requested {
                     task.message = "迁入已提交，停止请求晚于保存；目标内容保留".into();
                 }
-                task.status = if committed_excerpt || committed_import {
+                if reverted_import && task.stop_requested {
+                    task.message = "撤回已完成，停止请求晚于保存；请查看撤回报告".into();
+                }
+                task.status = if committed_excerpt || committed_import || reverted_import {
                     "completed"
                 } else if task.stop_requested {
                     if matches!(task.payload, TaskRequest::Download(_)) {
@@ -921,6 +932,27 @@ mod import_lifecycle_tests {
         let finished = registry.get(&task.id).unwrap();
         assert_eq!(finished.status, "stopped");
         assert!(!finished.message.contains("迁入已提交"));
+    }
+
+    #[test]
+    fn learning_import_revert_late_stop_preserves_success_and_retry_needs_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({
+            "kind":"learningImport","request":{"action":"revert","batchId":batch,"expectedEpoch":Uuid::new_v4().to_string()}
+        })).unwrap();
+        assert!(payload.ensure_retryable().is_err());
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"reverted"})),
+        );
+        let finished = registry.get(&task.id).unwrap();
+        assert_eq!(finished.status, "completed");
+        assert!(finished.message.contains("撤回已完成"));
     }
 }
 #[cfg(test)]
@@ -1746,9 +1778,7 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                     TaskRequest::Restore { path } => {
                         let _playback =
                             crate::learning::native_player::quiesce_for_library_change(&state)?;
-                        state.with_active_mut(|active| {
-                            crate::backup::restore_library(active, Path::new(&path))
-                        })?;
+                        state.restore_backup_for_task(Path::new(&path))?;
                         let safety = state.with_active_mut(|active| {
                             Ok(active
                                 .base_dir

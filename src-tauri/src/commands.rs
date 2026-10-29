@@ -1846,7 +1846,7 @@ pub async fn restore_backup(app: AppHandle, path: String) -> Result<(), String> 
             if state.tasks.busy() {
                 return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
             }
-            backup::restore_library(active, &PathBuf::from(path))
+            state.restore_backup_locked(active, &PathBuf::from(path))
         })
     })
     .await

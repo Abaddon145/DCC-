@@ -137,21 +137,45 @@ struct PendingMoveUndo {
 }
 
 impl AppState {
+    pub(crate) fn restore_backup_locked(
+        &self,
+        active: &mut ActiveLibrary,
+        path: &Path,
+    ) -> Result<(), String> {
+        let mut nonce = self
+            .source_scope_nonce
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        let result = crate::backup::restore_library(active, path);
+        *nonce = Uuid::new_v4();
+        result
+    }
+
+    pub(crate) fn restore_backup_for_task(&self, path: &Path) -> Result<(), String> {
+        self.with_active_mut(|active| self.restore_backup_locked(active, path))
+    }
+
     pub fn recover_interrupted_restore(&self) -> Result<(), String> {
         let _playback = crate::learning::native_player::quiesce_for_library_change(self)?;
         self.with_active_mut(|active| {
             if self.tasks.busy() {
                 return Err("请先等待当前任务结束".into());
             }
+            let mut nonce = self
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?;
             let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
             let mut warning = self
                 .startup_warning
                 .lock()
                 .map_err(|_| "启动提示锁已损坏")?;
-            crate::backup::recover_interrupted_restore(active, |path| {
+            let result = crate::backup::recover_interrupted_restore(active, |path| {
                 protect_existing_library(path, &self.settings_path, &mut settings, &mut warning)
                     .map(|_| ())
-            })
+            });
+            *nonce = Uuid::new_v4();
+            result
         })
     }
 

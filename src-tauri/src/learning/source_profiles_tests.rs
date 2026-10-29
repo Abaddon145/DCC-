@@ -17,6 +17,58 @@ fn scope(state: &AppState) -> source_profiles::LibraryScope {
 }
 
 #[test]
+fn learning_source_scope_is_invalidated_after_task_backup_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let old_scope = scope(&state);
+    let profile = source_profiles::create(&state, &old_scope).unwrap();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state.restore_backup_for_task(&backup).unwrap();
+    assert!(source_profiles::get(&state, &old_scope, &profile.id).is_err());
+    let restored = source_profiles::get(&state, &scope(&state), &profile.id).unwrap();
+    assert_ne!(restored.access_epoch, profile.access_epoch);
+}
+
+#[test]
+fn learning_source_scope_is_invalidated_after_direct_backup_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let old_scope = scope(&state);
+    let profile = source_profiles::create(&state, &old_scope).unwrap();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state
+        .with_active_mut(|active| state.restore_backup_locked(active, &backup))
+        .unwrap();
+    assert!(source_profiles::get(&state, &old_scope, &profile.id).is_err());
+    let restored = source_profiles::get(&state, &scope(&state), &profile.id).unwrap();
+    assert_ne!(restored.access_epoch, profile.access_epoch);
+}
+
+#[test]
+fn learning_source_scope_is_invalidated_when_backup_restore_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let old_scope = scope(&state);
+    let profile = source_profiles::create(&state, &old_scope).unwrap();
+    assert!(state
+        .with_active_mut(|active| state.restore_backup_locked(active, &temp.path().join("missing")))
+        .is_err());
+    assert!(source_profiles::get(&state, &old_scope, &profile.id).is_err());
+    assert_eq!(
+        source_profiles::get(&state, &scope(&state), &profile.id)
+            .unwrap()
+            .id,
+        profile.id
+    );
+}
+
+#[test]
 fn learning_source_vault_binding_upgrade_rolls_back_and_preserves_profile() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));

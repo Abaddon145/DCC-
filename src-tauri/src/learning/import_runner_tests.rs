@@ -309,3 +309,128 @@ fn learning_import_runner_reports_the_actual_terminal_batch_state() {
         );
     }
 }
+
+#[test]
+fn learning_import_runner_queues_revert_and_returns_its_durable_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let prepare = prepare_request(&profile, "runner-revert", "revert.md", "# revert\n");
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(prepare.clone()),
+        )
+        .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &prepare).unwrap();
+    let batch_id = staged["batchId"].as_str().unwrap().to_string();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    super::import_runner::run_local(&state, &task, &commit).unwrap();
+    let note_id = import_ops::list_items(&state, &scope, &batch_id).unwrap()[0]
+        .target_id
+        .clone()
+        .unwrap();
+    let revert: ImportTaskRequest = serde_json::from_value(
+        json!({"action":"revert","batchId":batch_id,"expectedEpoch":profile.access_epoch}),
+    )
+    .unwrap();
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(revert.clone()))
+        .unwrap();
+    let result = super::import_runner::run_local(&state, &task, &revert).unwrap();
+    assert_eq!(result["status"], "reverted");
+    assert_eq!(result["report"]["reverted"], json!([note_id]));
+    let note = state
+        .with_library(|db, _| knowledge::get(db, &note_id))
+        .unwrap();
+    assert!(note.deleted_at.is_some());
+    #[cfg(windows)]
+    {
+        let batches = super::import_access::list_batches_in_library(&state, &library).unwrap();
+        let batch = batches.iter().find(|batch| batch.id == batch_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(batch).unwrap()["revertReport"],
+            result["report"]
+        );
+    }
+}
+
+#[test]
+fn learning_import_runner_rejects_revert_confirmed_before_backup_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let prepare = prepare_request(&profile, "stale-revert", "stale.md", "# stale\n");
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(prepare.clone()),
+        )
+        .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &prepare).unwrap();
+    let batch_id = staged["batchId"].as_str().unwrap().to_string();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    super::import_runner::run_local(&state, &task, &commit).unwrap();
+    let note_id = import_ops::list_items(&state, &scope, &batch_id).unwrap()[0]
+        .target_id
+        .clone()
+        .unwrap();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state.restore_backup_for_task(&backup).unwrap();
+    let stale: ImportTaskRequest = serde_json::from_value(
+        json!({"action":"revert","batchId":batch_id,"expectedEpoch":profile.access_epoch}),
+    )
+    .unwrap();
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(stale.clone()))
+        .unwrap();
+    assert!(super::import_runner::run_local(&state, &task, &stale).is_err());
+    assert!(state
+        .with_library(|db, _| knowledge::get(db, &note_id))
+        .unwrap()
+        .deleted_at
+        .is_none());
+    let epoch = state
+        .with_library(|db, _| Ok(source_profiles::get_in(db, &profile.id)?.access_epoch))
+        .unwrap();
+    assert_ne!(epoch, profile.access_epoch);
+    let fresh: ImportTaskRequest =
+        serde_json::from_value(json!({"action":"revert","batchId":batch_id,"expectedEpoch":epoch}))
+            .unwrap();
+    let (task, _) = state
+        .tasks
+        .submit(library, TaskRequest::LearningImport(fresh.clone()))
+        .unwrap();
+    assert_eq!(
+        super::import_runner::run_local(&state, &task, &fresh).unwrap()["status"],
+        "reverted"
+    );
+    state.with_library(|db, base| {
+        let archive: String = db.query_row("SELECT json_extract(receipt_json,'$.archiveId') FROM learning_import_items WHERE batch_id=?1", [&batch_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        assert_eq!(super::note_archive::read_archive(db, base, &archive)?, b"# stale\n");
+        Ok(())
+    }).unwrap();
+}

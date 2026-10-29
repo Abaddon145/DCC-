@@ -1,5 +1,5 @@
 import {act,fireEvent,render,screen,waitFor} from "@testing-library/react";
-import {beforeAll,beforeEach,expect,it,vi} from "vitest";
+import {afterEach,beforeAll,beforeEach,expect,it,vi} from "vitest";
 import {StrictMode} from "react";
 import LearningImportPanel from "./LearningImportPanel";
 import {learningApi} from "./api";
@@ -55,6 +55,8 @@ const batch={
   createdAt:"2026-10-28T00:00:00Z",
   finishedAt:null,
   receipt:null,
+  currentSourceEpoch:binding.epoch,
+  revertReport:null,
 };
 
 beforeAll(()=>{
@@ -77,6 +79,7 @@ beforeEach(()=>{
     cancellable:true,message:"",result:null,payload:{kind:"learningImport",request:{action:"prepare"}},
   } as never);
 });
+afterEach(()=>vi.restoreAllMocks());
 
 it("shows authorization boundary and does not bind without a native directory choice",async()=>{
   vi.mocked(learningApi.bindImportSource).mockResolvedValueOnce(null as never);
@@ -147,6 +150,55 @@ it("refreshes batches on every click after a prepare task changes state",async()
   fireEvent.click(screen.getByRole("button",{name:"刷新批次"}));
   expect(await screen.findByRole("button",{name:/committed/})).toBeInTheDocument();
   expect(learningApi.listImportBatches).toHaveBeenCalledTimes(3);
+});
+
+it("confirms a revert, queues it with the current epoch, and shows its durable report after reopening",async()=>{
+  const report={batchId:batch.id,reverted:["note-created"],kept:[{itemId:"item-kept",outcome:"kept_modified",noteId:"note-edited"}],archivesKept:true};
+  let savedReport:typeof report|null=null;
+  vi.mocked(learningApi.listImportBatches).mockImplementation(async()=>[{...batch,status:"committed",revertReport:savedReport}]);
+  vi.mocked(learningApi.listImportItems).mockResolvedValue([{id:"item",batchId:batch.id,status:"committed",conflictCode:null,targetId:"note-created",sourceSha256:"a".repeat(64),stageRelative:null}]);
+  vi.mocked(api.startLibraryTask).mockImplementation(async()=>{savedReport=report;return {id:"revert-task",status:"queued"} as never;});
+  vi.mocked(api.getLibraryTask).mockResolvedValue({id:"revert-task",status:"completed",result:{batchId:batch.id,status:"reverted",report}} as never);
+  const confirm=vi.spyOn(window,"confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  const view=render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:/committed/}));
+  await screen.findByText(/目标 note-cre/);
+  fireEvent.click(screen.getByRole("button",{name:"撤回本批迁入"}));
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button",{name:"撤回本批迁入"}));
+  await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningImport",request:{action:"revert",batchId:batch.id,expectedEpoch:binding.epoch}},"lib"));
+  expect(confirm).toHaveBeenCalledTimes(2);
+  expect(await screen.findByText(/已移入回收站：1/)).toBeInTheDocument();
+  expect(screen.getByText(/已修改或被使用/)).toBeInTheDocument();
+  view.unmount();
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:/committed/}));
+  expect(await screen.findByText(/已移入回收站：1/)).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"撤回本批迁入"})).toBeDisabled();
+});
+
+it("does not enable revert using another batch's stale items while the selection loads",async()=>{
+  const other={...batch,id:"44444444-4444-4444-8444-444444444444",status:"cancelled"};
+  vi.mocked(learningApi.listImportBatches).mockResolvedValue([{...batch,status:"committed"},other]);
+  let resolveOther:(items:Awaited<ReturnType<typeof learningApi.listImportItems>>)=>void=()=>{};
+  vi.mocked(learningApi.listImportItems).mockImplementation(async(_library,id)=>id===batch.id
+    ?[{id:"old",batchId:batch.id,status:"committed",conflictCode:null,targetId:"note",sourceSha256:"a".repeat(64),stageRelative:null}]
+    :new Promise(resolve=>{resolveOther=resolve;}));
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:/committed/}));
+  await waitFor(()=>expect(screen.getByRole("button",{name:"撤回本批迁入"})).toBeEnabled());
+  fireEvent.click(screen.getByRole("button",{name:/cancelled/}));
+  expect(screen.getByRole("button",{name:"撤回本批迁入"})).toBeDisabled();
+  await act(async()=>resolveOther([]));
+  expect(screen.getByRole("button",{name:"撤回本批迁入"})).toBeDisabled();
+});
+
+it("allows reverting items already committed in a cancelled batch",async()=>{
+  vi.mocked(learningApi.listImportBatches).mockResolvedValue([{...batch,status:"cancelled"}]);
+  vi.mocked(learningApi.listImportItems).mockResolvedValue([{id:"item",batchId:batch.id,status:"committed",conflictCode:null,targetId:"note",sourceSha256:"a".repeat(64),stageRelative:null}]);
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("button",{name:/cancelled/}));
+  await waitFor(()=>expect(screen.getByRole("button",{name:"撤回本批迁入"})).toBeEnabled());
 });
 
 it.each([

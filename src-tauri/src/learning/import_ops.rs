@@ -49,11 +49,13 @@ pub(super) struct ImportBatch {
     pub root_hash: String,
     pub source_profile_id: String,
     pub source_epoch: String,
+    pub current_source_epoch: String,
     pub request_sha256: String,
     pub status: String,
     pub created_at: String,
     pub finished_at: Option<String>,
     pub receipt_json: Option<String>,
+    pub revert_report_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +130,7 @@ fn load_batch(db: &Connection, id: &str) -> Result<ImportBatch, String> {
         return Err("迁入批次无效".into());
     }
     db.query_row(
-        "SELECT id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,finished_at,receipt_json FROM learning_import_batches WHERE id=?1",
+        "SELECT b.id,b.library_id,b.root_hash,b.source_profile_id,b.source_epoch,b.request_sha256,b.status,b.created_at,b.finished_at,b.receipt_json,p.access_epoch,r.report_json FROM learning_import_batches b JOIN learning_source_profiles p ON p.id=b.source_profile_id LEFT JOIN learning_import_reverts r ON r.batch_id=b.id WHERE b.id=?1",
         [id],
         |row| {
             Ok(ImportBatch {
@@ -137,11 +139,13 @@ fn load_batch(db: &Connection, id: &str) -> Result<ImportBatch, String> {
                 root_hash: row.get(2)?,
                 source_profile_id: row.get(3)?,
                 source_epoch: row.get(4)?,
+                current_source_epoch: row.get(10)?,
                 request_sha256: row.get(5)?,
                 status: row.get(6)?,
                 created_at: row.get(7)?,
                 finished_at: row.get(8)?,
                 receipt_json: row.get(9)?,
+                revert_report_json: row.get(11)?,
             })
         },
     )
@@ -359,11 +363,13 @@ pub(super) fn create_batch(
             root_hash: scope.root_hash().into(),
             source_profile_id: profile.id,
             source_epoch: epoch.into(),
+            current_source_epoch: profile.access_epoch,
             request_sha256: request_sha256.into(),
             status: "pending".into(),
             created_at: now(),
             finished_at: None,
             receipt_json: None,
+            revert_report_json: None,
         };
         db.execute(
             "INSERT INTO learning_import_batches(id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,finished_at,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,NULL,NULL)",
@@ -807,12 +813,19 @@ pub(super) fn list_items(
 pub(super) fn revert_batch(
     state: &AppState,
     scope: &source_profiles::LibraryScope,
+    expected_epoch: &str,
     batch_id: &str,
 ) -> Result<Value, String> {
+    if !source_profiles::valid_uuid(expected_epoch) {
+        return Err("来源状态无效，请重新读取批次".into());
+    }
     scoped_base(state, scope, |db, _| {
         let batch = load_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() {
             return Err("迁入批次不属于当前素材库".into());
+        }
+        if batch.current_source_epoch != expected_epoch {
+            return Err("来源状态已变化，请重新读取批次并确认撤回".into());
         }
         if let Some(saved) = db
             .query_row(
@@ -825,8 +838,14 @@ pub(super) fn revert_batch(
         {
             return serde_json::from_str(&saved).map_err(|_| "迁入撤回记录损坏".into());
         }
-        if batch.status != "committed" {
+        if !matches!(batch.status.as_str(), "committed" | "cancelled") {
             return Err("只能撤回已提交的迁入批次".into());
+        }
+        if batch.status == "cancelled" && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM learning_import_items WHERE batch_id=?1 AND status IN ('committed','conflict'))",
+            [&batch.id], |row| row.get::<_, bool>(0),
+        ).map_err(|_| "无法检查已提交条目")? {
+            return Err("批次没有已提交的迁入条目".into());
         }
         let ids = db
             .prepare(

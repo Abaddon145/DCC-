@@ -89,9 +89,11 @@ pub struct ImportBatchView {
     pub request_sha256: String,
     pub source_profile_id: String,
     pub source_epoch: String,
+    pub current_source_epoch: String,
     pub created_at: String,
     pub finished_at: Option<String>,
     pub receipt: Option<Value>,
+    pub revert_report: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -575,22 +577,31 @@ pub fn list_batches_in_library(
 ) -> Result<Vec<ImportBatchView>, String> {
     let scope = scope_for(state, library)?;
     let batches = import_ops::list_batches(state, &scope)?;
-    Ok(batches
+    batches
         .into_iter()
-        .map(|b| ImportBatchView {
-            id: b.id,
-            status: b.status,
-            request_sha256: b.request_sha256,
-            source_profile_id: b.source_profile_id,
-            source_epoch: b.source_epoch,
-            created_at: b.created_at,
-            finished_at: b.finished_at,
-            receipt: b
-                .receipt_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok()),
+        .map(|b| {
+            Ok(ImportBatchView {
+                id: b.id,
+                status: b.status,
+                request_sha256: b.request_sha256,
+                source_profile_id: b.source_profile_id,
+                source_epoch: b.source_epoch,
+                current_source_epoch: b.current_source_epoch,
+                created_at: b.created_at,
+                finished_at: b.finished_at,
+                receipt: b
+                    .receipt_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok()),
+                revert_report: b
+                    .revert_report_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|_| "迁入撤回记录损坏")?,
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub fn list_items_in_library(

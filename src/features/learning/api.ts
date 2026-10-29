@@ -36,7 +36,7 @@ export type ImportNotePreview={
 };
 export type ImportBatchView={
   id:string;status:string;requestSha256:string;sourceProfileId:string;sourceEpoch:string;
-  createdAt:string;finishedAt:string|null;receipt:unknown|null;
+  currentSourceEpoch:string;createdAt:string;finishedAt:string|null;receipt:unknown|null;revertReport:unknown|null;
 };
 export type ImportItemView={
   id:string;batchId:string;status:string;conflictCode:string|null;targetId:string|null;

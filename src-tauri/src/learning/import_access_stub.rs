@@ -43,9 +43,11 @@ pub struct ImportBatchView {
     pub request_sha256: String,
     pub source_profile_id: String,
     pub source_epoch: String,
+    pub current_source_epoch: String,
     pub created_at: String,
     pub finished_at: Option<String>,
     pub receipt: Option<Value>,
+    pub revert_report: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

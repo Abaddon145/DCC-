@@ -14,6 +14,15 @@ const CONFLICT_LABEL:Record<string,string>={
   both_changed:"双方已变",
   target_unavailable:"目标不可用",
 };
+const REVERT_LABEL:Record<string,string>={
+  kept_modified:"已修改或被使用",kept_reused:"已被其他批次复用",kept_conflict:"存在冲突",kept_missing:"目标不可用",
+};
+type RevertReport={batchId:string;reverted:string[];kept:{itemId:string;outcome:string;noteId:string|null}[];archivesKept:true};
+function readRevertReport(value:unknown,batchId:string):RevertReport|null{
+  if(!value||typeof value!=="object"||!("batchId" in value)||value.batchId!==batchId||!("reverted" in value)||!Array.isArray(value.reverted)||!value.reverted.every(v=>typeof v==="string")||!("kept" in value)||!Array.isArray(value.kept)||!("archivesKept" in value)||value.archivesKept!==true)return null;
+  if(!value.kept.every(v=>v&&typeof v==="object"&&typeof v.itemId==="string"&&typeof v.outcome==="string"&&(typeof v.noteId==="string"||v.noteId===null)))return null;
+  return value as RevertReport;
+}
 
 export default function LearningImportPanel(props:Props){
   return <ImportPanel key={props.libraryId} {...props}/>;
@@ -124,24 +133,26 @@ function ImportPanel({libraryId,onClose}:Props){
     }finally{setBusy(false);}
   }
 
-  async function runBatchAction(action:"commit"|"cancel",batchId:string){
+  async function runBatchAction(action:"commit"|"cancel"|"revert",batchId:string,expectedEpoch?:string){
     setBusy(true);setError("");
     try{
-      const created=await api.startLibraryTask(
-        {kind:"learningImport",request:{action,batchId}},
-        libraryId,
-      );
+      if(action==="revert"&&!expectedEpoch)throw new Error("来源状态不可用，请刷新批次并重新确认。");
+      const request=action==="revert"?{action,batchId,expectedEpoch:expectedEpoch!}:{action,batchId};
+      const created=await api.startLibraryTask({kind:"learningImport",request},libraryId);
       for(;;){
         const task=await api.getLibraryTask(created.id);
         if(task.status==="completed"){
           const result=task.result;
-          if(!result||typeof result!=="object"||!("batchId" in result)||result.batchId!==batchId||!("status" in result)||!["committed","cancelled"].includes(String(result.status)))
+          if(!result||typeof result!=="object"||!("batchId" in result)||result.batchId!==batchId||!("status" in result))
             throw new Error("无法确认批次结果，请刷新批次并查看任务中心。");
-          if(result.status==="committed"){
+          if(action==="revert"){
+            if(result.status!=="reverted"||!("report" in result)||!readRevertReport(result.report,batchId))throw new Error("无法确认撤回报告，请刷新批次并查看任务中心。");
+            setStatus("撤回已完成；已修改、被使用或有冲突的笔记保持不变。");
+          }else if(result.status==="committed"){
             setStatus(action==="commit"?`批次 ${batchId} 已提交（冲突仅留回执，不覆盖正文）。`:`批次已提交，无法取消；已提交内容保留（${batchId}）。`);
-          }else{
+          }else if(result.status==="cancelled"){
             setStatus(action==="commit"?`批次已取消，未提交的条目未写入；此前已提交内容保留（${batchId}）。`:`批次 ${batchId} 已取消未完成项；已提交条目保留。`);
-          }
+          }else throw new Error("无法确认批次结果，请刷新批次并查看任务中心。");
           setSelectedBatch(batchId);
           break;
         }
@@ -155,6 +166,11 @@ function ImportPanel({libraryId,onClose}:Props){
       setError(String(reason));
     }finally{setBusy(false);}
   }
+
+  const selected=batches.find(batch=>batch.id===selectedBatch);
+  const revertReport=selected?.revertReport?readRevertReport(selected.revertReport,selected.id):null;
+  const selectedItems=items.filter(item=>item.batchId===selectedBatch);
+  const canRevert=!!selected&&!selected.revertReport&&["committed","cancelled"].includes(selected.status)&&selectedItems.some(item=>["committed","conflict"].includes(item.status));
 
   return <div className="modal-backdrop knowledge-archive-backdrop">
     <dialog ref={dialog} className="knowledge-archive-dialog learning-import-dialog" aria-label="学习资料迁入" onCancel={event=>{event.preventDefault();onClose();}} onPointerDown={event=>{
@@ -224,9 +240,13 @@ function ImportPanel({libraryId,onClose}:Props){
               <div className="learning-import-batch-actions">
                 <button type="button" disabled={busy} onClick={()=>void runBatchAction("commit",selectedBatch)}>提交批次</button>
                 <button type="button" disabled={busy} onClick={()=>void runBatchAction("cancel",selectedBatch)}>取消未完成项</button>
+                <button type="button" disabled={busy||!canRevert} onClick={()=>{
+                  if(!selected||!window.confirm("撤回本批迁入？仅将本批新建且之后未修改、未被使用的笔记移入回收站；其他笔记和原文归档保留。"))return;
+                  void runBatchAction("revert",selected.id,selected.currentSourceEpoch);
+                }}>撤回本批迁入</button>
               </div>
-              {items.length===0?<p>该批次暂无条目。</p>:
-                <ul>{items.map(item=><li key={item.id}>
+              {selectedItems.length===0?<p>该批次暂无条目。</p>:
+                <ul>{selectedItems.map(item=><li key={item.id}>
                   <strong>{item.status}</strong>
                   {item.conflictCode?` · 冲突 ${item.conflictCode}`:""}
                   {item.targetId?` · 目标 ${item.targetId.slice(0,8)}…`:""}
@@ -234,6 +254,13 @@ function ImportPanel({libraryId,onClose}:Props){
                 </li>)}</ul>}
               {batches.find(b=>b.id===selectedBatch)?.receipt&&
                 <pre className="learning-import-receipt" aria-label="批次回执">{JSON.stringify(batches.find(b=>b.id===selectedBatch)?.receipt,null,2)}</pre>}
+              {selected?.revertReport&&!revertReport&&<p role="alert">撤回报告损坏，请检查批次，未重复执行撤回。</p>}
+              {revertReport&&<section aria-label="撤回报告">
+                <h4>撤回报告</h4>
+                <p>已移入回收站：{revertReport.reverted.length}；保留：{revertReport.kept.length}。原文归档保留。</p>
+                <ul>{revertReport.reverted.map(id=><li key={id}>已移入回收站：{id}</li>)}
+                  {revertReport.kept.map(item=><li key={item.itemId}>{REVERT_LABEL[item.outcome]||item.outcome}：{item.noteId||item.itemId}</li>)}</ul>
+              </section>}
             </>}
         </section>
       </div>

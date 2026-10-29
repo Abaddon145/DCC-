@@ -271,6 +271,26 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     fs::copy(stage.path().join("library.db"), &prepared_db)
         .map_err(|e| format!("备份数据库缺失：{e}"))?;
     let check = db::open_database(&prepared_db)?;
+    let has_imports: bool = check
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM learning_import_batches)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "无法检查迁入批次，未替换素材库")?;
+    if has_imports {
+        let (library_id, root_hash) =
+            crate::learning::analysis_store::library_identity(&active.base_dir)?;
+        if library_id != active.marker.library_id {
+            return Err("目标素材库身份已变化，未恢复备份".into());
+        }
+        check
+            .execute(
+                "UPDATE learning_import_batches SET library_id=?1,root_hash=?2",
+                rusqlite::params![library_id, root_hash],
+            )
+            .map_err(|_| "无法恢复迁入批次身份，未替换素材库")?;
+    }
     crate::media_access::invalidate_external_grants(&check)?;
     crate::learning::source_profiles::invalidate_epochs(&check)?;
     crate::learning::analysis_store::invalidate_previews(&check)?;

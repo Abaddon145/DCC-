@@ -33,6 +33,10 @@ pub enum ImportTaskRequest {
     Cancel {
         batch_id: String,
     },
+    Revert {
+        batch_id: String,
+        expected_epoch: String,
+    },
 }
 
 impl ImportTaskRequest {
@@ -78,6 +82,17 @@ impl ImportTaskRequest {
                 }
                 Ok(())
             }
+            Self::Revert {
+                batch_id,
+                expected_epoch,
+            } => {
+                if !source_profiles::valid_uuid(batch_id)
+                    || !source_profiles::valid_uuid(expected_epoch)
+                {
+                    return Err("迁入批次或来源状态无效".into());
+                }
+                Ok(())
+            }
         }
     }
 
@@ -86,6 +101,7 @@ impl ImportTaskRequest {
             Self::Prepare { .. } => "学习资料迁入准备",
             Self::Commit { .. } => "学习资料迁入提交",
             Self::Cancel { .. } => "学习资料迁入取消",
+            Self::Revert { .. } => "学习资料迁入撤回",
         }
     }
 }
@@ -253,6 +269,29 @@ pub(crate) fn run_local(
                 1,
                 String::new(),
                 phase.into(),
+                Some(value.clone()),
+            );
+            Ok(value)
+        }
+        ImportTaskRequest::Revert {
+            batch_id,
+            expected_epoch,
+        } => {
+            let report = import_ops::revert_batch(state, &scope, expected_epoch, batch_id)?;
+            if report["batchId"].as_str() != Some(batch_id.as_str())
+                || !report["reverted"].is_array()
+                || !report["kept"].is_array()
+                || report["archivesKept"] != true
+            {
+                return Err("迁入撤回记录损坏，请检查批次".into());
+            }
+            let value = json!({"batchId": batch_id, "status": "reverted", "report": report});
+            state.tasks.update(
+                &task.id,
+                1,
+                1,
+                String::new(),
+                "迁入撤回已完成".into(),
                 Some(value.clone()),
             );
             Ok(value)
