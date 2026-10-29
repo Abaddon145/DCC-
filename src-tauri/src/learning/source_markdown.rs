@@ -26,6 +26,7 @@ const MAX_MARKDOWN: u64 = 5 * 1024 * 1024;
 pub(super) struct Inspection {
     pub state: NoteOriginState,
     pub sha256: String,
+    pub target_token: String,
     pub conversion: super::note_conversion::ConversionPreview,
 }
 
@@ -407,16 +408,18 @@ fn inspect_markdown(
         &super::note_conversion::AttachmentMap::new(),
         &super::note_conversion::MediaMap::new(),
     )?;
-    let state = source_profiles::scoped(state, &selection.scope, |db| {
+    let (state, target_token) = source_profiles::scoped(state, &selection.scope, |db| {
         let tx = db.unchecked_transaction().map_err(|_| "无法检查笔记来源")?;
         selection.check_identity(&tx, &identity)?;
         let result = note_origins::inspect(&tx, &key, &sha256)?;
+        let token = note_origins::preview_token(&tx, &key, &sha256)?;
         tx.commit().map_err(|_| "无法检查笔记来源")?;
-        Ok(result)
+        Ok((result, token))
     })?;
     Ok(Inspection {
         state,
         sha256,
+        target_token,
         conversion,
     })
 }

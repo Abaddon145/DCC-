@@ -7,6 +7,7 @@ import {api} from "../../lib/api";
 
 vi.mock("./api",()=>({learningApi:{
   bindImportSource:vi.fn(),
+  pickImportNote:vi.fn(),
   previewImportNote:vi.fn(),
   queueImportPrepare:vi.fn(),
   listImportBatches:vi.fn(),
@@ -28,6 +29,8 @@ const previewOk={
   vault:binding.vault,
   relativePath:"notes/hello.md",
   sourceSha256:"a".repeat(64),
+  selectionId:"33333333-3333-4333-8333-333333333333",
+  targetToken:"b".repeat(64),
   conflict:"unmapped",
   targetId:null,
   title:"迁入预检",
@@ -66,6 +69,7 @@ beforeEach(()=>{
   vi.mocked(learningApi.listImportBatches).mockResolvedValue([]);
   vi.mocked(learningApi.listImportItems).mockResolvedValue([]);
   vi.mocked(learningApi.bindImportSource).mockResolvedValue(structuredClone(binding));
+  vi.mocked(learningApi.pickImportNote).mockResolvedValue(null);
   vi.mocked(learningApi.previewImportNote).mockResolvedValue(structuredClone(previewOk));
   vi.mocked(learningApi.queueImportPrepare).mockResolvedValue({
     id:"task-1",libraryId:"lib",label:"学习资料迁入准备",status:"queued",
@@ -92,12 +96,13 @@ it("binds a user-selected folder, previews conflict without overwrite, and queue
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
   expect(await screen.findByText(/C:\/synthetic\/vault/)).toBeInTheDocument();
   expect(learningApi.bindImportSource).toHaveBeenCalledWith("lib","vault-ui");
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"notes/hello.md"}});
   fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
   expect(await screen.findByText(/不会静默覆盖/)).toBeInTheDocument();
   expect(screen.getByText(/会覆盖正文：否/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button",{name:"排队准备（不覆盖）"}));
   await waitFor(()=>expect(learningApi.queueImportPrepare).toHaveBeenCalledWith(
-    "lib",binding.profileId,binding.epoch,binding.vault,binding.root,"notes/hello.md",
+    "lib",binding.profileId,binding.epoch,binding.vault,binding.root,"notes/hello.md",previewOk.sourceSha256,previewOk.selectionId,previewOk.targetToken,
   ));
 });
 
@@ -115,6 +120,7 @@ it("refuses prepare when conversion is pending and surfaces recovery for batches
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
   fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
   await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"notes/hello.md"}});
   fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
   expect(await screen.findByText(/失败闭合/)).toBeInTheDocument();
   expect(screen.getByText(/不可排队，请按预检结果处理后重试/)).toBeInTheDocument();
@@ -144,4 +150,40 @@ it("closes from native cancel",async()=>{
   await screen.findByRole("dialog",{name:"学习资料迁入"});
   fireEvent(screen.getByRole("dialog",{name:"学习资料迁入"}),new Event("cancel",{cancelable:true}));
   expect(close).toHaveBeenCalledTimes(1);
+});
+
+
+it("clears the previous preview when the relative path changes",async()=>{
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
+  await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"notes/hello.md"}});
+  fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
+  await screen.findByText(/预检通过：将新建笔记/);
+  expect(screen.getByRole("button",{name:"排队准备（不覆盖）"})).toBeEnabled();
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"different.md"}});
+  expect(screen.getByRole("button",{name:"排队准备（不覆盖）"})).toBeDisabled();
+});
+
+
+it("selects a Markdown file through the backend and previews its result",async()=>{
+  vi.mocked(learningApi.pickImportNote).mockResolvedValueOnce(structuredClone(previewOk));
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
+  await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.click(screen.getByRole("button",{name:"选择 Markdown…"}));
+  expect(await screen.findByText(/预检通过：将新建笔记/)).toBeInTheDocument();
+  expect(learningApi.pickImportNote).toHaveBeenCalledWith("lib",binding.profileId,binding.epoch,binding.vault,binding.root);
+  expect(screen.getByLabelText("迁入相对路径")).toHaveValue("notes/hello.md");
+});
+
+
+it("keeps the selected vault but clears the preview when file picking is cancelled",async()=>{
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
+  await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.click(screen.getByRole("button",{name:"选择 Markdown…"}));
+  expect(await screen.findByText(/已取消笔记选择；来源目录仍保留/)).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"排队准备（不覆盖）"})).toBeDisabled();
+  expect(screen.getByRole("button",{name:"选择 Markdown…"})).toBeEnabled();
 });

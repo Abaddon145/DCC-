@@ -174,6 +174,26 @@ pub(super) fn inspect(
     })
 }
 
+/// Fingerprint the observed mapping and target revision/content for preview freshness.
+pub(super) fn preview_token(
+    db: &Connection,
+    key: &NoteOriginKey,
+    source_hash: &str,
+) -> Result<String, String> {
+    let _ = inspect(db, key, source_hash)?;
+    let mapping: Option<(String, String, String, i64, String)> = db.query_row(
+        "SELECT target_kind,target_id,source_sha256,target_revision,target_sha256 FROM learning_origin_map WHERE source_profile_id=?1 AND source_key_json=?2",
+        params![key.profile, key.encoded], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|_| "无法检查笔记来源")?;
+    let target = match &mapping {
+        Some((_, id, _, _, _)) => note_snapshot(db, id)?,
+        None => None,
+    };
+    let bytes = serde_json::to_vec(&(key.encoded(), source_hash, mapping, target))
+        .map_err(|_| "无法检查笔记来源")?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 /// Record only inside the transaction that publishes the verified target note.
 pub(super) fn record_note_in(
     db: &Connection,

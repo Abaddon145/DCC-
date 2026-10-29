@@ -30,7 +30,7 @@ export type ImportSourceBinding={
   profileId:string;epoch:string;vault:string;root:string;libraryId:string;boundary:string;
 };
 export type ImportNotePreview={
-  profileId:string;epoch:string;vault:string;relativePath:string;sourceSha256:string;
+  profileId:string;epoch:string;vault:string;relativePath:string;sourceSha256:string;selectionId:string;targetToken:string;
   conflict:string;targetId:string|null;title:string;pendingConversion:boolean;warnings:string[];
   canPrepare:boolean;willOverwrite:boolean;message:string;
 };
@@ -91,8 +91,9 @@ export const learningApi={
   transcriptPage:(expectedLibraryId:string,courseId:string,subtitleId:string,offset=0,limit=50)=>invoke<Page<TranscriptCue>>("transcript_page",{expectedLibraryId,courseId,subtitleId,offset,limit}),
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
   bindImportSource:(expectedLibraryId:string,vault:string)=>invoke<ImportSourceBinding|null>("bind_learning_import_source",{expectedLibraryId,vault}),
+  pickImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string)=>invoke<ImportNotePreview|null>("pick_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot}),
   previewImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<ImportNotePreview>("preview_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
-  queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
+  queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string,expectedSourceSha256:string,expectedSelectionId:string,expectedTargetToken:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath,expectedSourceSha256,expectedSelectionId,expectedTargetToken}),
   listImportBatches:(expectedLibraryId:string)=>invoke<ImportBatchView[]>("list_learning_import_batches",{expectedLibraryId}),
   listImportItems:(expectedLibraryId:string,batchId:string)=>invoke<ImportItemView[]>("list_learning_import_items",{expectedLibraryId,batchId}),
 };

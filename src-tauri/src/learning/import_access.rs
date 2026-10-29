@@ -20,6 +20,34 @@ use tauri_plugin_dialog::DialogExt;
 pub(crate) struct AuthorizedSource {
     scope: source_profiles::LibraryScope,
     binding: ImportSourceBinding,
+    selection_id: String,
+}
+
+#[derive(Default)]
+pub(crate) struct ImportSelection {
+    generation: String,
+    selected: Option<AuthorizedSource>,
+}
+
+impl ImportSelection {
+    pub(crate) fn permits(&self, id: &str, payload: &TaskRequest) -> bool {
+        let TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            profile_id,
+            epoch,
+            vault,
+            ..
+        }) = payload
+        else {
+            return false;
+        };
+        self.generation == id
+            && self.selected.as_ref().is_some_and(|source| {
+                source.selection_id == id
+                    && source.binding.profile_id == *profile_id
+                    && source.binding.epoch == *epoch
+                    && source.binding.vault == *vault
+            })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +69,8 @@ pub struct ImportNotePreview {
     pub vault: String,
     pub relative_path: String,
     pub source_sha256: String,
+    pub selection_id: String,
+    pub target_token: String,
     pub conflict: String,
     pub target_id: Option<String>,
     pub title: String,
@@ -159,6 +189,7 @@ fn build_preview(
     selection: &source_markdown::VaultSelection,
     relative_path: &str,
     inspection: &source_markdown::Inspection,
+    selection_id: &str,
 ) -> ImportNotePreview {
     let (conflict, target_id) = conflict_label(&inspection.state);
     let document = &inspection.conversion.document;
@@ -180,6 +211,8 @@ fn build_preview(
         vault: selection.vault_id().into(),
         relative_path: relative_path.into(),
         source_sha256: inspection.sha256.clone(),
+        selection_id: selection_id.into(),
+        target_token: inspection.target_token.clone(),
         conflict,
         target_id,
         title,
@@ -220,11 +253,26 @@ pub(super) fn bind_with_picker(
     picker: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<Option<ImportSourceBinding>, String> {
     let scope = scope_for(state, library)?;
-    *state
-        .learning_import_selection
-        .lock()
-        .map_err(|_| "来源会话状态不可用")? = None;
-    let Some(root) = picker() else {
+    let ticket = uuid::Uuid::new_v4().to_string();
+    {
+        let mut current = state
+            .learning_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        current.generation = ticket.clone();
+        current.selected = None;
+    }
+    let picked = picker();
+    {
+        let current = state
+            .learning_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if current.generation != ticket {
+            return Err("来源选择已变化，请重试".into());
+        }
+    }
+    let Some(root) = picked else {
         return Ok(None);
     };
     let selection = source_markdown::create_vault_source(state, &scope, vault, &root)?;
@@ -239,12 +287,17 @@ pub(super) fn bind_with_picker(
             "仅绑定你明确选择的本地目录身份；不会自动读取真实映流清单路径，也不会覆盖已有笔记正文。"
                 .into(),
     };
-    *state
+    let mut current = state
         .learning_import_selection
         .lock()
-        .map_err(|_| "来源会话状态不可用")? = Some(AuthorizedSource {
+        .map_err(|_| "来源会话状态不可用")?;
+    if current.generation != ticket {
+        return Err("来源选择已变化，请重试".into());
+    }
+    current.selected = Some(AuthorizedSource {
         scope,
         binding: binding.clone(),
+        selection_id: ticket,
     });
     Ok(Some(binding))
 }
@@ -260,6 +313,7 @@ fn authorized_selection(
     (
         source_markdown::VaultSelection,
         source_profiles::LibraryScope,
+        String,
     ),
     String,
 > {
@@ -268,6 +322,7 @@ fn authorized_selection(
         .learning_import_selection
         .lock()
         .map_err(|_| "来源会话状态不可用")?
+        .selected
         .clone()
         .ok_or("请重新选择来源目录")?;
     let binding = &selection.binding;
@@ -287,7 +342,32 @@ fn authorized_selection(
         vault,
         Path::new(root),
     )?;
-    Ok((vault_selection, selection.scope))
+    Ok((vault_selection, selection.scope, selection.selection_id))
+}
+
+fn ensure_source_current(
+    state: &AppState,
+    scope: &source_profiles::LibraryScope,
+    selection_id: &str,
+) -> Result<(), String> {
+    source_profiles::scoped(state, scope, |db| {
+        let current = state
+            .learning_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        let selected = current
+            .selected
+            .as_ref()
+            .filter(|source| source.selection_id == selection_id)
+            .ok_or("来源选择已变化，请重新预检")?;
+        if current.generation != selection_id
+            || source_profiles::get_in(db, &selected.binding.profile_id)?.access_epoch
+                != selected.binding.epoch
+        {
+            return Err("来源选择已变化，请重新预检".into());
+        }
+        Ok(())
+    })
 }
 
 pub(super) fn preview_authorized(
@@ -299,9 +379,66 @@ pub(super) fn preview_authorized(
     root: &str,
     relative: &str,
 ) -> Result<ImportNotePreview, String> {
-    let (selection, _) = authorized_selection(state, library, profile, epoch, vault, root)?;
+    let (selection, scope, selection_id) =
+        authorized_selection(state, library, profile, epoch, vault, root)?;
     let inspection = selection.inspect(state, relative)?;
-    Ok(build_preview(&selection, relative, &inspection))
+    ensure_source_current(state, &scope, &selection_id)?;
+    Ok(build_preview(
+        &selection,
+        relative,
+        &inspection,
+        &selection_id,
+    ))
+}
+
+pub(super) fn pick_note_with_picker(
+    state: &AppState,
+    library: &str,
+    profile: &str,
+    epoch: &str,
+    vault: &str,
+    root: &str,
+    picker: impl FnOnce(&Path) -> Option<PathBuf>,
+) -> Result<Option<ImportNotePreview>, String> {
+    let (selection, scope, selection_id) =
+        authorized_selection(state, library, profile, epoch, vault, root)?;
+    let initial_root = selection.root_path().to_path_buf();
+    drop(selection);
+    let picked = picker(&initial_root);
+    ensure_source_current(state, &scope, &selection_id)?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    if !path.is_absolute() {
+        return Err("请选择来源目录中的 Markdown 文件".into());
+    }
+    crate::media_access::reject_links(&path)?;
+    let canonical = path.canonicalize().map_err(|_| "所选笔记不可读取")?;
+    crate::media_access::reject_links(&canonical)?;
+    let (selection, current_scope, current_id) =
+        authorized_selection(state, library, profile, epoch, vault, root)?;
+    if current_scope != scope || current_id != selection_id {
+        return Err("来源选择已变化，请重新选择笔记".into());
+    }
+    let relative = canonical
+        .strip_prefix(selection.root_path())
+        .map_err(|_| "请选择已授权来源目录中的笔记")?;
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("所选笔记路径无效".into());
+        };
+        segments.push(name.to_str().ok_or("所选笔记路径无法识别")?);
+    }
+    let relative = segments.join("/");
+    let inspection = selection.inspect(state, &relative)?;
+    ensure_source_current(state, &scope, &selection_id)?;
+    Ok(Some(build_preview(
+        &selection,
+        &relative,
+        &inspection,
+        &selection_id,
+    )))
 }
 
 pub fn preview_in_library(
@@ -316,7 +453,7 @@ pub fn preview_in_library(
     let selection = open_selection(state, library, profile_id, epoch, vault, selected_root)?;
     let inspection = selection.inspect(state, relative_path)?;
     require_active(state, library)?;
-    Ok(build_preview(&selection, relative_path, &inspection))
+    Ok(build_preview(&selection, relative_path, &inspection, ""))
 }
 
 pub(super) fn prepare_payload(
@@ -327,11 +464,23 @@ pub(super) fn prepare_payload(
     vault: &str,
     selected_root: &str,
     relative_path: &str,
-) -> Result<(TaskRequest, source_profiles::LibraryScope), String> {
-    let (selection, scope) =
+    expected_sha256: &str,
+    expected_selection_id: &str,
+    expected_target_token: &str,
+) -> Result<(TaskRequest, source_profiles::LibraryScope, String), String> {
+    let (selection, scope, selection_id) =
         authorized_selection(state, library, profile_id, epoch, vault, selected_root)?;
+    if selection_id != expected_selection_id {
+        return Err("来源选择已变化，请重新预检".into());
+    }
     let inspection = selection.inspect(state, relative_path)?;
-    let preview = build_preview(&selection, relative_path, &inspection);
+    let preview = build_preview(&selection, relative_path, &inspection, &selection_id);
+    if preview.source_sha256 != expected_sha256 {
+        return Err("来源笔记在预检后发生变化，请重新预检".into());
+    }
+    if preview.target_token != expected_target_token {
+        return Err("目标笔记在预检后发生变化，请重新预检".into());
+    }
     if !preview.can_prepare {
         return Err(preview.message);
     }
@@ -346,7 +495,7 @@ pub(super) fn prepare_payload(
         .conversion
         .document
         .ok_or_else(|| "尚无可用正文，不能进入暂存".to_string())?;
-    require_active(state, library)?;
+    ensure_source_current(state, &scope, &selection_id)?;
     let request_seed = format!(
         "{}|{}|{}|{}|{}",
         preview.profile_id,
@@ -369,7 +518,34 @@ pub(super) fn prepare_payload(
             markdown,
         }),
         scope,
+        selection_id,
     ))
+}
+
+pub(crate) fn verify_prepared_target(
+    db: &rusqlite::Connection,
+    payload: &TaskRequest,
+    expected: &str,
+) -> Result<(), String> {
+    let TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+        profile_id,
+        epoch,
+        vault,
+        relative_path,
+        source_sha256,
+        ..
+    }) = payload
+    else {
+        return Err("迁入预检任务无效".into());
+    };
+    if source_profiles::get_in(db, profile_id)?.access_epoch != *epoch {
+        return Err("来源状态已变化，请重新预检".into());
+    }
+    let key = super::note_origins::NoteOriginKey::new(profile_id, vault, relative_path)?;
+    if super::note_origins::preview_token(db, &key, source_sha256)? != expected {
+        return Err("目标笔记在预检后发生变化，请重新预检".into());
+    }
+    Ok(())
 }
 
 pub fn list_batches_in_library(
@@ -451,6 +627,39 @@ pub async fn bind_learning_import_source(
 }
 
 #[tauri::command]
+pub async fn pick_learning_import_note(
+    app: AppHandle,
+    expected_library_id: String,
+    profile_id: String,
+    epoch: String,
+    vault: String,
+    selected_root: String,
+) -> Result<Option<ImportNotePreview>, String> {
+    let picker_app = app.clone();
+    job(app, move |state| {
+        pick_note_with_picker(
+            state,
+            &expected_library_id,
+            &profile_id,
+            &epoch,
+            &vault,
+            &selected_root,
+            |root| {
+                picker_app
+                    .dialog()
+                    .file()
+                    .set_title("选择来源目录中的 Markdown 笔记")
+                    .set_directory(root)
+                    .add_filter("Markdown", &["md"])
+                    .blocking_pick_file()
+                    .and_then(|path| path.into_path().ok())
+            },
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn preview_learning_import_note(
     app: AppHandle,
     expected_library_id: String,
@@ -484,10 +693,14 @@ pub async fn queue_learning_import_prepare(
     vault: String,
     selected_root: String,
     relative_path: String,
+    expected_source_sha256: String,
+    expected_selection_id: String,
+    expected_target_token: String,
 ) -> Result<LibraryTask, String> {
     let library = expected_library_id.clone();
     let handle = app.clone();
-    let (payload, scope) = job(handle, move |app_state| {
+    let enqueue_target_token = expected_target_token.clone();
+    let (payload, scope, selection_id) = job(handle, move |app_state| {
         prepare_payload(
             app_state,
             &library,
@@ -496,10 +709,20 @@ pub async fn queue_learning_import_prepare(
             &vault,
             &selected_root,
             &relative_path,
+            &expected_source_sha256,
+            &expected_selection_id,
+            &expected_target_token,
         )
     })
     .await?;
-    tasks::start_scoped_learning_import(app, state, payload, &scope)
+    tasks::start_scoped_learning_import(
+        app,
+        state,
+        payload,
+        &scope,
+        &selection_id,
+        &enqueue_target_token,
+    )
 }
 
 #[tauri::command]

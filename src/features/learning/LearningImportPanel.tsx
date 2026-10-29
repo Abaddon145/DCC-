@@ -22,7 +22,7 @@ export default function LearningImportPanel(props:Props){
 function ImportPanel({libraryId,onClose}:Props){
   const dialog=useRef<HTMLDialogElement>(null);
   const [binding,setBinding]=useState<ImportSourceBinding|null>(null);
-  const [relativePath,setRelativePath]=useState("notes/hello.md");
+  const [relativePath,setRelativePath]=useState("");
   const [preview,setPreview]=useState<ImportNotePreview|null>(null);
   const [batches,setBatches]=useState<ImportBatchView[]>([]);
   const [items,setItems]=useState<ImportItemView[]>([]);
@@ -56,7 +56,7 @@ function ImportPanel({libraryId,onClose}:Props){
   },[libraryId,selectedBatch,status]);
 
   async function pickSource(){
-    setBusy(true);setError("");setPreview(null);
+    setBusy(true);setError("");setPreview(null);setRelativePath("");
     try{
       const next=await learningApi.bindImportSource(libraryId,"vault-ui");
       if(!next){setBinding(null);setStatus("已取消目录选择；未绑定来源。");return;}
@@ -66,6 +66,17 @@ function ImportPanel({libraryId,onClose}:Props){
       setError(String(reason));
       setBinding(null);
     }finally{setBusy(false);}
+  }
+
+  async function pickNote(){
+    if(!binding)return;
+    setBusy(true);setError("");setPreview(null);
+    try{
+      const next=await learningApi.pickImportNote(libraryId,binding.profileId,binding.epoch,binding.vault,binding.root);
+      if(!next){setRelativePath("");setStatus("已取消笔记选择；来源目录仍保留。");return;}
+      setRelativePath(next.relativePath);setPreview(next);
+      setStatus(next.canPrepare?`预检完成：${next.relativePath} 可排队准备。`:`预检完成：${next.relativePath} 不可排队，请按预检结果处理后重试。`);
+    }catch(reason){setError(String(reason));}finally{setBusy(false);}
   }
 
   async function runPreview(){
@@ -100,7 +111,10 @@ function ImportPanel({libraryId,onClose}:Props){
         binding.epoch,
         binding.vault,
         binding.root,
-        relativePath.trim(),
+        preview.relativePath,
+        preview.sourceSha256,
+        preview.selectionId,
+        preview.targetToken,
       );
       setStatus(`已排队准备任务 ${task.id}（${task.label}）。不会静默覆盖已有正文。`);
       setSelectedBatch("");
@@ -154,7 +168,8 @@ function ImportPanel({libraryId,onClose}:Props){
       </p>
       <div className="learning-import-actions">
         <button type="button" className="primary-button" disabled={busy} onClick={()=>void pickSource()}>选择来源目录…</button>
-        <button type="button" disabled={busy||!binding} onClick={()=>void runPreview()}>预检相对路径</button>
+        <button type="button" disabled={busy||!binding} onClick={()=>void pickNote()}>选择 Markdown…</button>
+        <button type="button" disabled={busy||!binding||!relativePath.trim()} onClick={()=>void runPreview()}>预检相对路径</button>
         <button type="button" disabled={busy||!preview?.canPrepare||!!preview?.willOverwrite} onClick={()=>void queuePrepare()}>排队准备（不覆盖）</button>
       </div>
       {binding&&<dl className="learning-import-meta" aria-label="已绑定来源">
@@ -164,7 +179,7 @@ function ImportPanel({libraryId,onClose}:Props){
         <div><dt>边界说明</dt><dd>{binding.boundary}</dd></div>
       </dl>}
       <label className="learning-import-path">相对路径
-        <input aria-label="迁入相对路径" value={relativePath} disabled={busy||!binding} onChange={e=>setRelativePath(e.target.value)} placeholder="notes/example.md"/>
+        <input aria-label="迁入相对路径" value={relativePath} disabled={busy||!binding} onChange={e=>{setRelativePath(e.target.value);setPreview(null);}} placeholder="notes/example.md"/>
       </label>
       {preview&&<section className="learning-import-preview" aria-label="预检结果">
         <h3>预检</h3>

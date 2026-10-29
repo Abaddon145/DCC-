@@ -2287,12 +2287,20 @@ mod tests {
 }
 
 /// Enqueue a verified learning import only while its original library session is active.
+#[cfg(windows)]
 pub(crate) fn submit_scoped_learning_import(
     state: &crate::state::AppState,
     payload: TaskRequest,
     scope: &crate::learning::source_profiles::LibraryScope,
+    selection_id: &str,
+    target_token: &str,
 ) -> Result<(LibraryTask, bool), String> {
-    if !matches!(payload, TaskRequest::LearningImport(_)) {
+    if !matches!(
+        payload,
+        TaskRequest::LearningImport(
+            crate::learning::import_runner::ImportTaskRequest::Prepare { .. }
+        )
+    ) {
         return Err("迁入任务类型无效".into());
     }
     state.with_active_mut(|active| {
@@ -2310,19 +2318,32 @@ pub(crate) fn submit_scoped_learning_import(
         {
             return Err("素材库会话已变化，未提交迁入任务".into());
         }
+        let selected = state
+            .learning_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if !selected.permits(selection_id, &payload) {
+            return Err("来源选择已变化，未提交迁入任务".into());
+        }
+        let db = active.connection.as_ref().ok_or("素材库数据库不可用")?;
+        crate::learning::import_access::verify_prepared_target(db, &payload, target_token)?;
         state
             .tasks
             .submit(active.marker.library_id.clone(), payload)
     })
 }
 
+#[cfg(windows)]
 pub(crate) fn start_scoped_learning_import(
     app: AppHandle,
     state: tauri::State<AppState>,
     payload: TaskRequest,
     scope: &crate::learning::source_profiles::LibraryScope,
+    selection_id: &str,
+    target_token: &str,
 ) -> Result<LibraryTask, String> {
-    let (task, launch) = submit_scoped_learning_import(&state, payload, scope)?;
+    let (task, launch) =
+        submit_scoped_learning_import(&state, payload, scope, selection_id, target_token)?;
     if launch {
         tauri::async_runtime::spawn(dispatch(app));
     }

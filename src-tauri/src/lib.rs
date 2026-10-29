@@ -370,6 +370,7 @@ fn application_builder(
                     learning::excerpt_access::cancel_learning_excerpt_operation,
                     learning::excerpt_access::get_learning_excerpt_targets,
                     learning::import_access::bind_learning_import_source,
+                    learning::import_access::pick_learning_import_note,
                     learning::import_access::preview_learning_import_note,
                     learning::import_access::queue_learning_import_prepare,
                     learning::import_access::list_learning_import_batches,

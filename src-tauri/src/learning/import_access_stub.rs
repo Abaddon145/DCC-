@@ -23,6 +23,8 @@ pub struct ImportNotePreview {
     pub vault: String,
     pub relative_path: String,
     pub source_sha256: String,
+    pub selection_id: String,
+    pub target_token: String,
     pub conflict: String,
     pub target_id: Option<String>,
     pub title: String,
@@ -72,6 +74,18 @@ pub async fn bind_learning_import_source(
 }
 
 #[tauri::command]
+pub async fn pick_learning_import_note(
+    _app: AppHandle,
+    _expected_library_id: String,
+    _profile_id: String,
+    _epoch: String,
+    _vault: String,
+    _selected_root: String,
+) -> Result<Option<ImportNotePreview>, String> {
+    Err(unsupported())
+}
+
+#[tauri::command]
 pub async fn preview_learning_import_note(
     _app: AppHandle,
     _expected_library_id: String,
@@ -94,6 +108,9 @@ pub async fn queue_learning_import_prepare(
     _vault: String,
     _selected_root: String,
     _relative_path: String,
+    _expected_source_sha256: String,
+    _expected_selection_id: String,
+    _expected_target_token: String,
 ) -> Result<LibraryTask, String> {
     Err(unsupported())
 }
