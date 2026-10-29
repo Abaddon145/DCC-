@@ -185,6 +185,71 @@ pub fn invalidate_external_grants(db: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalSourceFacts {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified_nanos: u128,
+    pub identity: String,
+    pub sha256: String,
+}
+
+pub(crate) fn inspect_external_source(path: &Path) -> Result<ExternalSourceFacts, String> {
+    let (_lease, source) = checked_source(path, &|| false)?;
+    Ok(ExternalSourceFacts {
+        path: source.path,
+        size: source.size,
+        modified_nanos: source.modified,
+        identity: source.identity,
+        sha256: source.sha256,
+    })
+}
+
+pub(crate) fn save_external_grant(
+    grants: &LocalMediaGrants,
+    library: &str,
+    root: &Path,
+    file_id: &str,
+    epoch: &str,
+    source: &ExternalSourceFacts,
+) -> Result<(), String> {
+    grants.save(&Grant {
+        library: library.into(),
+        root: root.canonicalize().map_err(|e| e.to_string())?,
+        file_id: file_id.into(),
+        epoch: epoch.into(),
+        source: Fingerprint {
+            path: source.path.clone(),
+            size: source.size,
+            modified: source.modified_nanos,
+            identity: source.identity.clone(),
+            sha256: source.sha256.clone(),
+        },
+    })
+}
+
+pub(crate) fn invalidate_file_grant(
+    grants: &LocalMediaGrants,
+    root: &Path,
+    file_id: &str,
+) -> Result<(), String> {
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = grants.path(&root, file_id)?;
+    if path.exists() {
+        reject_links(&path)?;
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn read_external_sha256(
+    path: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Result<(u64, String), String> {
+    let (_lease, source) = checked_source(path, stop)?;
+    Ok((source.size, source.sha256))
+}
 pub fn reject_links(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
         if crate::asset::scanner::is_link(ancestor) {
@@ -196,8 +261,15 @@ pub fn reject_links(path: &Path) -> Result<(), String> {
 fn source_path(path: &Path) -> Result<PathBuf, String> {
     let text = path.to_str().ok_or("文件路径无效")?;
     let normal = text.strip_prefix(r"\\?\").unwrap_or(text);
+    // Windows rejects UNC, device, and rooted spellings. A normal POSIX absolute
+    // path begins with `/` and is the only absolute form available to Linux tests.
+    let network_or_device = if cfg!(windows) {
+        normal.starts_with(['\\', '/'])
+    } else {
+        normal.starts_with('\\')
+    };
     if !path.is_absolute()
-        || normal.starts_with(['\\', '/'])
+        || network_or_device
         || normal.get(2..).is_some_and(|s| s.contains(':'))
         || normal.chars().any(char::is_control)
     {

@@ -16,6 +16,7 @@ export type LibraryTaskRequest =
   | {kind:"courseTranscription";request:import("./features/learning/types").CourseTranscriptionRequest}
   | {kind:"courseAnalysis";request:import("./features/learning/types").CourseAnalysisRequest}
   | {kind:"learningImport";request:{action:"commit"|"cancel";batchId:string}|{action:"revert";batchId:string;expectedEpoch:string}}
+  | {kind:"archiveExternalVideo";request:{entryId:string;operationId:string}}
   | {kind:"aiAnalyze";request:import("./features/intelligence/types").AnalysisRequest}
   | {kind:"download";request:DownloadRequest}
   | { kind: "ueAssets"; request: unknown }

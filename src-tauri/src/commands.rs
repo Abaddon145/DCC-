@@ -74,6 +74,24 @@ pub async fn relocate_external_video(
 }
 
 #[tauri::command]
+pub fn archive_external_video(
+    app: AppHandle,
+    state: State<AppState>,
+    expected_library_id: String,
+    entry_id: String,
+    operation_id: String,
+) -> Result<String, String> {
+    let id = crate::media_archive::archive_external_video(
+        &state,
+        &expected_library_id,
+        &entry_id,
+        &operation_id,
+    )?;
+    tauri::async_runtime::spawn(crate::tasks::dispatch(app));
+    Ok(id)
+}
+
+#[tauri::command]
 pub fn get_selection_labels(
     state: State<AppState>,
     ids: Vec<String>,
