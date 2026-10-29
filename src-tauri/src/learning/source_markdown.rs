@@ -206,6 +206,22 @@ impl VaultSelection {
         })
     }
 
+    pub(super) fn profile_id(&self) -> &str {
+        &self.profile
+    }
+
+    pub(super) fn access_epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    pub(super) fn vault_id(&self) -> &str {
+        &self.vault
+    }
+
+    pub(super) fn root_path(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) fn inspect(&self, state: &AppState, relative: &str) -> Result<Inspection, String> {
         inspect_markdown(state, self, relative)
     }
@@ -318,6 +334,28 @@ pub(super) fn open_markdown(root: &Path, relative: &str) -> Result<MarkdownLease
         file,
         _directories: directories,
     })
+}
+
+pub(super) fn read_markdown_text(
+    selection: &VaultSelection,
+    relative: &str,
+) -> Result<(String, String), String> {
+    let mut lease = open_markdown(selection.root_path(), relative)?;
+    let expected_size = lease.file.metadata().map_err(|_| "无法检查来源笔记")?.len();
+    let mut bytes = Vec::new();
+    (&mut lease.file)
+        .take(MAX_MARKDOWN + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取来源笔记")?;
+    if bytes.len() as u64 > MAX_MARKDOWN
+        || bytes.len() as u64 != expected_size
+        || lease.file.metadata().map_err(|_| "无法检查来源笔记")?.len() != expected_size
+    {
+        return Err("来源笔记超过 5 MiB".into());
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let text = String::from_utf8(bytes).map_err(|_| "来源笔记不是有效 UTF-8".to_string())?;
+    Ok((text, sha256))
 }
 
 fn inspect_markdown(

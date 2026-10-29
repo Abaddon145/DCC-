@@ -37,6 +37,7 @@ import {WorkspacePanel} from "./WorkspacePanel";
 import {normalizePanel,persistPanels,setLayoutPanel,togglePanelFocus,type PanelLayout,type PanelState} from "../lib/workspacePanels";
 const NoteMindMapDialog=lazy(()=>import("./NoteMindMapDialog"));
 const NoteArchiveBrowser=lazy(()=>import("../features/learning/NoteArchiveBrowser"));
+const LearningImportPanel=lazy(()=>import("../features/learning/LearningImportPanel"));
 const NoteStructureView=lazy(()=>import("./NoteStructureView"));
 
 interface Props { onLearnReference?:(reference:LearningReferenceData,index:number,noteId:string)=>Promise<void>; onOpenProject?:(id:string)=>void; initialNoteId?: string | null; notify: (message: string, error?: boolean) => void }
@@ -56,6 +57,7 @@ function Workspace({ libraryId, notify, initialNoteId,onOpenProject,onLearnRefer
   const [navigationScope,setNavigationScope]=useState<"all"|"inbox"|"recent"|"project">("all");
   const [projectFilter,setProjectFilter]=useState<KnowledgeReference|null>(null),[projectPicker,setProjectPicker]=useState(false);
   const [archiveOpen,setArchiveOpen]=useState(false);
+  const [importOpen,setImportOpen]=useState(false);
   const [notebooks, setNotebooks] = useState<KnowledgeNotebook[]>([]);
   const [folder, setFolder] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(new Set<string>());
@@ -251,6 +253,8 @@ function Workspace({ libraryId, notify, initialNoteId,onOpenProject,onLearnRefer
       <button className={favorite ? "active" : ""} onClick={() => { setNavigationScope("all");setProjectFilter(null);setFolder(null); setFavorite(true); setTrash(false); setPage(0); }}><Star size={15}/>收藏笔记</button>
       <button onClick={()=>setArchiveOpen(true)}><History size={15}/>原文归档</button>
       {archiveOpen&&<Suspense fallback={<LoadFeedback label="正在打开原文归档…"/>}><NoteArchiveBrowser libraryId={libraryId} onClose={()=>setArchiveOpen(false)}/></Suspense>}
+      <button onClick={()=>setImportOpen(true)}><History size={15}/>学习资料迁入</button>
+      {importOpen&&<Suspense fallback={<LoadFeedback label="正在打开学习资料迁入…"/>}><LearningImportPanel libraryId={libraryId} onClose={()=>setImportOpen(false)}/></Suspense>}
       <div className="knowledge-section"><span>笔记本</span><button title="新建笔记本" onClick={() => setFolderForm({ parent: null, name: "" })}><FolderPlus size={16}/></button></div>{tree(null)}
       <button className={`knowledge-trash ${trash ? "active" : ""}`} onClick={() => { setNavigationScope("all");setProjectFilter(null);setFolder(null); setFavorite(false); setTrash(true); setPage(0); }}><Trash2 size={15}/>笔记回收站</button>
     </aside>

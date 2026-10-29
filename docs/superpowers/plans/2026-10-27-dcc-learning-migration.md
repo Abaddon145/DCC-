@@ -285,6 +285,21 @@
 
 - [x] RED→GREEN：中途失败后 resume 无孤儿暂存且 receipt 计数正确；cancel 保留已提交并清理 staging；list_items 可见中断状态。
 - [x] 定向测试、格式及凭据检查与证据；独立本地提交。详见 `docs/evidence/merge/task12d3-mid-batch-recovery.md`。
+## Task 12e1：学习资料迁入界面接入知识区与任务中心
+
+**Files:** 新 `src-tauri/src/learning/import_access.rs`、`import_access_stub.rs`（非 Windows 失败闭合）、`import_access_tests.rs`；更新 `learning/mod.rs`、`source_markdown.rs`（选择访问器、有界 `read_markdown_text`）、`lib.rs`（注册命令）、`tasks.rs`（LearningImport 必须指定目标库；通用 IPC 拒绝 Prepare）；前端新 `src/features/learning/LearningImportPanel.tsx`、`.test.tsx`、`learningImport.css`，更新 `api.ts`、`KnowledgeWorkspace.tsx`、`src/types.ts`。
+
+**Interface：**
+- `bind_learning_import_source(expectedLibraryId, vault, selectedRoot)`：仅用户经系统对话框选择的根；返回 profile/epoch/boundary。
+- `preview_learning_import_note(...)`：冲突、标题、`canPrepare`、`willOverwrite=false`、转换挂起失败闭合消息。
+- `queue_learning_import_prepare(...)`：后端重新预检 + 有界读取 + 摘要一致后入 TaskRegistry；通用 `start_library_task` 不接受 Prepare。
+- `list_learning_import_batches` / `list_learning_import_items`：只读恢复检视；Commit/Cancel 经任务中心。
+
+**范围边界：** 不打开真实用户 Vault/SQLite；不把清单提示路径当授权；不覆盖正文；不调用付费 AI；无手工桌面验收（Task 14）。
+
+- [x] RED→GREEN：UI 测试初次因状态栏重复预检消息多元素匹配失败，改为独立状态提示后通过；后端绑定/预检/准备/冲突不覆盖/错库/挂起转换失败闭合；通用 IPC 拒绝 Prepare。
+- [x] 定向与全量测试、构建、格式检查与证据；独立本地提交。详见 `docs/evidence/merge/task12e1-learning-import-ui.md`。
+
 ## 后续顺序（本计划不提前激活）
 
 1. **12b 合成 SQLite 与文件只读核验：** 固定隔离样本，`READ_ONLY` + online backup 覆盖活动 WAL，显式字段、schema 8、integrity/FK、行与文件摘要独立验证；读前后对 DB/WAL 及文件做指纹比较，测试变化、缺失、链接与占用。合成根由测试代码固定，不能接收任意源根。真正用户可选根及 Windows 句柄竞争安全须另设可验证步骤。

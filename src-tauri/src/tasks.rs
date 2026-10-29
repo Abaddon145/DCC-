@@ -852,6 +852,34 @@ mod excerpt_lifecycle_tests {
 mod import_lifecycle_tests {
     use super::*;
     #[test]
+    fn learning_import_generic_ipc_rejects_prepare_but_allows_commit_cancel() {
+        use crate::learning::import_runner::ImportTaskRequest;
+        let prepare = TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            profile_id: Uuid::new_v4().to_string(),
+            epoch: Uuid::new_v4().to_string(),
+            request_sha256: "a".repeat(64),
+            vault: "vault".into(),
+            relative_path: "notes/a.md".into(),
+            source_sha256: "b".repeat(64),
+            title: "t".into(),
+            document: serde_json::json!({"type":"doc","content":[]}),
+            markdown: "forged".into(),
+        });
+        assert!(ensure_generic_ipc_payload(&prepare)
+            .unwrap_err()
+            .contains("预检入口"));
+        for payload in [
+            TaskRequest::LearningImport(ImportTaskRequest::Commit {
+                batch_id: Uuid::new_v4().to_string(),
+            }),
+            TaskRequest::LearningImport(ImportTaskRequest::Cancel {
+                batch_id: Uuid::new_v4().to_string(),
+            }),
+        ] {
+            ensure_generic_ipc_payload(&payload).unwrap();
+        }
+    }
+    #[test]
     fn learning_import_task_late_cancel_preserves_committed_success() {
         use crate::learning::import_runner::ImportTaskRequest;
         let root = tempfile::tempdir().unwrap();
@@ -1117,7 +1145,21 @@ pub fn start_library_task(
     payload: TaskRequest,
     expected_library_id: Option<String>,
 ) -> Result<LibraryTask, String> {
+    ensure_generic_ipc_payload(&payload)?;
     start_library_task_for_library(app, state, payload, expected_library_id.as_deref())
+}
+/// Generic IPC must not enqueue learning-import Prepare: its markdown/digest would be
+/// caller-asserted. Prepare is only built by `import_access` after a user-bound source preflight.
+pub(crate) fn ensure_generic_ipc_payload(payload: &TaskRequest) -> Result<(), String> {
+    if matches!(
+        payload,
+        TaskRequest::LearningImport(
+            crate::learning::import_runner::ImportTaskRequest::Prepare { .. }
+        )
+    ) {
+        return Err("学习资料迁入准备只能经来源绑定与预检入口排队".into());
+    }
+    Ok(())
 }
 pub fn start_library_task_for_library(
     app: AppHandle,
@@ -1133,6 +1175,7 @@ pub fn start_library_task_for_library(
             | TaskRequest::AIAnalyze(_)
             | TaskRequest::CourseAnalysis(_)
             | TaskRequest::CourseTranscription(_)
+            | TaskRequest::LearningImport(_)
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());

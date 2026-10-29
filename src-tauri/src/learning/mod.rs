@@ -109,6 +109,13 @@ mod excerpt_store_tests;
 mod excerpt_tests;
 pub mod excerpts;
 pub mod files;
+#[cfg(windows)]
+pub mod import_access;
+#[cfg(not(windows))]
+#[path = "import_access_stub.rs"]
+pub mod import_access;
+#[cfg(all(test, windows))]
+mod import_access_tests;
 #[cfg(test)]
 mod import_file_check;
 #[cfg(test)]

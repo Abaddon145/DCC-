@@ -25,6 +25,24 @@ function writableExcerptTask(task:ExcerptTaskRequest):ExcerptTaskRequest {
 }
 
 // No unscoped commands and no frontend progress writer: playback owns the future lease.
+
+export type ImportSourceBinding={
+  profileId:string;epoch:string;vault:string;root:string;libraryId:string;boundary:string;
+};
+export type ImportNotePreview={
+  profileId:string;epoch:string;vault:string;relativePath:string;sourceSha256:string;
+  conflict:string;targetId:string|null;title:string;pendingConversion:boolean;warnings:string[];
+  canPrepare:boolean;willOverwrite:boolean;message:string;
+};
+export type ImportBatchView={
+  id:string;status:string;requestSha256:string;sourceProfileId:string;sourceEpoch:string;
+  createdAt:string;finishedAt:string|null;receipt:unknown|null;
+};
+export type ImportItemView={
+  id:string;batchId:string;status:string;conflictCode:string|null;targetId:string|null;
+  sourceSha256:string;stageRelative:string|null;
+};
+
 export const learningApi={
   startExcerptTask:(expectedLibraryId:string,request:ExcerptTaskRequest)=>invoke<LibraryTask>("start_library_task",{expectedLibraryId,payload:{kind:"courseExcerpt",request:writableExcerptTask(request)}}),
   getExcerpt:(expectedLibraryId:string,previewId:string)=>invoke<StoredExcerpt>("get_learning_excerpt",{expectedLibraryId,previewId}),
@@ -72,4 +90,9 @@ export const learningApi={
   listSubtitles:(expectedLibraryId:string,courseId:string)=>invoke<LearningSubtitle[]>("list_learning_subtitles",{expectedLibraryId,courseId}),
   transcriptPage:(expectedLibraryId:string,courseId:string,subtitleId:string,offset=0,limit=50)=>invoke<Page<TranscriptCue>>("transcript_page",{expectedLibraryId,courseId,subtitleId,offset,limit}),
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
+  bindImportSource:(expectedLibraryId:string,vault:string,selectedRoot:string)=>invoke<ImportSourceBinding>("bind_learning_import_source",{expectedLibraryId,vault,selectedRoot}),
+  previewImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<ImportNotePreview>("preview_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
+  queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
+  listImportBatches:(expectedLibraryId:string)=>invoke<ImportBatchView[]>("list_learning_import_batches",{expectedLibraryId}),
+  listImportItems:(expectedLibraryId:string,batchId:string)=>invoke<ImportItemView[]>("list_learning_import_items",{expectedLibraryId,batchId}),
 };

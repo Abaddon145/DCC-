@@ -1,0 +1,15 @@
+.learning-import-dialog{max-width:960px;}
+.learning-import-boundary{margin:0 0 12px;padding:10px 12px;border-radius:8px;background:#f4f1ea;color:#3d3428;line-height:1.45;}
+.learning-import-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+.learning-import-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px;margin:0 0 12px;}
+.learning-import-meta dt{font-size:12px;opacity:.7;}
+.learning-import-meta dd{margin:2px 0 0;word-break:break-all;}
+.learning-import-path{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
+.learning-import-path input{padding:8px 10px;}
+.learning-import-preview{margin:0 0 12px;padding:10px 12px;border:1px solid #d9d0c2;border-radius:8px;}
+.learning-import-preview ul{margin:8px 0 0;padding-left:18px;}
+.learning-import-status{margin:0 0 8px;}
+.learning-import-error{display:flex;gap:8px;align-items:center;color:#8a1f1f;}
+.learning-import-batches{min-height:220px;}
+.learning-import-batch-actions{display:flex;gap:8px;margin-bottom:8px;}
+.learning-import-receipt{max-height:180px;overflow:auto;font-size:12px;background:#1e1b16;color:#f6f0e6;padding:8px;border-radius:6px;}
