@@ -151,6 +151,24 @@ pub(crate) fn run_local(
                 return Err("迁入准备已停止".into());
             }
             let batch = import_ops::create_batch(state, &scope, profile_id, epoch, request_sha256)?;
+            if batch.status == "committed" {
+                // Same request replayed after commit: hand back the durable receipt instead
+                // of adding or staging anything new.
+                let value = json!({
+                    "batchId": batch.id,
+                    "status": batch.status,
+                    "receipt": batch.receipt_json.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()),
+                });
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    title.clone(),
+                    "迁入已提交（重放）".into(),
+                    Some(value.clone()),
+                );
+                return Ok(value);
+            }
             if batch.status != "pending" {
                 return Err("迁入批次已结束，请使用新的请求摘要".into());
             }

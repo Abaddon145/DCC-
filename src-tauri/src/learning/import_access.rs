@@ -456,6 +456,28 @@ pub fn preview_in_library(
     Ok(build_preview(&selection, relative_path, &inspection, ""))
 }
 
+/// Domain-separated request identity: a JSON array cannot be confused by `|` (or any
+/// other byte) inside vault names or paths, and it binds the previewed target token.
+pub(super) fn import_request_sha256(
+    profile_id: &str,
+    epoch: &str,
+    vault: &str,
+    relative_path: &str,
+    source_sha256: &str,
+    target_token: &str,
+) -> String {
+    let seed = serde_json::json!([
+        "yingliu.learning-import.prepare.v2",
+        profile_id,
+        epoch,
+        vault,
+        relative_path,
+        source_sha256,
+        target_token,
+    ]);
+    let bytes = serde_json::to_vec(&seed).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
 pub(super) fn prepare_payload(
     state: &AppState,
     library: &str,
@@ -496,15 +518,14 @@ pub(super) fn prepare_payload(
         .document
         .ok_or_else(|| "尚无可用正文，不能进入暂存".to_string())?;
     ensure_source_current(state, &scope, &selection_id)?;
-    let request_seed = format!(
-        "{}|{}|{}|{}|{}",
-        preview.profile_id,
-        preview.vault,
-        preview.relative_path,
-        preview.source_sha256,
-        preview.epoch
+    let request_sha256 = import_request_sha256(
+        &preview.profile_id,
+        &preview.epoch,
+        &preview.vault,
+        &preview.relative_path,
+        &preview.source_sha256,
+        &preview.target_token,
     );
-    let request_sha256 = format!("{:x}", Sha256::digest(request_seed.as_bytes()));
     Ok((
         TaskRequest::LearningImport(ImportTaskRequest::Prepare {
             profile_id: preview.profile_id,

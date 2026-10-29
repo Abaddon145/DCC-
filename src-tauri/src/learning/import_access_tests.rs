@@ -694,3 +694,79 @@ fn learning_import_access_current_preview_queues_and_stages() {
     let result = super::import_runner::run_local(&state, &task, &request).unwrap();
     assert_eq!(result["status"], "staged");
 }
+
+#[test]
+fn learning_import_request_hash_binds_target_token() {
+    let p = "11111111-1111-4111-8111-111111111111";
+    let e = "22222222-2222-4222-8222-222222222222";
+    let s = format!("{:x}", Sha256::digest(b"body"));
+    let a = import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-a");
+    let b = import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-b");
+    assert_eq!(a.len(), 64);
+    assert_ne!(a, b);
+    assert_eq!(
+        a,
+        import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-a")
+    );
+}
+
+#[test]
+fn learning_import_request_hash_does_not_collide_on_pipes() {
+    let p = "11111111-1111-4111-8111-111111111111";
+    let e = "22222222-2222-4222-8222-222222222222";
+    let s = format!("{:x}", Sha256::digest(b"body"));
+    let a = import_access::import_request_sha256(p, e, "v|a", "b.md", &s, "t");
+    let b = import_access::import_request_sha256(p, e, "v", "a|b.md", &s, "t");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn learning_import_prepared_request_hash_includes_preview_target_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, _, _) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    let TaskRequest::LearningImport(ImportTaskRequest::Prepare { request_sha256, .. }) = payload
+    else {
+        panic!("not a prepare task");
+    };
+    assert_eq!(
+        request_sha256,
+        import_access::import_request_sha256(
+            &preview.profile_id,
+            &preview.epoch,
+            &preview.vault,
+            &preview.relative_path,
+            &preview.source_sha256,
+            &preview.target_token,
+        )
+    );
+}

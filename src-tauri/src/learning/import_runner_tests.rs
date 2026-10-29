@@ -195,3 +195,53 @@ fn learning_import_runner_rejects_bad_payload_before_queue() {
         .submit(library, TaskRequest::LearningImport(bad))
         .is_err());
 }
+
+#[test]
+fn learning_import_runner_replays_committed_batch_receipt_without_restaging() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let prepare = prepare_request(&profile, "runner-replay", "replay.md", "# replay\n");
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(prepare.clone()),
+        )
+        .unwrap();
+    let prepared = super::import_runner::run_local(&state, &task, &prepare).unwrap();
+    let batch_id = prepared["batchId"].as_str().unwrap().to_string();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (commit_task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    let committed = super::import_runner::run_local(&state, &commit_task, &commit).unwrap();
+    assert_eq!(committed["status"], "committed");
+    // Retire the original prepare task so the same request can be submitted again.
+    state.tasks.cancel(&task.id).unwrap();
+
+    let (replay_task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(prepare.clone()),
+        )
+        .unwrap();
+    assert_ne!(replay_task.id, task.id);
+    let replay = super::import_runner::run_local(&state, &replay_task, &prepare).unwrap();
+    assert_eq!(replay["batchId"], batch_id);
+    assert_eq!(replay["status"], "committed");
+    assert_eq!(replay["receipt"], committed["receipt"]);
+    assert!(!replay["receipt"].is_null());
+    let items = import_ops::list_items(&state, &scope, &batch_id).unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "committed replay must not add or stage items"
+    );
+}
