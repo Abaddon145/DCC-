@@ -433,6 +433,7 @@ mod tests {
         assert!(result.unwrap_err().contains("超时"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
+    #[cfg(windows)]
     #[test]
     fn learning_native_process_drop_reaps_owned_tree() {
         use std::io::{BufRead, BufReader};
@@ -477,6 +478,7 @@ mod tests {
         assert!(!output.contains("DCC_PROGRESS"));
         assert!(output.contains("DCC_FILE"));
     }
+    #[cfg(windows)]
     #[test]
     fn download_cancel_terminates_grandchildren() {
         use std::sync::atomic::{AtomicBool, Ordering};

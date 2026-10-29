@@ -40,7 +40,7 @@ export type ImportBatchView={
 };
 export type ImportItemView={
   id:string;batchId:string;status:string;conflictCode:string|null;targetId:string|null;
-  sourceSha256:string;stageRelative:string|null;
+  sourceSha256:string;stageRelative:string|null;relativePath?:string;
 };
 
 export const learningApi={
@@ -92,8 +92,10 @@ export const learningApi={
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
   bindImportSource:(expectedLibraryId:string,vault:string)=>invoke<ImportSourceBinding|null>("bind_learning_import_source",{expectedLibraryId,vault}),
   pickImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string)=>invoke<ImportNotePreview|null>("pick_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot}),
+  pickImportNotes:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string)=>invoke<ImportNotePreview[]|null>("pick_learning_import_notes",{expectedLibraryId,profileId,epoch,vault,selectedRoot}),
   previewImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<ImportNotePreview>("preview_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
   queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string,expectedSourceSha256:string,expectedSelectionId:string,expectedTargetToken:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath,expectedSourceSha256,expectedSelectionId,expectedTargetToken}),
+  queueImportPrepareBatch:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,notes:{relativePath:string;sourceSha256:string;targetToken:string}[],expectedSelectionId:string)=>invoke<LibraryTask>("queue_learning_import_prepare_batch",{expectedLibraryId,profileId,epoch,vault,selectedRoot,notes,expectedSelectionId}),
   listImportBatches:(expectedLibraryId:string)=>invoke<ImportBatchView[]>("list_learning_import_batches",{expectedLibraryId}),
   listImportItems:(expectedLibraryId:string,batchId:string)=>invoke<ImportItemView[]>("list_learning_import_items",{expectedLibraryId,batchId}),
 };

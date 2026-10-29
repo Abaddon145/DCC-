@@ -80,6 +80,7 @@ fn learning_import_access_bind_preview_prepare_without_overwrite_on_conflict() {
         title: preview.title.clone(),
         document,
         markdown,
+        items: Vec::new(),
     };
     let (task, _) = state
         .tasks
@@ -769,4 +770,359 @@ fn learning_import_prepared_request_hash_includes_preview_target_token() {
             &preview.target_token,
         )
     );
+}
+
+fn note_input(
+    preview: &import_access::ImportNotePreview,
+) -> super::import_runner::ImportPrepareNote {
+    super::import_runner::ImportPrepareNote {
+        relative_path: preview.relative_path.clone(),
+        source_sha256: preview.source_sha256.clone(),
+        target_token: preview.target_token.clone(),
+    }
+}
+
+#[test]
+fn learning_import_access_multi_pick_rejects_outside_root_and_keeps_single_pick() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let outside = temp.path().join("outside.md");
+    fs::write(&outside, "# outside\n").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let picked = import_access::pick_notes_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| {
+            Ok(Some(vec![
+                vault.join("notes/b.md"),
+                vault.join("notes/a.md"),
+            ]))
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(picked.len(), 2);
+    assert!(picked
+        .iter()
+        .all(|note| !note.will_overwrite && note.can_prepare));
+    assert_eq!(picked[0].relative_path, "notes/a.md");
+    assert_eq!(picked[1].relative_path, "notes/b.md");
+    assert!(import_access::pick_notes_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| Ok(Some(vec![vault.join("notes/a.md"), outside.clone()])),
+    )
+    .is_err());
+    let single = import_access::pick_note_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| Some(vault.join("notes/a.md")),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(single.relative_path, "notes/a.md");
+    assert!(!single.will_overwrite);
+}
+
+#[test]
+fn learning_import_access_prepares_many_notes_in_one_batch_and_refuses_escape() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let preview_b = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/b.md",
+    )
+    .unwrap();
+    assert!(!preview_a.will_overwrite && !preview_b.will_overwrite);
+    let prepared = import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[note_input(&preview_b), note_input(&preview_a)],
+        &preview_a.selection_id,
+    )
+    .unwrap();
+    let request = match &prepared.payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        prepared.payload,
+        &prepared.scope,
+        &prepared.selection_id,
+        &prepared.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    assert_eq!(staged["status"], "staged");
+    assert_eq!(staged["count"], 2);
+    let batch_id = staged["batchId"].as_str().unwrap();
+    let items = import_access::list_items_in_library(&state, &library, batch_id).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].relative_path, "notes/a.md");
+    assert_eq!(items[1].relative_path, "notes/b.md");
+    let single = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+        &preview_a.source_sha256,
+        &preview_a.selection_id,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    match single.0 {
+        TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            items,
+            relative_path,
+            ..
+        }) => {
+            assert!(items.is_empty());
+            assert_eq!(relative_path, "notes/a.md");
+        }
+        _ => panic!("single prepare must stay on the legacy shape"),
+    }
+    assert!(import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[
+            note_input(&preview_a),
+            super::import_runner::ImportPrepareNote {
+                relative_path: "../outside.md".into(),
+                source_sha256: preview_b.source_sha256.clone(),
+                target_token: preview_b.target_token.clone(),
+            },
+        ],
+        &preview_a.selection_id,
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_batch_conflict_does_not_overwrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+        &preview_a.source_sha256,
+        &preview_a.selection_id,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    let request = match &payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: staged["batchId"].as_str().unwrap().into(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    super::import_runner::run_local(&state, &task, &commit).unwrap();
+    let note_id =
+        import_access::list_items_in_library(&state, &library, staged["batchId"].as_str().unwrap())
+            .unwrap()[0]
+            .target_id
+            .clone()
+            .unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::get(db, &note_id)?;
+            knowledge::save(
+                db,
+                NoteInput {
+                    id: Some(note.id),
+                    expected_revision: Some(note.revision),
+                    notebook_id: note.notebook_id,
+                    title: "用户已改".into(),
+                    document: note.document,
+                    tags: note.tags,
+                    favorite: note.favorite,
+                    journal_date: note.journal_date,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let preview_b = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/b.md",
+    )
+    .unwrap();
+    assert_eq!(preview_a.conflict, "target_changed");
+    assert!(!preview_a.will_overwrite);
+    assert!(preview_a.can_prepare);
+    let prepared = import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[note_input(&preview_a), note_input(&preview_b)],
+        &preview_a.selection_id,
+    )
+    .unwrap();
+    let request = match &prepared.payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        prepared.payload,
+        &prepared.scope,
+        &prepared.selection_id,
+        &prepared.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    let batch_id = staged["batchId"].as_str().unwrap().to_string();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    assert_eq!(
+        super::import_runner::run_local(&state, &task, &commit).unwrap()["status"],
+        "committed"
+    );
+    let items = import_access::list_items_in_library(&state, &library, &batch_id).unwrap();
+    let conflict = items
+        .iter()
+        .find(|item| item.relative_path == "notes/a.md")
+        .unwrap();
+    assert_eq!(conflict.status, "conflict");
+    let kept = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_id)?))
+        .unwrap();
+    assert_eq!(kept.title, "用户已改");
+    let cancel = ImportTaskRequest::Cancel {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(cancel.clone()))
+        .unwrap();
+    assert_eq!(
+        super::import_runner::run_local(&state, &task, &cancel).unwrap()["status"],
+        "committed"
+    );
+    let revert = ImportTaskRequest::Revert {
+        batch_id,
+        expected_epoch: binding.epoch,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library, TaskRequest::LearningImport(revert.clone()))
+        .unwrap();
+    let reverted = super::import_runner::run_local(&state, &task, &revert).unwrap();
+    assert_eq!(reverted["status"], "reverted");
+    assert_eq!(reverted["report"]["archivesKept"], true);
 }

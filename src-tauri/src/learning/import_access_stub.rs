@@ -1,5 +1,5 @@
 //! Non-Windows stub: Markdown vault leases are Windows-only in this slice.
-use crate::{state::AppState, tasks::LibraryTask};
+use crate::{learning::import_runner::ImportPrepareNote, state::AppState, tasks::LibraryTask};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
@@ -60,6 +60,7 @@ pub struct ImportItemView {
     pub target_id: Option<String>,
     pub source_sha256: String,
     pub stage_relative: Option<String>,
+    pub relative_path: String,
 }
 
 fn unsupported() -> String {
@@ -101,6 +102,18 @@ pub async fn preview_learning_import_note(
 }
 
 #[tauri::command]
+pub async fn pick_learning_import_notes(
+    _app: AppHandle,
+    _expected_library_id: String,
+    _profile_id: String,
+    _epoch: String,
+    _vault: String,
+    _selected_root: String,
+) -> Result<Option<Vec<ImportNotePreview>>, String> {
+    Err(unsupported())
+}
+
+#[tauri::command]
 pub async fn queue_learning_import_prepare(
     _app: AppHandle,
     _state: State<'_, AppState>,
@@ -113,6 +126,21 @@ pub async fn queue_learning_import_prepare(
     _expected_source_sha256: String,
     _expected_selection_id: String,
     _expected_target_token: String,
+) -> Result<LibraryTask, String> {
+    Err(unsupported())
+}
+
+#[tauri::command]
+pub async fn queue_learning_import_prepare_batch(
+    _app: AppHandle,
+    _state: State<'_, AppState>,
+    _expected_library_id: String,
+    _profile_id: String,
+    _epoch: String,
+    _vault: String,
+    _selected_root: String,
+    _notes: Vec<ImportPrepareNote>,
+    _expected_selection_id: String,
 ) -> Result<LibraryTask, String> {
     Err(unsupported())
 }

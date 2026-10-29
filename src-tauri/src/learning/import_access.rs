@@ -1,6 +1,7 @@
 //! Learning Markdown import access: explicit vault bind, preview, and task queue.
 //! Never opens a path until the caller supplies a user-selected absolute root.
 //! Does not treat list hints as authorization and never silently overwrites notes.
+use super::import_runner::{ImportPrepareNote, PrepareMarkdownItem, MAX_PREPARE_NOTES};
 use super::{
     import_ops, import_runner::ImportTaskRequest, note_origins::NoteOriginState, source_markdown,
     source_profiles,
@@ -12,7 +13,10 @@ use crate::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -106,6 +110,7 @@ pub struct ImportItemView {
     pub target_id: Option<String>,
     pub source_sha256: String,
     pub stage_relative: Option<String>,
+    pub relative_path: String,
 }
 
 fn conflict_label(state: &NoteOriginState) -> (String, Option<String>) {
@@ -393,6 +398,29 @@ pub(super) fn preview_authorized(
     ))
 }
 
+fn markdown_relative(root: &Path, path: &Path) -> Result<String, String> {
+    if !path.is_absolute() {
+        return Err("请选择来源目录中的 Markdown 文件".into());
+    }
+    crate::media_access::reject_links(path)?;
+    let canonical = path.canonicalize().map_err(|_| "所选笔记不可读取")?;
+    crate::media_access::reject_links(&canonical)?;
+    let relative = canonical
+        .strip_prefix(root)
+        .map_err(|_| "请选择已授权来源目录中的笔记")?;
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("所选笔记路径无效".into());
+        };
+        segments.push(name.to_str().ok_or("所选笔记路径无法识别")?);
+    }
+    if segments.is_empty() {
+        return Err("所选笔记路径无效".into());
+    }
+    Ok(segments.join("/"))
+}
+
 pub(super) fn pick_note_with_picker(
     state: &AppState,
     library: &str,
@@ -402,45 +430,60 @@ pub(super) fn pick_note_with_picker(
     root: &str,
     picker: impl FnOnce(&Path) -> Option<PathBuf>,
 ) -> Result<Option<ImportNotePreview>, String> {
+    let picked = pick_notes_with_picker(state, library, profile, epoch, vault, root, |root| {
+        Ok(picker(root).map(|path| vec![path]))
+    })?;
+    Ok(picked.and_then(|mut notes| notes.pop()))
+}
+
+pub(super) fn pick_notes_with_picker(
+    state: &AppState,
+    library: &str,
+    profile: &str,
+    epoch: &str,
+    vault: &str,
+    root: &str,
+    picker: impl FnOnce(&Path) -> Result<Option<Vec<PathBuf>>, String>,
+) -> Result<Option<Vec<ImportNotePreview>>, String> {
     let (selection, scope, selection_id) =
         authorized_selection(state, library, profile, epoch, vault, root)?;
     let initial_root = selection.root_path().to_path_buf();
     drop(selection);
-    let picked = picker(&initial_root);
+    let picked = picker(&initial_root)?;
     ensure_source_current(state, &scope, &selection_id)?;
-    let Some(path) = picked else {
+    let Some(paths) = picked.filter(|paths| !paths.is_empty()) else {
         return Ok(None);
     };
-    if !path.is_absolute() {
-        return Err("请选择来源目录中的 Markdown 文件".into());
+    if paths.len() > MAX_PREPARE_NOTES {
+        return Err("迁入批次笔记数量无效".into());
     }
-    crate::media_access::reject_links(&path)?;
-    let canonical = path.canonicalize().map_err(|_| "所选笔记不可读取")?;
-    crate::media_access::reject_links(&canonical)?;
     let (selection, current_scope, current_id) =
         authorized_selection(state, library, profile, epoch, vault, root)?;
     if current_scope != scope || current_id != selection_id {
         return Err("来源选择已变化，请重新选择笔记".into());
     }
-    let relative = canonical
-        .strip_prefix(selection.root_path())
-        .map_err(|_| "请选择已授权来源目录中的笔记")?;
-    let mut segments = Vec::new();
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return Err("所选笔记路径无效".into());
-        };
-        segments.push(name.to_str().ok_or("所选笔记路径无法识别")?);
+    let mut relatives = Vec::with_capacity(paths.len());
+    let mut seen = HashSet::new();
+    for path in &paths {
+        let relative = markdown_relative(selection.root_path(), path)?;
+        if !seen.insert(relative.to_lowercase()) {
+            return Err("迁入批次包含重复笔记".into());
+        }
+        relatives.push(relative);
     }
-    let relative = segments.join("/");
-    let inspection = selection.inspect(state, &relative)?;
+    relatives.sort();
+    let mut previews = Vec::with_capacity(relatives.len());
+    for relative in relatives {
+        let inspection = selection.inspect(state, &relative)?;
+        previews.push(build_preview(
+            &selection,
+            &relative,
+            &inspection,
+            &selection_id,
+        ));
+    }
     ensure_source_current(state, &scope, &selection_id)?;
-    Ok(Some(build_preview(
-        &selection,
-        &relative,
-        &inspection,
-        &selection_id,
-    )))
+    Ok(Some(previews))
 }
 
 pub fn preview_in_library(
@@ -458,6 +501,11 @@ pub fn preview_in_library(
     Ok(build_preview(&selection, relative_path, &inspection, ""))
 }
 
+fn digest_json(seed: &Value) -> String {
+    let bytes = serde_json::to_vec(seed).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
 /// Domain-separated request identity: a JSON array cannot be confused by `|` (or any
 /// other byte) inside vault names or paths, and it binds the previewed target token.
 pub(super) fn import_request_sha256(
@@ -468,7 +516,7 @@ pub(super) fn import_request_sha256(
     source_sha256: &str,
     target_token: &str,
 ) -> String {
-    let seed = serde_json::json!([
+    digest_json(&serde_json::json!([
         "yingliu.learning-import.prepare.v2",
         profile_id,
         epoch,
@@ -476,10 +524,38 @@ pub(super) fn import_request_sha256(
         relative_path,
         source_sha256,
         target_token,
-    ]);
-    let bytes = serde_json::to_vec(&seed).unwrap_or_default();
-    format!("{:x}", Sha256::digest(&bytes))
+    ]))
 }
+
+pub(super) fn import_request_sha256_batch(
+    profile_id: &str,
+    epoch: &str,
+    vault: &str,
+    items: &[(&str, &str, &str)],
+) -> String {
+    digest_json(&serde_json::json!([
+        "yingliu.learning-import.prepare.v3",
+        profile_id,
+        epoch,
+        vault,
+        items,
+    ]))
+}
+
+pub(super) fn batch_target_token(items: &[(&str, &str)]) -> String {
+    digest_json(&serde_json::json!([
+        "yingliu.learning-import.prepare-targets.v1",
+        items,
+    ]))
+}
+
+pub(super) struct PreparedImport {
+    pub payload: TaskRequest,
+    pub scope: source_profiles::LibraryScope,
+    pub selection_id: String,
+    pub target_token: String,
+}
+
 pub(super) fn prepare_payload(
     state: &AppState,
     library: &str,
@@ -492,57 +568,177 @@ pub(super) fn prepare_payload(
     expected_selection_id: &str,
     expected_target_token: &str,
 ) -> Result<(TaskRequest, source_profiles::LibraryScope, String), String> {
+    let prepared = prepare_payload_many(
+        state,
+        library,
+        profile_id,
+        epoch,
+        vault,
+        selected_root,
+        &[ImportPrepareNote {
+            relative_path: relative_path.into(),
+            source_sha256: expected_sha256.into(),
+            target_token: expected_target_token.into(),
+        }],
+        expected_selection_id,
+    )?;
+    Ok((prepared.payload, prepared.scope, prepared.selection_id))
+}
+
+pub(super) fn prepare_payload_many(
+    state: &AppState,
+    library: &str,
+    profile_id: &str,
+    epoch: &str,
+    vault: &str,
+    selected_root: &str,
+    notes: &[ImportPrepareNote],
+    expected_selection_id: &str,
+) -> Result<PreparedImport, String> {
+    if notes.is_empty() || notes.len() > MAX_PREPARE_NOTES {
+        return Err("迁入批次笔记数量无效".into());
+    }
     let (selection, scope, selection_id) =
         authorized_selection(state, library, profile_id, epoch, vault, selected_root)?;
     if selection_id != expected_selection_id {
         return Err("来源选择已变化，请重新预检".into());
     }
-    let inspection = selection.inspect(state, relative_path)?;
-    let preview = build_preview(&selection, relative_path, &inspection, &selection_id);
-    if preview.source_sha256 != expected_sha256 {
-        return Err("来源笔记在预检后发生变化，请重新预检".into());
+    let mut ordered: Vec<&ImportPrepareNote> = notes.iter().collect();
+    ordered.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut seen = HashSet::new();
+    for note in &ordered {
+        if !seen.insert(note.relative_path.to_lowercase()) {
+            return Err("迁入批次包含重复笔记".into());
+        }
     }
-    if preview.target_token != expected_target_token {
-        return Err("目标笔记在预检后发生变化，请重新预检".into());
+    struct Staged {
+        preview: ImportNotePreview,
+        document: Value,
+        markdown: String,
     }
-    if !preview.can_prepare {
-        return Err(preview.message);
-    }
-    if preview.will_overwrite {
-        return Err("迁入不会覆盖已有笔记正文".into());
-    }
-    let (markdown, digest) = source_markdown::read_markdown_text(&selection, relative_path)?;
-    if digest != preview.source_sha256 {
-        return Err("来源笔记在预检后发生变化，请重新检查".into());
-    }
-    let document = inspection
-        .conversion
-        .document
-        .ok_or_else(|| "尚无可用正文，不能进入暂存".to_string())?;
-    ensure_source_current(state, &scope, &selection_id)?;
-    let request_sha256 = import_request_sha256(
-        &preview.profile_id,
-        &preview.epoch,
-        &preview.vault,
-        &preview.relative_path,
-        &preview.source_sha256,
-        &preview.target_token,
-    );
-    Ok((
-        TaskRequest::LearningImport(ImportTaskRequest::Prepare {
-            profile_id: preview.profile_id,
-            epoch: preview.epoch,
-            request_sha256,
-            vault: preview.vault,
-            relative_path: preview.relative_path,
-            source_sha256: preview.source_sha256,
-            title: preview.title,
+    let mut staged = Vec::with_capacity(ordered.len());
+    let mut total = 0usize;
+    for note in ordered {
+        let inspection = selection.inspect(state, &note.relative_path)?;
+        let preview = build_preview(&selection, &note.relative_path, &inspection, &selection_id);
+        if preview.source_sha256 != note.source_sha256 {
+            return Err("来源笔记在预检后发生变化，请重新预检".into());
+        }
+        if preview.target_token != note.target_token {
+            return Err("目标笔记在预检后发生变化，请重新预检".into());
+        }
+        if !preview.can_prepare {
+            return Err(preview.message);
+        }
+        if preview.will_overwrite {
+            return Err("迁入不会覆盖已有笔记正文".into());
+        }
+        let (markdown, digest) =
+            source_markdown::read_markdown_text(&selection, &note.relative_path)?;
+        if digest != preview.source_sha256 {
+            return Err("来源笔记在预检后发生变化，请重新检查".into());
+        }
+        total = total.saturating_add(markdown.len());
+        if markdown.len() > super::import_runner::MAX_PREPARE_MARKDOWN_BYTES
+            || total > super::import_runner::MAX_PREPARE_BATCH_BYTES
+        {
+            return Err("迁入批次原文超限".into());
+        }
+        let document = inspection
+            .conversion
+            .document
+            .ok_or_else(|| "尚无可用正文，不能进入暂存".to_string())?;
+        staged.push(Staged {
+            preview,
             document,
             markdown,
+        });
+    }
+    ensure_source_current(state, &scope, &selection_id)?;
+    let first = &staged[0].preview;
+    if staged.len() == 1 {
+        let request_sha256 = import_request_sha256(
+            &first.profile_id,
+            &first.epoch,
+            &first.vault,
+            &first.relative_path,
+            &first.source_sha256,
+            &first.target_token,
+        );
+        let target_token = first.target_token.clone();
+        let staged = staged.pop().expect("one note");
+        return Ok(PreparedImport {
+            payload: TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+                profile_id: staged.preview.profile_id,
+                epoch: staged.preview.epoch,
+                request_sha256,
+                vault: staged.preview.vault,
+                relative_path: staged.preview.relative_path,
+                source_sha256: staged.preview.source_sha256,
+                title: staged.preview.title,
+                document: staged.document,
+                markdown: staged.markdown,
+                items: Vec::new(),
+            }),
+            scope,
+            selection_id,
+            target_token,
+        });
+    }
+    let hash_items: Vec<(&str, &str, &str)> = staged
+        .iter()
+        .map(|note| {
+            (
+                note.preview.relative_path.as_str(),
+                note.preview.source_sha256.as_str(),
+                note.preview.target_token.as_str(),
+            )
+        })
+        .collect();
+    let token_items: Vec<(&str, &str)> = staged
+        .iter()
+        .map(|note| {
+            (
+                note.preview.relative_path.as_str(),
+                note.preview.target_token.as_str(),
+            )
+        })
+        .collect();
+    let request_sha256 =
+        import_request_sha256_batch(&first.profile_id, &first.epoch, &first.vault, &hash_items);
+    let target_token = batch_target_token(&token_items);
+    let profile_id = first.profile_id.clone();
+    let epoch = first.epoch.clone();
+    let vault = first.vault.clone();
+    drop(hash_items);
+    drop(token_items);
+    let items = staged
+        .into_iter()
+        .map(|note| PrepareMarkdownItem {
+            relative_path: note.preview.relative_path,
+            source_sha256: note.preview.source_sha256,
+            title: note.preview.title,
+            document: note.document,
+            markdown: note.markdown,
+        })
+        .collect();
+    Ok(PreparedImport {
+        payload: TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            profile_id,
+            epoch,
+            request_sha256,
+            vault,
+            relative_path: String::new(),
+            source_sha256: String::new(),
+            title: String::new(),
+            document: Value::Null,
+            markdown: String::new(),
+            items,
         }),
         scope,
         selection_id,
-    ))
+        target_token,
+    })
 }
 
 pub(crate) fn verify_prepared_target(
@@ -556,6 +752,7 @@ pub(crate) fn verify_prepared_target(
         vault,
         relative_path,
         source_sha256,
+        items,
         ..
     }) = payload
     else {
@@ -564,8 +761,25 @@ pub(crate) fn verify_prepared_target(
     if source_profiles::get_in(db, profile_id)?.access_epoch != *epoch {
         return Err("来源状态已变化，请重新预检".into());
     }
-    let key = super::note_origins::NoteOriginKey::new(profile_id, vault, relative_path)?;
-    if super::note_origins::preview_token(db, &key, source_sha256)? != expected {
+    if items.is_empty() {
+        let key = super::note_origins::NoteOriginKey::new(profile_id, vault, relative_path)?;
+        if super::note_origins::preview_token(db, &key, source_sha256)? != expected {
+            return Err("目标笔记在预检后发生变化，请重新预检".into());
+        }
+        return Ok(());
+    }
+    let mut parts = Vec::with_capacity(items.len());
+    for item in items {
+        let key = super::note_origins::NoteOriginKey::new(profile_id, vault, &item.relative_path)?;
+        let token = super::note_origins::preview_token(db, &key, &item.source_sha256)?;
+        parts.push((item.relative_path.clone(), token));
+    }
+    parts.sort_by(|left, right| left.0.cmp(&right.0));
+    let refs: Vec<(&str, &str)> = parts
+        .iter()
+        .map(|(path, token)| (path.as_str(), token.as_str()))
+        .collect();
+    if batch_target_token(&refs) != expected {
         return Err("目标笔记在预检后发生变化，请重新预检".into());
     }
     Ok(())
@@ -611,18 +825,30 @@ pub fn list_items_in_library(
 ) -> Result<Vec<ImportItemView>, String> {
     let scope = scope_for(state, library)?;
     let items = import_ops::list_items(state, &scope, batch_id)?;
-    Ok(items
+    items
         .into_iter()
-        .map(|i| ImportItemView {
-            id: i.id,
-            batch_id: i.batch_id,
-            status: i.status,
-            conflict_code: i.conflict_code,
-            target_id: i.target_id,
-            source_sha256: i.source_sha256,
-            stage_relative: i.stage_relative,
+        .map(|i| {
+            Ok(ImportItemView {
+                id: i.id,
+                batch_id: i.batch_id,
+                status: i.status,
+                conflict_code: i.conflict_code,
+                target_id: i.target_id,
+                source_sha256: i.source_sha256,
+                stage_relative: i.stage_relative,
+                relative_path: relative_from_source_key(&i.source_key_json)?,
+            })
         })
-        .collect())
+        .collect()
+}
+
+fn relative_from_source_key(source_key_json: &str) -> Result<String, String> {
+    let parts: Vec<String> =
+        serde_json::from_str(source_key_json).map_err(|_| "笔记来源身份无效")?;
+    if parts.len() != 4 || parts[1] != "markdown" || parts[3].is_empty() {
+        return Err("笔记来源身份无效".into());
+    }
+    Ok(parts[3].clone())
 }
 
 async fn job<T, F>(app: AppHandle, work: F) -> Result<T, String>
@@ -754,6 +980,86 @@ pub async fn queue_learning_import_prepare(
         &scope,
         &selection_id,
         &enqueue_target_token,
+    )
+}
+
+#[tauri::command]
+pub async fn pick_learning_import_notes(
+    app: AppHandle,
+    expected_library_id: String,
+    profile_id: String,
+    epoch: String,
+    vault: String,
+    selected_root: String,
+) -> Result<Option<Vec<ImportNotePreview>>, String> {
+    let picker_app = app.clone();
+    job(app, move |state| {
+        pick_notes_with_picker(
+            state,
+            &expected_library_id,
+            &profile_id,
+            &epoch,
+            &vault,
+            &selected_root,
+            |root| {
+                let Some(files) = picker_app
+                    .dialog()
+                    .file()
+                    .set_title("选择来源目录中的 Markdown 笔记")
+                    .set_directory(root)
+                    .add_filter("Markdown", &["md"])
+                    .blocking_pick_files()
+                else {
+                    return Ok(None);
+                };
+                let mut paths = Vec::with_capacity(files.len());
+                for file in files {
+                    paths.push(
+                        file.into_path()
+                            .map_err(|_| "所选笔记路径无法识别".to_string())?,
+                    );
+                }
+                Ok(Some(paths))
+            },
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn queue_learning_import_prepare_batch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    expected_library_id: String,
+    profile_id: String,
+    epoch: String,
+    vault: String,
+    selected_root: String,
+    notes: Vec<ImportPrepareNote>,
+    expected_selection_id: String,
+) -> Result<LibraryTask, String> {
+    let library = expected_library_id.clone();
+    let handle = app.clone();
+    let prepared = job(handle, move |app_state| {
+        prepare_payload_many(
+            app_state,
+            &library,
+            &profile_id,
+            &epoch,
+            &vault,
+            &selected_root,
+            &notes,
+            &expected_selection_id,
+        )
+    })
+    .await?;
+    tasks::start_scoped_learning_import(
+        app,
+        state,
+        prepared.payload,
+        &prepared.scope,
+        &prepared.selection_id,
+        &prepared.target_token,
     )
 }
 

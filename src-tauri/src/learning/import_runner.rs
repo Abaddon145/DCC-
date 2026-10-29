@@ -4,8 +4,37 @@ use crate::{state::AppState, tasks::LibraryTask};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
-const MAX_MARKDOWN_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_PREPARE_NOTES: usize = 32;
+pub(crate) const MAX_PREPARE_MARKDOWN_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_PREPARE_BATCH_BYTES: usize = 20 * 1024 * 1024;
+
+/// One verified Markdown note inside a prepare task.
+/// A single-note prepare leaves `items` empty and uses the legacy fields so older
+/// queued tasks still deserialize. A multi-note prepare puts every note here and
+/// leaves the legacy fields blank.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrepareMarkdownItem {
+    pub relative_path: String,
+    pub source_sha256: String,
+    pub title: String,
+    pub document: Value,
+    /// Verified UTF-8 markdown already authorized by the caller; must match source_sha256.
+    pub markdown: String,
+}
+
+/// Caller-supplied identity for one note in a batch prepare. The backend re-reads
+/// the authorized vault and ignores any markdown body from the frontend.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct ImportPrepareNote {
+    pub relative_path: String,
+    pub source_sha256: String,
+    pub target_token: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -26,6 +55,9 @@ pub enum ImportTaskRequest {
         document: Value,
         /// Verified UTF-8 markdown already authorized by the caller; must match source_sha256.
         markdown: String,
+        /// Empty for the single-note shape. Non-empty replaces the legacy fields.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<PrepareMarkdownItem>,
     },
     Commit {
         batch_id: String,
@@ -47,33 +79,16 @@ impl ImportTaskRequest {
                 epoch,
                 request_sha256,
                 vault,
-                relative_path,
-                source_sha256,
-                title,
-                document: _,
-                markdown,
+                ..
             } => {
+                let notes = prepare_entries(self)?;
                 if !source_profiles::valid_uuid(profile_id) || !source_profiles::valid_uuid(epoch) {
                     return Err("来源身份无效".into());
                 }
-                if !valid_hash(request_sha256) || !valid_hash(source_sha256) {
+                if !valid_hash(request_sha256) {
                     return Err("迁入摘要无效".into());
                 }
-                if title.trim().is_empty() || title.len() > 512 {
-                    return Err("迁入笔记标题无效".into());
-                }
-                if markdown.is_empty() || markdown.len() > MAX_MARKDOWN_BYTES {
-                    return Err("迁入原文超限".into());
-                }
-                if !markdown.is_char_boundary(markdown.len()) {
-                    return Err("迁入原文无效".into());
-                }
-                let digest = format!("{:x}", Sha256::digest(markdown.as_bytes()));
-                if digest != *source_sha256 {
-                    return Err("迁入原文摘要不匹配".into());
-                }
-                // Reuse origin key validation (path segments, vault text).
-                let _ = super::note_origins::NoteOriginKey::new(profile_id, vault, relative_path)?;
+                validate_prepare_notes(profile_id, vault, &notes)?;
                 Ok(())
             }
             Self::Commit { batch_id } | Self::Cancel { batch_id } => {
@@ -104,6 +119,75 @@ impl ImportTaskRequest {
             Self::Revert { .. } => "学习资料迁入撤回",
         }
     }
+}
+
+fn prepare_entries(request: &ImportTaskRequest) -> Result<Vec<PrepareMarkdownItem>, String> {
+    let ImportTaskRequest::Prepare {
+        items,
+        relative_path,
+        source_sha256,
+        title,
+        document,
+        markdown,
+        ..
+    } = request
+    else {
+        return Err("迁入任务类型无效".into());
+    };
+    if items.is_empty() {
+        return Ok(vec![PrepareMarkdownItem {
+            relative_path: relative_path.clone(),
+            source_sha256: source_sha256.clone(),
+            title: title.clone(),
+            document: document.clone(),
+            markdown: markdown.clone(),
+        }]);
+    }
+    if !relative_path.is_empty()
+        || !source_sha256.is_empty()
+        || !title.is_empty()
+        || !markdown.is_empty()
+        || !document.is_null()
+    {
+        return Err("迁入准备不能同时携带单篇与多篇正文".into());
+    }
+    Ok(items.clone())
+}
+
+fn validate_prepare_notes(
+    profile_id: &str,
+    vault: &str,
+    notes: &[PrepareMarkdownItem],
+) -> Result<(), String> {
+    if notes.is_empty() || notes.len() > MAX_PREPARE_NOTES {
+        return Err("迁入批次笔记数量无效".into());
+    }
+    let mut seen = HashSet::new();
+    let mut total = 0usize;
+    for note in notes {
+        if !valid_hash(&note.source_sha256) {
+            return Err("迁入摘要无效".into());
+        }
+        if note.title.trim().is_empty() || note.title.len() > 512 {
+            return Err("迁入笔记标题无效".into());
+        }
+        if note.markdown.is_empty() || note.markdown.len() > MAX_PREPARE_MARKDOWN_BYTES {
+            return Err("迁入原文超限".into());
+        }
+        let digest = format!("{:x}", Sha256::digest(note.markdown.as_bytes()));
+        if digest != note.source_sha256 {
+            return Err("迁入原文摘要不匹配".into());
+        }
+        let _ = super::note_origins::NoteOriginKey::new(profile_id, vault, &note.relative_path)?;
+        if !seen.insert(note.relative_path.to_lowercase()) {
+            return Err("迁入批次包含重复笔记".into());
+        }
+        total = total.saturating_add(note.markdown.len());
+        if total > MAX_PREPARE_BATCH_BYTES {
+            return Err("迁入批次原文超限".into());
+        }
+    }
+    Ok(())
 }
 
 fn valid_hash(value: &str) -> bool {
@@ -157,15 +241,12 @@ pub(crate) fn run_local(
             epoch,
             request_sha256,
             vault,
-            relative_path,
-            source_sha256,
-            title,
-            document,
-            markdown,
+            ..
         } => {
             if stopped() {
                 return Err("迁入准备已停止".into());
             }
+            let notes = prepare_entries(request)?;
             let batch = import_ops::create_batch(state, &scope, profile_id, epoch, request_sha256)?;
             if batch.status == "committed" {
                 // Same request replayed after commit: hand back the durable receipt instead
@@ -179,7 +260,10 @@ pub(crate) fn run_local(
                     &task.id,
                     1,
                     1,
-                    title.clone(),
+                    notes
+                        .first()
+                        .map(|note| note.title.clone())
+                        .unwrap_or_default(),
                     "迁入已提交（重放）".into(),
                     Some(value.clone()),
                 );
@@ -188,42 +272,57 @@ pub(crate) fn run_local(
             if batch.status != "pending" {
                 return Err("迁入批次已结束，请使用新的请求摘要".into());
             }
-            let item = import_ops::add_item(
-                state,
-                &scope,
-                &batch.id,
-                import_ops::NewImportItem {
-                    vault: vault.clone(),
-                    relative_path: relative_path.clone(),
-                    source_sha256: source_sha256.clone(),
-                    title: title.clone(),
-                    document: document.clone(),
-                    expected_target_id: None,
-                    expected_target_revision: None,
-                    expected_target_sha256: None,
-                },
-            )?;
-            let staged = import_ops::stage_item_bytes(
-                state,
-                &scope,
-                &batch.id,
-                &item.id,
-                markdown.as_bytes(),
-            )?;
+            let mut item_ids = Vec::with_capacity(notes.len());
+            for note in &notes {
+                if stopped() {
+                    let _ = import_ops::cancel_batch(state, &scope, &batch.id);
+                    return Err("迁入准备已停止，已取消未提交批次".into());
+                }
+                let item = import_ops::add_item(
+                    state,
+                    &scope,
+                    &batch.id,
+                    import_ops::NewImportItem {
+                        vault: vault.clone(),
+                        relative_path: note.relative_path.clone(),
+                        source_sha256: note.source_sha256.clone(),
+                        title: note.title.clone(),
+                        document: note.document.clone(),
+                        expected_target_id: None,
+                        expected_target_revision: None,
+                        expected_target_sha256: None,
+                    },
+                )?;
+                let staged = import_ops::stage_item_bytes(
+                    state,
+                    &scope,
+                    &batch.id,
+                    &item.id,
+                    note.markdown.as_bytes(),
+                )?;
+                item_ids.push(staged.id);
+            }
             if stopped() {
                 let _ = import_ops::cancel_batch(state, &scope, &batch.id);
                 return Err("迁入准备已停止，已取消未提交批次".into());
             }
             let value = json!({
                 "batchId": batch.id,
-                "itemId": staged.id,
-                "status": staged.status,
+                "itemId": item_ids.first(),
+                "itemIds": item_ids,
+                "status": "staged",
+                "count": notes.len(),
             });
+            let label = if notes.len() == 1 {
+                notes[0].title.clone()
+            } else {
+                format!("{} 篇笔记", notes.len())
+            };
             state.tasks.update(
                 &task.id,
-                1,
-                1,
-                title.clone(),
+                notes.len(),
+                notes.len(),
+                label,
                 "等待明确提交".into(),
                 Some(value.clone()),
             );

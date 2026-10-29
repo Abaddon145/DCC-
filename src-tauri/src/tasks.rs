@@ -873,6 +873,7 @@ mod import_lifecycle_tests {
             title: "t".into(),
             document: serde_json::json!({"type":"doc","content":[]}),
             markdown: "forged".into(),
+            items: Vec::new(),
         });
         assert!(ensure_generic_ipc_payload(&prepare)
             .unwrap_err()

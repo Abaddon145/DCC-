@@ -8,8 +8,10 @@ import {api} from "../../lib/api";
 vi.mock("./api",()=>({learningApi:{
   bindImportSource:vi.fn(),
   pickImportNote:vi.fn(),
+  pickImportNotes:vi.fn(),
   previewImportNote:vi.fn(),
   queueImportPrepare:vi.fn(),
+  queueImportPrepareBatch:vi.fn(),
   listImportBatches:vi.fn(),
   listImportItems:vi.fn(),
 }}));
@@ -72,6 +74,12 @@ beforeEach(()=>{
   vi.mocked(learningApi.listImportItems).mockResolvedValue([]);
   vi.mocked(learningApi.bindImportSource).mockResolvedValue(structuredClone(binding));
   vi.mocked(learningApi.pickImportNote).mockResolvedValue(null);
+  vi.mocked(learningApi.pickImportNotes).mockResolvedValue(null);
+  vi.mocked(learningApi.queueImportPrepareBatch).mockResolvedValue({
+    id:"task-batch",libraryId:"lib",label:"学习资料迁入准备",status:"queued",
+    phase:"",current:0,total:0,currentName:"",createdAt:"",updatedAt:"",
+    cancellable:true,message:"",result:null,payload:{kind:"learningImport",request:{action:"prepare"}},
+  } as never);
   vi.mocked(learningApi.previewImportNote).mockResolvedValue(structuredClone(previewOk));
   vi.mocked(learningApi.queueImportPrepare).mockResolvedValue({
     id:"task-1",libraryId:"lib",label:"学习资料迁入准备",status:"queued",
@@ -268,6 +276,59 @@ it("selects a Markdown file through the backend and previews its result",async()
   expect(screen.getByLabelText("迁入相对路径")).toHaveValue("notes/hello.md");
 });
 
+
+it("adds several authorized notes into one prepare batch and keeps a blocked note out",async()=>{
+  const batchConflict={...previewConflict,relativePath:"notes/conflict.md",sourceSha256:"e".repeat(64),targetToken:"f".repeat(64)};
+  const second={...previewOk,relativePath:"notes/second.md",title:"第二篇",sourceSha256:"c".repeat(64),targetToken:"d".repeat(64)};
+  const blocked={...previewOk,relativePath:"notes/blocked.md",canPrepare:false,pendingConversion:true,message:"转换仍有未解析内容或缺少正文，已失败闭合，不能进入暂存。"};
+  vi.mocked(learningApi.pickImportNotes).mockResolvedValueOnce([structuredClone(previewOk),structuredClone(batchConflict)]);
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
+  await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.click(screen.getByRole("button",{name:"选择多篇 Markdown…"}));
+  expect(await screen.findByRole("region",{name:"本批预检"})).toBeInTheDocument();
+  expect(screen.getByText("notes/hello.md")).toBeInTheDocument();
+  expect(screen.getByText("notes/conflict.md")).toBeInTheDocument();
+  expect(screen.getAllByText(/覆盖：否/).length).toBeGreaterThan(0);
+  expect(screen.getByText(/目标已改/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button",{name:"排队准备（不覆盖）"}));
+  await waitFor(()=>expect(learningApi.queueImportPrepareBatch).toHaveBeenCalledWith(
+    "lib",binding.profileId,binding.epoch,binding.vault,binding.root,
+    [
+      {relativePath:"notes/conflict.md",sourceSha256:batchConflict.sourceSha256,targetToken:batchConflict.targetToken},
+      {relativePath:"notes/hello.md",sourceSha256:previewOk.sourceSha256,targetToken:previewOk.targetToken},
+    ],
+    previewOk.selectionId,
+  ));
+  expect(learningApi.queueImportPrepare).not.toHaveBeenCalled();
+  expect(await screen.findByText(/本批 2 篇/)).toBeInTheDocument();
+
+  vi.mocked(learningApi.previewImportNote)
+    .mockResolvedValueOnce(structuredClone(second))
+    .mockResolvedValueOnce(structuredClone(blocked));
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"notes/second.md"}});
+  fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
+  await screen.findByText(/预检通过：将新建笔记/);
+  fireEvent.click(screen.getByRole("button",{name:"加入本批"}));
+  fireEvent.change(screen.getByLabelText("迁入相对路径"),{target:{value:"notes/blocked.md"}});
+  fireEvent.click(screen.getByRole("button",{name:"预检相对路径"}));
+  expect(await screen.findByText(/失败闭合/)).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"加入本批"})).toBeDisabled();
+  expect(screen.queryByText("notes/blocked.md")).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"移出 notes/second.md"}));
+  expect(screen.queryByText("notes/second.md")).toBeNull();
+});
+
+it("shows a rejected multi-note pick without inventing paths",async()=>{
+  vi.mocked(learningApi.pickImportNotes).mockRejectedValueOnce(new Error("请选择已授权来源目录中的笔记"));
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择来源目录…"}));
+  await screen.findByText(/C:\/synthetic\/vault/);
+  fireEvent.click(screen.getByRole("button",{name:"选择多篇 Markdown…"}));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/已授权来源目录/);
+  expect(screen.queryByRole("region",{name:"本批预检"})).toBeNull();
+  expect(learningApi.queueImportPrepareBatch).not.toHaveBeenCalled();
+});
 
 it("keeps the selected vault but clears the preview when file picking is cancelled",async()=>{
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);

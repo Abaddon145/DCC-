@@ -33,6 +33,7 @@ function ImportPanel({libraryId,onClose}:Props){
   const [binding,setBinding]=useState<ImportSourceBinding|null>(null);
   const [relativePath,setRelativePath]=useState("");
   const [preview,setPreview]=useState<ImportNotePreview|null>(null);
+  const [drafts,setDrafts]=useState<ImportNotePreview[]>([]);
   const [batches,setBatches]=useState<ImportBatchView[]>([]);
   const [items,setItems]=useState<ImportItemView[]>([]);
   const [selectedBatch,setSelectedBatch]=useState<string>("");
@@ -66,7 +67,7 @@ function ImportPanel({libraryId,onClose}:Props){
   },[libraryId,selectedBatch,status,refresh]);
 
   async function pickSource(){
-    setBusy(true);setError("");setPreview(null);setRelativePath("");
+    setBusy(true);setError("");setPreview(null);setRelativePath("");setDrafts([]);
     try{
       const next=await learningApi.bindImportSource(libraryId,"vault-ui");
       if(!next){setBinding(null);setStatus("已取消目录选择；未绑定来源。");return;}
@@ -111,22 +112,63 @@ function ImportPanel({libraryId,onClose}:Props){
     }finally{setBusy(false);}
   }
 
-  async function queuePrepare(){
-    if(!binding||!preview?.canPrepare||preview.willOverwrite)return;
+  function rememberDraft(next:ImportNotePreview){
+    setDrafts(current=>{
+      const rest=current.filter(item=>item.relativePath!==next.relativePath);
+      return [...rest,next].sort((left,right)=>left.relativePath.localeCompare(right.relativePath));
+    });
+  }
+
+  async function pickNotes(){
+    if(!binding)return;
     setBusy(true);setError("");
     try{
-      const task=await learningApi.queueImportPrepare(
-        libraryId,
-        binding.profileId,
-        binding.epoch,
-        binding.vault,
-        binding.root,
-        preview.relativePath,
-        preview.sourceSha256,
-        preview.selectionId,
-        preview.targetToken,
-      );
-      setStatus(`已排队准备任务 ${task.id}（${task.label}）。不会静默覆盖已有正文。`);
+      const picked=await learningApi.pickImportNotes(libraryId,binding.profileId,binding.epoch,binding.vault,binding.root);
+      if(!picked||picked.length===0){setStatus("已取消笔记选择；来源目录仍保留。");return;}
+      setDrafts([...picked].sort((left,right)=>left.relativePath.localeCompare(right.relativePath)));
+      setPreview(null);setRelativePath("");
+      setStatus(`已加入 ${picked.length} 篇笔记。请确认每篇预检后排队准备；不会静默覆盖已有正文。`);
+    }catch(reason){setError(String(reason));}finally{setBusy(false);}
+  }
+
+  function addDraft(){
+    if(!preview?.canPrepare||preview.willOverwrite)return;
+    rememberDraft(preview);
+    setStatus(`已加入本批：${preview.relativePath}。可继续添加其他笔记，或排队准备。`);
+  }
+
+  async function queuePrepare(){
+    if(!binding)return;
+    const queued=drafts.length>0?drafts:preview?[preview]:[];
+    if(queued.length===0||queued.some(item=>!item.canPrepare||item.willOverwrite))return;
+    if(queued.length>32){setError("迁入批次笔记数量无效");return;}
+    setBusy(true);setError("");
+    try{
+      const task=drafts.length===0&&preview
+        ?await learningApi.queueImportPrepare(
+          libraryId,
+          binding.profileId,
+          binding.epoch,
+          binding.vault,
+          binding.root,
+          preview.relativePath,
+          preview.sourceSha256,
+          preview.selectionId,
+          preview.targetToken,
+        )
+        :await learningApi.queueImportPrepareBatch(
+          libraryId,
+          binding.profileId,
+          binding.epoch,
+          binding.vault,
+          binding.root,
+          queued.map(item=>({relativePath:item.relativePath,sourceSha256:item.sourceSha256,targetToken:item.targetToken})),
+          queued[0].selectionId,
+        );
+      setStatus(queued.length===1
+        ?`已排队准备任务 ${task.id}（${task.label}）。不会静默覆盖已有正文。`
+        :`已排队准备任务 ${task.id}（${task.label}），本批 ${queued.length} 篇。不会静默覆盖已有正文。`);
+      if(drafts.length>0)setDrafts([]);
       setSelectedBatch("");
     }catch(reason){
       setError(String(reason));
@@ -167,6 +209,8 @@ function ImportPanel({libraryId,onClose}:Props){
     }finally{setBusy(false);}
   }
 
+  const queued=drafts.length>0?drafts:preview?[preview]:[];
+  const canQueue=!!binding&&queued.length>0&&queued.every(item=>item.canPrepare&&!item.willOverwrite);
   const selected=batches.find(batch=>batch.id===selectedBatch);
   const revertReport=selected?.revertReport?readRevertReport(selected.revertReport,selected.id):null;
   const selectedItems=items.filter(item=>item.batchId===selectedBatch);
@@ -190,11 +234,16 @@ function ImportPanel({libraryId,onClose}:Props){
       <p className="learning-import-boundary" role="note">
         费用边界：迁入只在本机进行 Markdown 读取、转换、暂存与提交，不调用付费 AI 或云端服务，不产生费用。准备、提交、取消都作为任务进入任务中心，可在那里查看进度与失败原因。
       </p>
+      <p className="learning-import-boundary" role="note">
+        同一已授权目录内可以加入多篇 Markdown，作为同一个批次准备。提交、取消和撤回仍作用于该批次。未加入本批的单篇预检仍可直接排队。
+      </p>
       <div className="learning-import-actions">
         <button type="button" className="primary-button" disabled={busy} onClick={()=>void pickSource()}>选择来源目录…</button>
         <button type="button" disabled={busy||!binding} onClick={()=>void pickNote()}>选择 Markdown…</button>
+        <button type="button" disabled={busy||!binding} onClick={()=>void pickNotes()}>选择多篇 Markdown…</button>
         <button type="button" disabled={busy||!binding||!relativePath.trim()} onClick={()=>void runPreview()}>预检相对路径</button>
-        <button type="button" disabled={busy||!preview?.canPrepare||!!preview?.willOverwrite} onClick={()=>void queuePrepare()}>排队准备（不覆盖）</button>
+        <button type="button" disabled={busy||!preview?.canPrepare||!!preview?.willOverwrite} onClick={addDraft}>加入本批</button>
+        <button type="button" disabled={busy||!canQueue} onClick={()=>void queuePrepare()}>排队准备（不覆盖）</button>
       </div>
       {binding&&<dl className="learning-import-meta" aria-label="已绑定来源">
         <div><dt>素材库</dt><dd>{binding.libraryId}</dd></div>
@@ -217,6 +266,20 @@ function ImportPanel({libraryId,onClose}:Props){
           {preview.targetId&&<li>目标笔记：{preview.targetId}</li>}
         </ul>
         {preview.warnings.length>0&&<p role="status">警告：{preview.warnings.join("；")}</p>}
+      </section>}
+      {drafts.length>0&&<section className="learning-import-drafts" aria-label="本批预检">
+        <h3>本批预检（{drafts.length}）</h3>
+        <ul>{drafts.map(item=><li key={item.relativePath}>
+          <span>
+            <strong>{item.relativePath}</strong>
+            {` · ${CONFLICT_LABEL[item.conflict]||item.conflict}`}
+            {` · ${item.canPrepare?"可准备":"不可准备"}`}
+            {` · 覆盖${item.willOverwrite?"：是（禁止）":"：否"}`}
+            {item.pendingConversion?" · 转换挂起":""}
+            <small>{item.message}</small>
+          </span>
+          <button type="button" aria-label={`移出 ${item.relativePath}`} onClick={()=>setDrafts(current=>current.filter(draft=>draft.relativePath!==item.relativePath))}>移出</button>
+        </li>)}</ul>
       </section>}
       <p className="learning-import-status" role="status">{status}</p>
       {error&&<p className="learning-import-error" role="alert">{error}<button type="button" onClick={()=>{setError("");setStatus(s=>s+"（已清除错误，可重试）");}}>清除并重试</button></p>}
@@ -248,6 +311,7 @@ function ImportPanel({libraryId,onClose}:Props){
               {selectedItems.length===0?<p>该批次暂无条目。</p>:
                 <ul>{selectedItems.map(item=><li key={item.id}>
                   <strong>{item.status}</strong>
+                  {item.relativePath?` · ${item.relativePath}`:""}
                   {item.conflictCode?` · 冲突 ${item.conflictCode}`:""}
                   {item.targetId?` · 目标 ${item.targetId.slice(0,8)}…`:""}
                   {item.stageRelative?` · 暂存 ${item.stageRelative}`:""}
