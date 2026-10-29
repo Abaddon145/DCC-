@@ -124,6 +124,8 @@ mod course_batch_tests;
 mod course_origins;
 #[cfg(test)]
 mod course_origins_tests;
+#[cfg(test)]
+mod course_revert_tests;
 pub mod excerpt_access;
 #[cfg(test)]
 mod excerpt_access_tests;

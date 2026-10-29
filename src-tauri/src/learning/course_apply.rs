@@ -8,9 +8,9 @@ use super::source_profiles::{self, LibraryScope};
 use crate::state::AppState;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const MAX_PAYLOAD_BYTES: usize = 1_048_576;
@@ -1068,5 +1068,361 @@ pub(super) fn cancel_course_batch(
         }
         tx.commit().map_err(|_| "无法取消课程迁入")?;
         load_receipt(db, batch_id)
+    })
+}
+
+struct JournalEntry {
+    id: String,
+    kind: String,
+    source_id: String,
+    status: String,
+    target_id: Option<String>,
+    action: Option<String>,
+}
+
+fn saved_revert(db: &Connection, batch_id: &str) -> Result<Option<Value>, String> {
+    let saved: Option<String> = db
+        .query_row(
+            "SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",
+            [batch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| "无法读取迁入撤回记录")?;
+    saved
+        .map(|text| serde_json::from_str(&text).map_err(|_| "迁入撤回记录损坏".into()))
+        .transpose()
+}
+
+fn batch_request(db: &Connection, batch_id: &str) -> Result<String, String> {
+    db.query_row(
+        "SELECT request_sha256 FROM learning_import_batches WHERE id=?1",
+        [batch_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| "无法读取迁入批次".into())
+}
+
+fn load_journal(db: &Connection, batch_id: &str) -> Result<Vec<JournalEntry>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT id,entry_kind,source_id,status,target_id,receipt_json FROM learning_course_import_entries WHERE batch_id=?1 ORDER BY created_at,id",
+        )
+        .map_err(|_| "无法读取课程迁入结果")?;
+    let rows = statement
+        .query_map([batch_id], |row| {
+            let receipt: String = row.get(5)?;
+            let action = serde_json::from_str::<Value>(&receipt)
+                .ok()
+                .and_then(|value| value["action"].as_str().map(str::to_owned));
+            Ok(JournalEntry {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                source_id: row.get(2)?,
+                status: row.get(3)?,
+                target_id: row.get(4)?,
+                action,
+            })
+        })
+        .map_err(|_| "无法读取课程迁入结果")?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "无法读取课程迁入结果")?;
+    Ok(rows)
+}
+
+fn reused_target(
+    db: &Connection,
+    kind: &str,
+    target: &str,
+    entry_id: &str,
+) -> Result<bool, String> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM learning_course_import_entries WHERE entry_kind=?1 AND target_id=?2 AND id<>?3 AND status='committed')",
+        params![kind, target, entry_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| "无法检查课程是否被其他批次复用".into())
+}
+
+fn target_present(db: &Connection, kind: &str, id: &str) -> Result<bool, String> {
+    let sql = if kind == "series" {
+        "SELECT EXISTS(SELECT 1 FROM learning_series WHERE id=?1)"
+    } else {
+        "SELECT EXISTS(SELECT 1 FROM learning_courses WHERE id=?1)"
+    };
+    db.query_row(sql, [id], |row| row.get(0))
+        .map_err(|_| "无法读取课程迁入目标".into())
+}
+
+fn course_blocked(
+    db: &Connection,
+    course_id: &str,
+    reverting_series: &HashSet<String>,
+) -> Result<bool, String> {
+    let linked: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM learning_course_notes WHERE course_id=?1)
+              OR EXISTS(SELECT 1 FROM learning_subtitles WHERE course_id=?1)
+              OR EXISTS(SELECT 1 FROM learning_analyses WHERE course_id=?1)
+              OR EXISTS(SELECT 1 FROM learning_analysis_previews WHERE course_id=?1)
+              OR EXISTS(SELECT 1 FROM learning_excerpts WHERE course_id=?1)",
+            [course_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "无法检查课程后续使用情况")?;
+    if linked {
+        return Ok(true);
+    }
+    let mut statement = db
+        .prepare("SELECT series_id FROM learning_series_courses WHERE course_id=?1")
+        .map_err(|_| "无法检查课程后续使用情况")?;
+    let memberships = statement
+        .query_map([course_id], |row| row.get::<_, String>(0))
+        .map_err(|_| "无法检查课程后续使用情况")?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "无法检查课程后续使用情况")?;
+    Ok(memberships
+        .into_iter()
+        .any(|series| !reverting_series.contains(&series)))
+}
+
+fn classify_created(
+    db: &Connection,
+    kind: &str,
+    entry: &JournalEntry,
+    state: CourseOriginState,
+    mapped_id: &str,
+) -> Result<&'static str, String> {
+    let target = entry.target_id.as_deref().ok_or("无法撤回课程迁入")?;
+    if mapped_id != target {
+        return Ok("kept_modified");
+    }
+    match state {
+        CourseOriginState::Unchanged(id) if id == target => {
+            if reused_target(db, kind, target, &entry.id)? {
+                Ok("kept_reused")
+            } else {
+                Ok("reverted")
+            }
+        }
+        CourseOriginState::TargetUnavailable(_) => Ok("kept_missing"),
+        _ => Ok("kept_modified"),
+    }
+}
+
+fn classify_series(
+    db: &Connection,
+    profile: &str,
+    entry: &JournalEntry,
+) -> Result<&'static str, String> {
+    if entry.status == "conflict" {
+        return Ok("kept_conflict");
+    }
+    if entry.action.as_deref() != Some("created") {
+        return Ok("kept_reused");
+    }
+    let target = entry.target_id.as_deref().ok_or("无法撤回课程迁入")?;
+    let key = SeriesOriginKey::new(profile, &entry.source_id)?;
+    let Some((mapped, hash)) = course_origins::stored_series_in(db, &key)? else {
+        return Ok(if target_present(db, "series", target)? {
+            "kept_modified"
+        } else {
+            "kept_missing"
+        });
+    };
+    classify_created(
+        db,
+        "series",
+        entry,
+        course_origins::inspect_series(db, &key, &hash)?,
+        &mapped,
+    )
+}
+
+fn classify_course(
+    db: &Connection,
+    profile: &str,
+    entry: &JournalEntry,
+    reverting_series: &HashSet<String>,
+) -> Result<&'static str, String> {
+    if entry.status == "conflict" {
+        return Ok("kept_conflict");
+    }
+    if entry.action.as_deref() != Some("created") {
+        return Ok("kept_reused");
+    }
+    let target = entry.target_id.as_deref().ok_or("无法撤回课程迁入")?;
+    let key = CourseOriginKey::new(profile, &entry.source_id)?;
+    let Some((mapped, hash)) = course_origins::stored_in(db, &key)? else {
+        return Ok(if target_present(db, "course", target)? {
+            "kept_modified"
+        } else {
+            "kept_missing"
+        });
+    };
+    let outcome = classify_created(
+        db,
+        "course",
+        entry,
+        course_origins::inspect(db, &key, &hash)?,
+        &mapped,
+    )?;
+    if outcome == "reverted" && course_blocked(db, target, reverting_series)? {
+        return Ok("kept_modified");
+    }
+    Ok(outcome)
+}
+
+fn delete_created_series(
+    db: &Connection,
+    profile: &str,
+    entry: &JournalEntry,
+) -> Result<(), String> {
+    let target = entry.target_id.as_deref().ok_or("无法撤回课程迁入")?;
+    let key = SeriesOriginKey::new(profile, &entry.source_id)?;
+    course_origins::forget_series_in(db, &key, target)?;
+    let removed = db
+        .execute("DELETE FROM learning_series WHERE id=?1", [target])
+        .map_err(|_| "无法撤回课程迁入")?;
+    if removed != 1 {
+        return Err("无法撤回课程迁入".into());
+    }
+    Ok(())
+}
+
+fn delete_created_course(
+    db: &Connection,
+    profile: &str,
+    entry: &JournalEntry,
+) -> Result<(), String> {
+    let target = entry.target_id.as_deref().ok_or("无法撤回课程迁入")?;
+    let key = CourseOriginKey::new(profile, &entry.source_id)?;
+    course_origins::forget_in(db, &key, target)?;
+    let removed = db
+        .execute("DELETE FROM learning_courses WHERE id=?1", [target])
+        .map_err(|_| "无法撤回课程迁入")?;
+    if removed != 1 {
+        return Err("无法撤回课程迁入".into());
+    }
+    Ok(())
+}
+
+/// Revert one committed course batch. Created objects that are still unchanged and unused
+/// are removed; conflicts, reuse, later edits and missing targets stay, with their origin rows.
+/// Raw note archives and the source database are not touched. Not a Tauri command.
+pub(super) fn revert_course_batch(
+    state: &AppState,
+    scope: &LibraryScope,
+    expected_epoch: &str,
+    batch_id: &str,
+) -> Result<Value, String> {
+    if !source_profiles::valid_uuid(expected_epoch) {
+        return Err("来源状态无效，请重新读取批次".into());
+    }
+    source_profiles::scoped(state, scope, |db| {
+        let batch = prepare(db, scope, batch_id)?;
+        let profile = source_profiles::get_in(db, &batch.source_profile_id)?;
+        if profile.access_epoch != expected_epoch {
+            return Err("来源状态已变化，请重新读取批次并确认撤回".into());
+        }
+        if let Some(saved) = saved_revert(db, batch_id)? {
+            return Ok(saved);
+        }
+        if batch.status != "committed" {
+            return Err("只能撤回已提交的迁入批次".into());
+        }
+        let tx = db.unchecked_transaction().map_err(|_| "无法撤回课程迁入")?;
+        lock_batch(&tx, batch_id)?;
+        let batch = prepare(&tx, scope, batch_id)?;
+        if source_profiles::get_in(&tx, &batch.source_profile_id)?.access_epoch != expected_epoch {
+            return Err("来源状态已变化，请重新读取批次并确认撤回".into());
+        }
+        if let Some(saved) = saved_revert(&tx, batch_id)? {
+            return Ok(saved);
+        }
+        if batch.status != "committed" {
+            return Err("只能撤回已提交的迁入批次".into());
+        }
+        let entries = load_journal(&tx, batch_id)?;
+        let mut series_outcome = HashMap::new();
+        let mut reverting_series = HashSet::new();
+        for entry in entries.iter().filter(|entry| entry.kind == "series") {
+            let outcome = classify_series(&tx, &batch.source_profile_id, entry)?;
+            if outcome == "reverted" {
+                reverting_series.insert(entry.target_id.clone().ok_or("无法撤回课程迁入")?);
+            }
+            series_outcome.insert(entry.id.clone(), outcome);
+        }
+        let mut course_outcome = HashMap::new();
+        for entry in &entries {
+            match entry.kind.as_str() {
+                "series" => {}
+                "course" => {
+                    course_outcome.insert(
+                        entry.id.clone(),
+                        classify_course(&tx, &batch.source_profile_id, entry, &reverting_series)?,
+                    );
+                }
+                _ => return Err("无法读取课程迁入结果".into()),
+            }
+        }
+        let mut reverted = Vec::new();
+        let mut kept = Vec::new();
+        for entry in &entries {
+            let outcome = if entry.kind == "series" {
+                series_outcome[&entry.id]
+            } else {
+                course_outcome[&entry.id]
+            };
+            if outcome == "reverted" {
+                reverted.push(json!(entry.target_id));
+            } else {
+                kept.push(json!({
+                    "entryId": entry.id,
+                    "outcome": outcome,
+                    "targetKind": entry.kind,
+                    "targetId": entry.target_id,
+                }));
+            }
+        }
+        for entry in entries.iter().filter(|entry| entry.kind == "series") {
+            if series_outcome[&entry.id] == "reverted" {
+                delete_created_series(&tx, &batch.source_profile_id, entry)?;
+            }
+        }
+        for entry in entries.iter().filter(|entry| entry.kind == "course") {
+            if course_outcome[&entry.id] == "reverted" {
+                delete_created_course(&tx, &batch.source_profile_id, entry)?;
+            }
+        }
+        let report = json!({
+            "batchId": batch.id,
+            "reverted": reverted,
+            "kept": kept,
+            "archivesKept": true,
+        });
+        let report_text = report.to_string();
+        if report_text.len() > 65_536 {
+            return Err("无法记录课程迁入撤回".into());
+        }
+        let original = batch_request(&tx, batch_id)?;
+        let retired_seed = serde_json::to_vec(&json!([
+            "yingliu.learning-course-import.reverted.v1",
+            original,
+            batch.id,
+        ]))
+        .map_err(|_| "无法更新迁入批次")?;
+        tx.execute(
+            "UPDATE learning_import_batches SET request_sha256=?1 WHERE id=?2",
+            params![sha256_hex(&retired_seed), batch.id],
+        )
+        .map_err(|_| "无法更新迁入批次")?;
+        tx.execute(
+            "INSERT INTO learning_import_reverts(batch_id,original_request_sha256,reverted_at,report_json) VALUES(?1,?2,?3,?4)",
+            params![batch.id, original, now(), report_text],
+        )
+        .map_err(|_| "无法记录课程迁入撤回")?;
+        tx.commit().map_err(|_| "无法撤回课程迁入")?;
+        Ok(report)
     })
 }

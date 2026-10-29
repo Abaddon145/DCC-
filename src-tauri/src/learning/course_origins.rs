@@ -254,3 +254,69 @@ fn record_kind(
         _ => Err("课程来源或目标已变化，请重新检查".into()),
     }
 }
+
+pub(super) fn stored_in(
+    db: &Connection,
+    key: &CourseOriginKey,
+) -> Result<Option<(String, String)>, String> {
+    stored_kind(db, key, "course")
+}
+
+pub(super) fn stored_series_in(
+    db: &Connection,
+    key: &SeriesOriginKey,
+) -> Result<Option<(String, String)>, String> {
+    stored_kind(db, &key.0, "series")
+}
+
+fn stored_kind(
+    db: &Connection,
+    key: &CourseOriginKey,
+    kind: &str,
+) -> Result<Option<(String, String)>, String> {
+    db.query_row(
+        "SELECT target_id,source_sha256 FROM learning_origin_map WHERE source_profile_id=?1 AND source_key_json=?2 AND target_kind=?3",
+        params![key.profile, key.encoded, kind],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|_| "无法检查课程来源".into())
+}
+
+/// Drop provenance only inside the revert transaction that deletes this exact target.
+pub(super) fn forget_in(
+    db: &Connection,
+    key: &CourseOriginKey,
+    course: &str,
+) -> Result<(), String> {
+    forget_kind(db, key, course, "course")
+}
+
+pub(super) fn forget_series_in(
+    db: &Connection,
+    key: &SeriesOriginKey,
+    series: &str,
+) -> Result<(), String> {
+    forget_kind(db, &key.0, series, "series")
+}
+
+fn forget_kind(
+    db: &Connection,
+    key: &CourseOriginKey,
+    target: &str,
+    kind: &str,
+) -> Result<(), String> {
+    if db.is_autocommit() {
+        return Err("课程来源撤销需要有效事务".into());
+    }
+    let removed = db
+        .execute(
+            "DELETE FROM learning_origin_map WHERE source_profile_id=?1 AND source_key_json=?2 AND target_kind=?3 AND target_id=?4",
+            params![key.profile, key.encoded, kind, target],
+        )
+        .map_err(|_| "无法撤销课程来源")?;
+    if removed != 1 {
+        return Err("课程来源已变化，无法撤销".into());
+    }
+    Ok(())
+}
