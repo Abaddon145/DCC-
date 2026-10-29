@@ -896,7 +896,7 @@ mod learning_import_recovery {
                     &LocalMediaGrants::new(&fx.dir.path().join("no-grants")),
                 )
                 .unwrap();
-                assert!(checked.starts_with(base));
+                assert!(checked.starts_with(base.canonicalize().unwrap()));
                 assert_eq!(fs::read(checked.as_ref()).unwrap(), fx.bytes);
                 let detail = crate::media_library::get(db, &fx.entry).unwrap();
                 assert_eq!(detail.files[0].storage_mode, "managed");

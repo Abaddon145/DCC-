@@ -331,6 +331,20 @@ fn key_from_item(
     note_origins::NoteOriginKey::new(&parts[0], &parts[2], &parts[3])
 }
 
+fn ensure_note_batch(db: &Connection, batch_id: &str) -> Result<(), String> {
+    let kind: String = db
+        .query_row(
+            "SELECT batch_kind FROM learning_import_batches WHERE id=?1",
+            [batch_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "无法读取迁入批次")?;
+    if kind != "notes" {
+        return Err("课程迁入批次不能使用笔记操作".into());
+    }
+    Ok(())
+}
+
 pub(super) fn create_batch(
     state: &AppState,
     scope: &source_profiles::LibraryScope,
@@ -355,6 +369,7 @@ pub(super) fn create_batch(
             .optional()
             .map_err(|_| "无法读取迁入批次")?
         {
+            ensure_note_batch(db, &existing)?;
             return load_batch(db, &existing);
         }
         let batch = ImportBatch {
@@ -420,6 +435,7 @@ pub(super) fn add_item(
     }
     scoped_base(state, scope, |db, _| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() || batch.root_hash != scope.root_hash() {
             return Err("迁入批次不属于当前素材库".into());
         }
@@ -504,6 +520,7 @@ pub(super) fn stage_item_bytes(
     let digest = format!("{:x}", Sha256::digest(bytes));
     scoped_base(state, scope, |db, base| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.status != "pending" {
             return Err("迁入批次已结束".into());
         }
@@ -540,6 +557,7 @@ pub(super) fn commit_batch(
 ) -> Result<ImportBatch, String> {
     scoped_base(state, scope, |db, base| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() {
             return Err("迁入批次不属于当前素材库".into());
         }
@@ -717,6 +735,7 @@ pub(super) fn cancel_batch(
 ) -> Result<ImportBatch, String> {
     scoped_base(state, scope, |db, base| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() {
             return Err("迁入批次不属于当前素材库".into());
         }
@@ -821,6 +840,7 @@ pub(super) fn revert_batch(
     }
     scoped_base(state, scope, |db, _| {
         let batch = load_batch(db, batch_id)?;
+        ensure_note_batch(db, batch_id)?;
         if batch.library_id != scope.library_id() {
             return Err("迁入批次不属于当前素材库".into());
         }

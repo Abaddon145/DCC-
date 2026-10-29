@@ -76,6 +76,18 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if version < 36 {
+        let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('learning_import_batches') WHERE name='batch_kind')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !present {
+            tx.execute_batch(include_str!("schema-v36.sql"))
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE schema_meta SET value='36' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;
@@ -91,6 +103,14 @@ mod analysis_summary_tests;
 #[cfg(test)]
 mod analysis_tests;
 pub mod commands;
+#[allow(dead_code)]
+mod course_batch;
+#[cfg(test)]
+mod course_batch_tests;
+#[allow(dead_code)]
+mod course_origins;
+#[cfg(test)]
+mod course_origins_tests;
 pub mod excerpt_access;
 #[cfg(test)]
 mod excerpt_access_tests;
@@ -125,6 +145,10 @@ pub mod import_access;
 pub mod import_access;
 #[cfg(all(test, windows))]
 mod import_access_tests;
+#[allow(dead_code)]
+mod import_course_preview;
+#[cfg(test)]
+mod import_course_preview_tests;
 #[cfg(test)]
 mod import_file_check;
 #[cfg(test)]
