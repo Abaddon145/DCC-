@@ -896,6 +896,20 @@ pub fn set_deleted(
     tx.commit().map_err(error)?;
     Ok(note)
 }
+/// Soft-delete inside a caller transaction (import revert); same effect as `set_deleted(.., true)`.
+pub(crate) fn trash_in(tx: &Connection, id: &str) -> Result<Note> {
+    let mut note = get(tx, id)?;
+    note.deleted_at = Some(now());
+    note.revision += 1;
+    note.updated_at = now();
+    tx.execute(
+        "UPDATE knowledge_notes SET deleted_at=?2,revision=?3,updated_at=?4 WHERE id=?1",
+        params![id, note.deleted_at, note.revision, note.updated_at],
+    )
+    .map_err(error)?;
+    index(tx, &note)?;
+    Ok(note)
+}
 #[cfg(test)]
 pub fn revisions(db: &Connection, id: &str) -> Result<Vec<Revision>> {
     get(db, id)?;

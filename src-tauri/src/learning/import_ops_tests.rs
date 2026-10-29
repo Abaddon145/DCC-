@@ -32,7 +32,7 @@ fn learning_import_ops_upgrade_rolls_back_and_reaches_v34() {
     state
         .with_library_mut(|db, _| {
             db.execute_batch(
-                "DROP TABLE learning_import_items; DROP TABLE learning_import_batches; UPDATE schema_meta SET value='33' WHERE key='schema_version'; CREATE TRIGGER reject_v34 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='34' BEGIN SELECT RAISE(ABORT,'test rollback'); END;",
+                "DROP TABLE learning_import_item_reverts; DROP TABLE learning_import_reverts; DROP TABLE learning_import_items; DROP TABLE learning_import_batches; UPDATE schema_meta SET value='33' WHERE key='schema_version'; CREATE TRIGGER reject_v34 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='34' BEGIN SELECT RAISE(ABORT,'test rollback'); END;",
             )
             .unwrap();
             assert!(super::migrate(db).is_err());
@@ -64,7 +64,7 @@ fn learning_import_ops_upgrade_rolls_back_and_reaches_v34() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "34"
+                "35"
             );
             Ok(())
         })

@@ -30,7 +30,7 @@ fn learning_source_vault_binding_upgrade_rolls_back_and_preserves_profile() {
         db.execute_batch("DROP TRIGGER reject_v33;").unwrap();
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "34");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "35");
         Ok(())
     }).unwrap();
 }
@@ -49,7 +49,7 @@ fn learning_source_profiles_migrate_v30_once_and_preserve_existing_notes_and_arc
         let archived = archive_bytes(db, base, &ArchiveSource { profile_id:&old_profile, source_key:"old/vault.md", version_key:"v1" }, raw, &sha)?;
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "34");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "35");
         assert_eq!(knowledge::get(db, &note.id)?.document, document);
         assert_eq!(read_archive(db, base, &archived.id)?, raw);
         assert_eq!(db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r.get::<_,i64>(0)).unwrap(), 0);

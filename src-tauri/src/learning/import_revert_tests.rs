@@ -1,0 +1,203 @@
+//! Synthetic-only tests for per-batch import revert (Task 13 / M6B).
+use super::{
+    import_ops::{self, NewImportItem},
+    note_origins, source_profiles,
+};
+use crate::{
+    knowledge::{self, NoteInput},
+    state::test_state,
+};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+fn sha(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn scope(state: &crate::state::AppState) -> source_profiles::LibraryScope {
+    source_profiles::scope(state, &state.active_library_id().unwrap()).unwrap()
+}
+
+fn commit_one(
+    state: &crate::state::AppState,
+    sc: &source_profiles::LibraryScope,
+    profile: &source_profiles::SourceProfile,
+    request: &[u8],
+    path: &str,
+    bytes: &[u8],
+) -> (String, import_ops::ImportItem) {
+    let batch =
+        import_ops::create_batch(state, sc, &profile.id, &profile.access_epoch, &sha(request))
+            .unwrap();
+    let item = import_ops::add_item(
+        state,
+        sc,
+        &batch.id,
+        NewImportItem {
+            vault: "vault-revert".into(),
+            relative_path: path.into(),
+            source_sha256: sha(bytes),
+            title: "撤回测试".into(),
+            document: json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"合成正文"}]}]}),
+            expected_target_id: None,
+            expected_target_revision: None,
+            expected_target_sha256: None,
+        },
+    )
+    .unwrap();
+    import_ops::stage_item_bytes(state, sc, &batch.id, &item.id, bytes).unwrap();
+    import_ops::commit_batch(state, sc, &batch.id).unwrap();
+    let item = import_ops::get_item(state, sc, &item.id).unwrap();
+    (batch.id, item)
+}
+
+fn deleted_at(state: &crate::state::AppState, id: &str) -> Option<String> {
+    state
+        .with_library(|db, _| Ok(knowledge::get(db, id)?.deleted_at))
+        .unwrap()
+}
+
+fn origin(
+    state: &crate::state::AppState,
+    profile: &str,
+    path: &str,
+    bytes: &[u8],
+) -> note_origins::NoteOriginState {
+    let key = note_origins::NoteOriginKey::new(profile, "vault-revert", path).unwrap();
+    state
+        .with_library(|db, _| note_origins::inspect(db, &key, &sha(bytes)))
+        .unwrap()
+}
+
+#[test]
+fn learning_import_recovery_revert_trashes_unchanged_created_note_and_keeps_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let raw = b"# revert me\n";
+    let (batch_id, item) = commit_one(&state, &sc, &profile, b"revert-a", "a.md", raw);
+    let note_id = item.target_id.clone().unwrap();
+
+    let report = import_ops::revert_batch(&state, &sc, &batch_id).unwrap();
+    assert_eq!(report["batchId"], batch_id);
+    assert_eq!(report["reverted"], json!([note_id]));
+    assert_eq!(report["kept"], json!([]));
+    assert!(
+        deleted_at(&state, &note_id).is_some(),
+        "created note goes to trash"
+    );
+    assert_eq!(
+        origin(&state, &profile.id, "a.md", raw),
+        note_origins::NoteOriginState::Unmapped
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_note_archives", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1,
+                "raw archive is never removed by revert"
+            );
+            Ok(())
+        })
+        .unwrap();
+    // Same request is free again: a new pending batch, not the reverted receipt.
+    let again = import_ops::create_batch(
+        &state,
+        &sc,
+        &profile.id,
+        &profile.access_epoch,
+        &sha(b"revert-a"),
+    )
+    .unwrap();
+    assert_ne!(again.id, batch_id);
+    assert_eq!(again.status, "pending");
+}
+
+#[test]
+fn learning_import_recovery_revert_keeps_note_edited_after_import() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let raw = b"# edited later\n";
+    let (batch_id, item) = commit_one(&state, &sc, &profile, b"revert-edit", "e.md", raw);
+    let note_id = item.target_id.clone().unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::get(db, &note_id)?;
+            knowledge::save(
+                db,
+                NoteInput {
+                    id: Some(note.id.clone()),
+                    expected_revision: Some(note.revision),
+                    notebook_id: note.notebook_id.clone(),
+                    title: "用户已改".into(),
+                    document: note.document.clone(),
+                    tags: note.tags.clone(),
+                    favorite: note.favorite,
+                    journal_date: note.journal_date.clone(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let report = import_ops::revert_batch(&state, &sc, &batch_id).unwrap();
+    assert_eq!(report["reverted"], json!([]));
+    assert_eq!(report["kept"][0]["outcome"], "kept_modified");
+    assert_eq!(report["kept"][0]["noteId"], note_id);
+    assert!(deleted_at(&state, &note_id).is_none());
+    let title = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_id)?.title))
+        .unwrap();
+    assert_eq!(title, "用户已改");
+    assert!(matches!(
+        origin(&state, &profile.id, "e.md", raw),
+        note_origins::NoteOriginState::TargetChanged(_)
+    ));
+}
+
+#[test]
+fn learning_import_recovery_revert_keeps_reused_note_from_earlier_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let raw = b"# shared\n";
+    let (_first, first_item) = commit_one(&state, &sc, &profile, b"reuse-1", "s.md", raw);
+    let (second, second_item) = commit_one(&state, &sc, &profile, b"reuse-2", "s.md", raw);
+    let note_id = first_item.target_id.clone().unwrap();
+    assert_eq!(second_item.target_id.as_deref(), Some(note_id.as_str()));
+    let report = import_ops::revert_batch(&state, &sc, &second).unwrap();
+    assert_eq!(report["reverted"], json!([]));
+    assert_eq!(report["kept"][0]["outcome"], "kept_reused");
+    assert!(deleted_at(&state, &note_id).is_none());
+    assert!(matches!(
+        origin(&state, &profile.id, "s.md", raw),
+        note_origins::NoteOriginState::Unchanged(_)
+    ));
+}
+
+#[test]
+fn learning_import_recovery_revert_is_idempotent_and_rejects_unfinished_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let profile = source_profiles::create(&state, &sc).unwrap();
+    let (batch_id, _) = commit_one(&state, &sc, &profile, b"idem", "i.md", b"# idem\n");
+    let first = import_ops::revert_batch(&state, &sc, &batch_id).unwrap();
+    let second = import_ops::revert_batch(&state, &sc, &batch_id).unwrap();
+    assert_eq!(first, second);
+    let pending = import_ops::create_batch(
+        &state,
+        &sc,
+        &profile.id,
+        &profile.access_epoch,
+        &sha(b"open"),
+    )
+    .unwrap();
+    let err = import_ops::revert_batch(&state, &sc, &pending.id).unwrap_err();
+    assert!(err.contains("已提交"), "{err}");
+}

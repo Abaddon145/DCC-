@@ -216,3 +216,24 @@ pub(super) fn record_note_in(
         _ => Err("笔记来源或目标已变化，请重新检查".into()),
     }
 }
+
+/// Drop provenance only inside the revert transaction that trashes this exact note.
+pub(super) fn forget_note_in(
+    db: &Connection,
+    key: &NoteOriginKey,
+    note_id: &str,
+) -> Result<(), String> {
+    if db.is_autocommit() {
+        return Err("笔记来源撤销需要有效事务".into());
+    }
+    let removed = db
+        .execute(
+            "DELETE FROM learning_origin_map WHERE source_profile_id=?1 AND source_key_json=?2 AND target_kind='note' AND target_id=?3",
+            params![key.profile, key.encoded, note_id],
+        )
+        .map_err(|_| "无法撤销笔记来源")?;
+    if removed != 1 {
+        return Err("笔记来源已变化，无法撤销".into());
+    }
+    Ok(())
+}

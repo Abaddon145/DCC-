@@ -801,3 +801,121 @@ pub(super) fn list_items(
         ids.into_iter().map(|id| load_item(db, &id)).collect()
     })
 }
+
+/// Revert one committed batch: trash only notes this batch created and nobody changed since.
+/// Raw archives, reused notes, conflicts and user-edited notes are kept and listed.
+pub(super) fn revert_batch(
+    state: &AppState,
+    scope: &source_profiles::LibraryScope,
+    batch_id: &str,
+) -> Result<Value, String> {
+    scoped_base(state, scope, |db, _| {
+        let batch = load_batch(db, batch_id)?;
+        if batch.library_id != scope.library_id() {
+            return Err("迁入批次不属于当前素材库".into());
+        }
+        if let Some(saved) = db
+            .query_row(
+                "SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",
+                [&batch.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| "无法读取迁入撤回记录")?
+        {
+            return serde_json::from_str(&saved).map_err(|_| "迁入撤回记录损坏".into());
+        }
+        if batch.status != "committed" {
+            return Err("只能撤回已提交的迁入批次".into());
+        }
+        let ids = db
+            .prepare(
+                "SELECT id FROM learning_import_items WHERE batch_id=?1 ORDER BY created_at,id",
+            )
+            .map_err(|_| "无法读取迁入条目")?
+            .query_map([&batch.id], |row| row.get::<_, String>(0))
+            .map_err(|_| "无法读取迁入条目")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法读取迁入条目")?;
+        let tx = db
+            .unchecked_transaction()
+            .map_err(|_| "无法开始迁入撤回事务")?;
+        let finished = now();
+        let mut reverted = Vec::new();
+        let mut kept = Vec::new();
+        for id in ids {
+            let item = load_item(&tx, &id)?;
+            let receipt: Option<String> = tx
+                .query_row(
+                    "SELECT receipt_json FROM learning_import_items WHERE id=?1",
+                    [&item.id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| "无法读取迁入条目")?;
+            let action = receipt
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v["action"].as_str().map(str::to_owned));
+            let mut note_revision = None;
+            let outcome = match (item.status.as_str(), action.as_deref()) {
+                ("committed", Some("created")) => {
+                    let note_id = item.target_id.clone().ok_or("迁入条目缺少目标笔记")?;
+                    let key = key_from_item(&batch.source_profile_id, &item.source_key_json)?;
+                    match note_origins::inspect(&tx, &key, &item.source_sha256)? {
+                        note_origins::NoteOriginState::Unchanged(current) if current == note_id => {
+                            note_origins::forget_note_in(&tx, &key, &note_id)?;
+                            let note = knowledge::trash_in(&tx, &note_id)
+                                .map_err(|_| "无法将迁入笔记移入回收站")?;
+                            note_revision = Some(note.revision);
+                            "reverted"
+                        }
+                        note_origins::NoteOriginState::TargetUnavailable(_) => "kept_missing",
+                        _ => "kept_modified",
+                    }
+                }
+                ("committed", _) => "kept_reused",
+                ("conflict", _) => "kept_conflict",
+                _ => continue,
+            };
+            tx.execute(
+                "INSERT INTO learning_import_item_reverts(item_id,batch_id,outcome,note_id,note_revision,reverted_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![item.id, batch.id, outcome, item.target_id, note_revision, finished],
+            )
+            .map_err(|_| "无法记录迁入撤回条目")?;
+            if outcome == "reverted" {
+                reverted.push(json!(item.target_id));
+            } else {
+                kept.push(json!({
+                    "itemId": item.id,
+                    "outcome": outcome,
+                    "noteId": item.target_id,
+                }));
+            }
+        }
+        let report = json!({
+            "batchId": batch.id,
+            "reverted": reverted,
+            "kept": kept,
+            "archivesKept": true,
+        });
+        // Free the request identity so the same source can be imported again later.
+        let retired_seed = serde_json::to_vec(&json!([
+            "yingliu.learning-import.reverted.v1",
+            batch.request_sha256,
+            batch.id,
+        ]))
+        .map_err(|_| "无法更新迁入批次")?;
+        let retired = format!("{:x}", Sha256::digest(&retired_seed));
+        tx.execute(
+            "UPDATE learning_import_batches SET request_sha256=?1 WHERE id=?2",
+            params![retired, batch.id],
+        )
+        .map_err(|_| "无法更新迁入批次")?;
+        tx.execute(
+            "INSERT INTO learning_import_reverts(batch_id,original_request_sha256,reverted_at,report_json) VALUES(?1,?2,?3,?4)",
+            params![batch.id, batch.request_sha256, finished, report.to_string()],
+        )
+        .map_err(|_| "无法记录迁入撤回")?;
+        tx.commit().map_err(|_| "无法提交迁入撤回")?;
+        Ok(report)
+    })
+}
