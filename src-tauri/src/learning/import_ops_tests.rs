@@ -64,7 +64,7 @@ fn learning_import_ops_upgrade_rolls_back_and_reaches_v34() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "36"
+                "37"
             );
             Ok(())
         })

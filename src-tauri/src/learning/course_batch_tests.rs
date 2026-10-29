@@ -231,7 +231,7 @@ fn learning_import_course_batch_schema_upgrade_rolls_back_and_preserves_note_bat
         super::migrate(db)?;
         super::migrate(db)?;
         assert_eq!(db.query_row("SELECT batch_kind FROM learning_import_batches WHERE id=?1",[&note.id],|r| r.get::<_,String>(0)).unwrap(),"notes");
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"36");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"37");
         Ok(())
     }).unwrap();
     assert_eq!(
