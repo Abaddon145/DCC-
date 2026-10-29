@@ -197,6 +197,14 @@ pub fn archive_bytes(
     crate::media_access::reject_links(&directory)?;
     fs::create_dir_all(&directory).map_err(error)?;
     crate::media_access::reject_links(&directory)?;
+    #[cfg(windows)]
+    let _directories = {
+        let (actual, directories) = super::source_markdown::lock_vault_root(&directory)?;
+        if actual != directory {
+            return Err("原文归档目录已变化，未写入".into());
+        }
+        directories
+    };
     crate::runtime::tools::ensure_space(&directory, (bytes.len() + 1024 * 1024) as u64)?;
     let id = Uuid::new_v4().to_string();
     let relative = format!("learning-data/archives/{id}.bin");

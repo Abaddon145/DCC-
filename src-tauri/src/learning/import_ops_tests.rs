@@ -474,3 +474,417 @@ fn learning_import_ops_mid_commit_failure_cancel_keeps_committed_and_cleans_runt
         .unwrap();
     assert_eq!(mapped, note_origins::NoteOriginState::Unmapped);
 }
+
+#[test]
+fn learning_import_ops_preserves_exact_raw_bytes_in_archive_and_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let raw = b"\xef\xbb\xbf# Lesson\r\n\r\nOriginal text\r\n";
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"raw-archive"),
+    )
+    .unwrap();
+    let item = add_staged(&state, &sc, &batch.id, "vault", "notes/a.md", raw, "Lesson");
+    import_ops::commit_batch(&state, &sc, &batch.id).unwrap();
+    let archive_id = state
+        .with_library(|db, base| {
+            let receipt: String = db
+                .query_row(
+                    "SELECT receipt_json FROM learning_import_items WHERE id=?1",
+                    [&item.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+            let id = receipt["archiveId"]
+                .as_str()
+                .expect("committed item links its raw archive")
+                .to_string();
+            assert_eq!(super::note_archive::read_archive(db, base, &id)?, raw);
+            let page = super::note_archive_browser::list_archives(db, 0, 50)?;
+            let version = page.versions.items.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(version.conversion_state, "converted");
+            assert!(version.source_key.contains("notes/a.md"));
+            Ok(id)
+        })
+        .unwrap();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    let restored = test_state(&temp.path().join("restored"));
+    restored
+        .with_active_mut(|active| crate::backup::restore_library(active, &backup))
+        .unwrap();
+    restored
+        .with_library(|db, base| {
+            assert_eq!(
+                super::note_archive::read_archive(db, base, &archive_id)?,
+                raw
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_ops_rejects_missing_or_changed_stage_and_recovers_after_restaging() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let raw = b"# source\r\n";
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"stage-integrity"),
+    )
+    .unwrap();
+    let item = import_ops::add_item(
+        &state,
+        &sc,
+        &batch.id,
+        NewImportItem {
+            vault: "vault".into(),
+            relative_path: "a.md".into(),
+            source_sha256: sha(raw),
+            title: "source".into(),
+            document: doc(),
+            expected_target_id: None,
+            expected_target_revision: None,
+            expected_target_sha256: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        import_ops::commit_batch(&state, &sc, &batch.id).is_err(),
+        "unstaged item cannot be committed"
+    );
+    import_ops::stage_item_bytes(&state, &sc, &batch.id, &item.id, raw).unwrap();
+    let path = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, item.id));
+    std::fs::write(&path, b"# changed\n").unwrap();
+    assert!(
+        import_ops::commit_batch(&state, &sc, &batch.id).is_err(),
+        "changed staged bytes cannot be committed"
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM knowledge_notes", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    import_ops::stage_item_bytes(&state, &sc, &batch.id, &item.id, raw).unwrap();
+    assert_eq!(
+        import_ops::commit_batch(&state, &sc, &batch.id)
+            .unwrap()
+            .status,
+        "committed"
+    );
+}
+
+#[test]
+fn learning_import_ops_reuses_archive_when_note_transaction_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let source = profile(&state);
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"archive-retry"),
+    )
+    .unwrap();
+    let item = add_staged(
+        &state,
+        &sc,
+        &batch.id,
+        "vault",
+        "a.md",
+        b"raw body",
+        "source",
+    );
+    state.with_library(|db, _| {
+        db.execute_batch("CREATE TRIGGER fail_import_note BEFORE INSERT ON knowledge_notes BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+        Ok(())
+    }).unwrap();
+    assert!(import_ops::commit_batch(&state, &sc, &batch.id).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_note_archives", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT status FROM learning_import_items WHERE id=?1",
+                    [&item.id],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "staged"
+            );
+            db.execute_batch("DROP TRIGGER fail_import_note").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    import_ops::commit_batch(&state, &sc, &batch.id).unwrap();
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_note_archives", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_ops_staging_does_not_truncate_preexisting_partial_hardlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let raw = b"# safe\n";
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"partial-hardlink"),
+    )
+    .unwrap();
+    let item = import_ops::add_item(
+        &state,
+        &sc,
+        &batch.id,
+        NewImportItem {
+            vault: "vault".into(),
+            relative_path: "a.md".into(),
+            source_sha256: sha(raw),
+            title: "source".into(),
+            document: doc(),
+            expected_target_id: None,
+            expected_target_revision: None,
+            expected_target_sha256: None,
+        },
+    )
+    .unwrap();
+    let dir = library.join(format!(".dcc/runtime/imports/{}", batch.id));
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = temp.path().join("untouched.bin");
+    std::fs::write(&outside, b"user data").unwrap();
+    std::fs::hard_link(&outside, dir.join(format!("{}.md.partial", item.id))).unwrap();
+    import_ops::stage_item_bytes(&state, &sc, &batch.id, &item.id, raw).unwrap();
+    assert_eq!(std::fs::read(outside).unwrap(), b"user data");
+}
+
+#[test]
+fn learning_import_ops_duplicate_reuses_note_and_raw_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let source = profile(&state);
+    let raw = b"# Same source\r\n";
+    for key in [b"first-request".as_slice(), b"second-request".as_slice()] {
+        let batch =
+            import_ops::create_batch(&state, &sc, &source.id, &source.access_epoch, &sha(key))
+                .unwrap();
+        add_staged(&state, &sc, &batch.id, "vault", "same.md", raw, "same");
+        import_ops::commit_batch(&state, &sc, &batch.id).unwrap();
+    }
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM knowledge_notes", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_note_archives", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_ops_rejects_hardlinked_staged_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let raw = b"# source\n";
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"hardlinked-stage"),
+    )
+    .unwrap();
+    let item = add_staged(&state, &sc, &batch.id, "vault", "a.md", raw, "source");
+    let staged = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, item.id));
+    let outside = temp.path().join("source.bin");
+    std::fs::write(&outside, raw).unwrap();
+    std::fs::remove_file(&staged).unwrap();
+    std::fs::hard_link(&outside, &staged).unwrap();
+    assert!(import_ops::commit_batch(&state, &sc, &batch.id).is_err());
+    assert_eq!(std::fs::read(outside).unwrap(), raw);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_ops_cancel_keeps_recoverable_state_when_stage_is_locked() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let state = test_state(&library);
+    let sc = scope(&state);
+    let source = profile(&state);
+    let batch = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"locked-stage"),
+    )
+    .unwrap();
+    let item = add_staged(
+        &state, &sc, &batch.id, "vault", "a.md", b"private", "source",
+    );
+    let staged = library.join(format!(".dcc/runtime/imports/{}/{}.md", batch.id, item.id));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&staged)
+        .unwrap();
+    assert!(import_ops::cancel_batch(&state, &sc, &batch.id).is_err());
+    let pending = import_ops::get_item(&state, &sc, &item.id).unwrap();
+    assert_eq!(pending.status, "staged");
+    assert!(pending.stage_relative.is_some());
+    assert!(staged.exists());
+    drop(lock);
+    assert_eq!(
+        import_ops::cancel_batch(&state, &sc, &batch.id)
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    assert!(!staged.exists());
+}
+
+#[test]
+fn learning_import_ops_conflict_preserves_new_raw_without_overwriting_note() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let sc = scope(&state);
+    let source = profile(&state);
+    let first = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"first-conflict"),
+    )
+    .unwrap();
+    let created = add_staged(
+        &state, &sc, &first.id, "vault", "same.md", b"# old\n", "old",
+    );
+    import_ops::commit_batch(&state, &sc, &first.id).unwrap();
+    let note_id = import_ops::get_item(&state, &sc, &created.id)
+        .unwrap()
+        .target_id
+        .unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::get(db, &note_id)?;
+            knowledge::save(
+                db,
+                NoteInput {
+                    id: Some(note.id),
+                    expected_revision: Some(note.revision),
+                    notebook_id: note.notebook_id,
+                    title: "user edit".into(),
+                    document: note.document,
+                    tags: note.tags,
+                    favorite: note.favorite,
+                    journal_date: note.journal_date,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let second = import_ops::create_batch(
+        &state,
+        &sc,
+        &source.id,
+        &source.access_epoch,
+        &sha(b"second-conflict"),
+    )
+    .unwrap();
+    let raw = b"# new source\r\n";
+    let changed = add_staged(&state, &sc, &second.id, "vault", "same.md", raw, "new");
+    import_ops::commit_batch(&state, &sc, &second.id).unwrap();
+    assert_eq!(
+        import_ops::get_item(&state, &sc, &changed.id)
+            .unwrap()
+            .status,
+        "conflict"
+    );
+    state
+        .with_library(|db, base| {
+            assert_eq!(knowledge::get(db, &note_id)?.title, "user edit");
+            let receipt: String = db
+                .query_row(
+                    "SELECT receipt_json FROM learning_import_items WHERE id=?1",
+                    [&changed.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+            let archive = receipt["archiveId"].as_str().unwrap();
+            assert_eq!(super::note_archive::read_archive(db, base, archive)?, raw);
+            let page = super::note_archive_browser::list_archives(db, 0, 50)?;
+            assert_eq!(
+                page.versions
+                    .items
+                    .iter()
+                    .find(|row| row.id == archive)
+                    .unwrap()
+                    .conversion_state,
+                "unconverted"
+            );
+            Ok(())
+        })
+        .unwrap();
+}

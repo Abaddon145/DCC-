@@ -1,5 +1,5 @@
 //! Durable Markdown import batches. Callers must already verify source bytes; this module never opens a vault path.
-use super::{note_origins, source_profiles};
+use super::{note_archive, note_origins, source_profiles};
 use crate::{
     knowledge::{self, NoteInput},
     state::AppState,
@@ -195,27 +195,95 @@ fn stage_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn remove_stage(base: &Path, relative: Option<&str>) {
-    if let Some(rel) = relative {
-        if let Ok(path) = stage_path(base, rel) {
-            let _ = fs::remove_file(&path);
-            if let Some(parent) = path.parent() {
-                let _ = fs::remove_dir(parent);
-            }
-        }
+/// Read the exact staged file from the library-owned import directory; no source path is used.
+fn verified_stage(base: &Path, item: &ImportItem) -> Result<Vec<u8>, String> {
+    let expected = stage_relative(&item.batch_id, &item.id);
+    if item.status != "staged" || item.stage_relative.as_deref() != Some(expected.as_str()) {
+        return Err("迁入原文尚未完整暂存，请重新准备".into());
     }
+    let path = stage_path(base, &expected)?;
+    crate::media_access::reject_links(&path)?;
+    #[cfg(windows)]
+    let bytes = {
+        let base_root = base.canonicalize().map_err(|_| "素材库目录不可用")?;
+        let expected_root = base_root.join(".dcc/runtime/imports");
+        let root = expected_root
+            .canonicalize()
+            .map_err(|_| "迁入暂存目录不可用")?;
+        if root != expected_root {
+            return Err("迁入暂存目录已变化，请重新准备".into());
+        }
+        let relative = format!("{}/{}.md", item.batch_id, item.id);
+        let mut lease = super::source_markdown::open_markdown(&root, &relative)?;
+        lease.read_bytes()?
+    };
+    #[cfg(not(windows))]
+    let bytes = {
+        use std::io::Read;
+        let file = fs::File::open(&path).map_err(|_| "迁入原文缺失或不可读取")?;
+        if !file.metadata().map_err(|_| "无法检查迁入原文")?.is_file() {
+            return Err("迁入原文不是普通文件".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_STAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "无法读取迁入原文")?;
+        bytes
+    };
+    if bytes.is_empty()
+        || bytes.len() as u64 > MAX_STAGE_BYTES
+        || format!("{:x}", Sha256::digest(&bytes)) != item.source_sha256
+    {
+        return Err("迁入暂存原文缺失或已变化，请重新准备".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn lock_stage_parent(base: &Path, parent: &Path) -> Result<Vec<fs::File>, String> {
+    let relative = parent.strip_prefix(base).map_err(|_| "迁入暂存目录无效")?;
+    let (locked, directories) = super::source_markdown::lock_vault_root(parent)?;
+    let expected = base
+        .canonicalize()
+        .map_err(|_| "素材库目录不可用")?
+        .join(relative);
+    if locked != expected {
+        return Err("迁入暂存目录已变化，请重新准备".into());
+    }
+    Ok(directories)
+}
+
+fn remove_stage(base: &Path, relative: &str) -> Result<(), String> {
+    let path = stage_path(base, relative)?;
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("无法检查迁入暂存，请重试清理".into()),
+    }
+    crate::media_access::reject_links(&path)?;
+    #[cfg(windows)]
+    let _directories = lock_stage_parent(base, path.parent().ok_or("迁入暂存目录无效")?)?;
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("无法清理迁入暂存，请关闭占用后重试".into()),
+    }
+    Ok(())
 }
 
 /// Drop runtime staging bytes. Clears DB pointer only when schema allows
 /// (`staged` rows must keep a non-NULL `stage_relative` until status changes).
 fn clear_item_stage(db: &Connection, base: &Path, item: &ImportItem) -> Result<(), String> {
-    if let Some(rel) = item.stage_relative.as_deref() {
-        remove_stage(base, Some(rel));
-    } else {
-        // Crashed write may leave a file without a DB pointer.
-        let relative = stage_relative(&item.batch_id, &item.id);
-        remove_stage(base, Some(relative.as_str()));
+    let relative = stage_relative(&item.batch_id, &item.id);
+    if item
+        .stage_relative
+        .as_deref()
+        .is_some_and(|stored| stored != relative)
+    {
+        return Err("迁入暂存登记与条目不一致，请人工检查".into());
     }
+    // Crashed writes may leave the expected file without a DB pointer.
+    remove_stage(base, &relative)?;
     if item.status != "staged" && item.stage_relative.is_some() {
         db.execute(
             "UPDATE learning_import_items SET stage_relative=NULL WHERE id=?1 AND status!='staged'",
@@ -233,22 +301,17 @@ fn remove_batch_stage_dir(base: &Path, batch_id: &str) {
 
 fn write_stage(base: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
     let path = stage_path(base, relative)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| "无法创建迁入暂存目录")?;
-    }
-    let tmp = path.with_extension("md.partial");
-    {
-        let mut file = fs::File::create(&tmp).map_err(|_| "无法写入迁入暂存")?;
-        file.write_all(bytes).map_err(|_| "无法写入迁入暂存")?;
-        file.sync_all().map_err(|_| "无法写入迁入暂存")?;
-    }
-    if path.exists() {
-        fs::remove_file(&path).map_err(|_| "无法替换迁入暂存")?;
-    }
-    fs::rename(&tmp, &path).map_err(|_| "无法发布迁入暂存")?;
-    if let Ok(file) = fs::File::open(&path) {
-        let _ = file.sync_all();
-    }
+    let parent = path.parent().ok_or("无法创建迁入暂存目录")?;
+    crate::media_access::reject_links(parent)?;
+    fs::create_dir_all(parent).map_err(|_| "无法创建迁入暂存目录")?;
+    crate::media_access::reject_links(parent)?;
+    #[cfg(windows)]
+    let _directories = lock_stage_parent(base, parent)?;
+    crate::media_access::reject_links(&path)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| "无法写入迁入暂存")?;
+    file.write_all(bytes).map_err(|_| "无法写入迁入暂存")?;
+    file.as_file().sync_all().map_err(|_| "无法写入迁入暂存")?;
+    file.persist(&path).map_err(|_| "无法发布迁入暂存")?;
     Ok(())
 }
 
@@ -450,13 +513,8 @@ pub(super) fn stage_item_bytes(
         }
         let relative = stage_relative(&batch.id, &item.id);
         if item.status == "staged" && item.stage_relative.as_deref() == Some(relative.as_str()) {
-            if let Ok(path) = stage_path(base, &relative) {
-                if path.is_file() {
-                    let on_disk = fs::read(&path).map_err(|_| "无法读取迁入暂存")?;
-                    if on_disk == bytes {
-                        return Ok(item);
-                    }
-                }
+            if verified_stage(base, &item).is_ok_and(|on_disk| on_disk == bytes) {
+                return Ok(item);
             }
         }
         write_stage(base, &relative, bytes)?;
@@ -520,13 +578,35 @@ pub(super) fn commit_batch(
                 _ => return Err("迁入条目状态无效".into()),
             }
             let key = key_from_item(&batch.source_profile_id, &item.source_key_json)?;
+            let bytes = verified_stage(base, &item)?;
+            // Keep the readable structured source key where it fits; for longer paths
+            // the full key remains in the journal and the archive lookup uses its digest.
+            let archive_key = if item.source_key_json.len() <= 4096 {
+                item.source_key_json.clone()
+            } else {
+                format!(
+                    "markdown:{:x}",
+                    Sha256::digest(item.source_key_json.as_bytes())
+                )
+            };
+            let archive = note_archive::archive_bytes(
+                db,
+                base,
+                &note_archive::ArchiveSource {
+                    profile_id: &batch.source_profile_id,
+                    source_key: &archive_key,
+                    version_key: &item.source_sha256,
+                },
+                &bytes,
+                &item.source_sha256,
+            )?;
             let state_now = note_origins::inspect(db, &key, &item.source_sha256)?;
             let conflict = match &state_now {
                 note_origins::NoteOriginState::Unmapped => None,
                 note_origins::NoteOriginState::Unchanged(id) => {
                     db.execute(
                         "UPDATE learning_import_items SET status='committed', target_id=?1, conflict_code=NULL, receipt_json=?2 WHERE id=?3",
-                        params![id, json!({"action":"unchanged"}).to_string(), item.id],
+                        params![id, json!({"action":"unchanged", "archiveId":archive.id}).to_string(), item.id],
                     )
                     .map_err(|_| "无法提交迁入条目")?;
                     let refreshed = load_item(db, &item.id)?;
@@ -544,8 +624,8 @@ pub(super) fn commit_batch(
             };
             if let Some(code) = conflict {
                 db.execute(
-                    "UPDATE learning_import_items SET status='conflict', conflict_code=?1 WHERE id=?2",
-                    params![code, item.id],
+                    "UPDATE learning_import_items SET status='conflict', conflict_code=?1, receipt_json=?2 WHERE id=?3",
+                    params![code, json!({"action":"conflict", "archiveId":archive.id}).to_string(), item.id],
                 )
                 .map_err(|_| "无法记录迁入冲突")?;
                 let refreshed = load_item(db, &item.id)?;
@@ -595,7 +675,7 @@ pub(super) fn commit_batch(
                 "UPDATE learning_import_items SET status='committed', target_id=?1, conflict_code=NULL, receipt_json=?2 WHERE id=?3",
                 params![
                     note.id,
-                    json!({"action":"created","noteId":note.id}).to_string(),
+                    json!({"action":"created","noteId":note.id,"archiveId":archive.id}).to_string(),
                     item.id
                 ],
             )

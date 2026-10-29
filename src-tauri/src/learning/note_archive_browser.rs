@@ -35,9 +35,16 @@ pub fn list_archives(db: &Connection, offset: i64, limit: i64) -> Result<Archive
     let limit = limit.clamp(1, 50);
     // Aggregate once per query rather than scanning every preview for every archive.
     const VERSIONS: &str = "WITH outcomes AS (
-      SELECT archive_id,MAX(CASE WHEN status='committed' THEN
-        CASE WHEN json_valid(receipt_json) THEN CASE WHEN json_type(receipt_json,'$.pending')='false' THEN 2 ELSE 1 END ELSE 1 END
-        ELSE 0 END) AS state FROM learning_note_previews GROUP BY archive_id
+      SELECT archive_id,MAX(state) AS state FROM (
+        SELECT archive_id,CASE WHEN status='committed' THEN
+          CASE WHEN json_valid(receipt_json) THEN CASE WHEN json_type(receipt_json,'$.pending')='false' THEN 2 ELSE 1 END ELSE 1 END
+          ELSE 0 END AS state FROM learning_note_previews
+        UNION ALL
+        SELECT CASE WHEN json_valid(receipt_json) THEN json_extract(receipt_json,'$.archiveId') END AS archive_id, 2 AS state
+        FROM learning_import_items
+        WHERE status='committed' AND CASE WHEN json_valid(receipt_json)
+          THEN json_extract(receipt_json,'$.action') IN ('created','unchanged') ELSE 0 END
+      ) GROUP BY archive_id
     ), versions AS (
       SELECT a.*,COALESCE(o.state,0) AS state FROM learning_note_archives a LEFT JOIN outcomes o ON o.archive_id=a.id
     ) ";

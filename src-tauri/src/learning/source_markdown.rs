@@ -34,6 +34,26 @@ pub(super) struct MarkdownLease {
     _directories: Vec<File>,
 }
 
+impl MarkdownLease {
+    pub(super) fn read_bytes(&mut self) -> Result<Vec<u8>, String> {
+        let expected = self.file.metadata().map_err(|_| "无法检查笔记文件")?.len();
+        if expected > MAX_MARKDOWN {
+            return Err("笔记文件超过 5 MiB".into());
+        }
+        let mut bytes = Vec::new();
+        (&mut self.file)
+            .take(MAX_MARKDOWN + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "无法读取笔记文件")?;
+        if bytes.len() as u64 != expected
+            || self.file.metadata().map_err(|_| "无法检查笔记文件")?.len() != expected
+        {
+            return Err("笔记文件读取时发生变化".into());
+        }
+        Ok(bytes)
+    }
+}
+
 pub(super) struct VaultSelection {
     scope: LibraryScope,
     profile: String,
@@ -70,7 +90,7 @@ pub(super) fn select_vault(
     })
 }
 
-fn lock_vault_root(root: &Path) -> Result<(PathBuf, Vec<File>), String> {
+pub(super) fn lock_vault_root(root: &Path) -> Result<(PathBuf, Vec<File>), String> {
     if !root.is_absolute() {
         return Err("来源目录无效".into());
     }
