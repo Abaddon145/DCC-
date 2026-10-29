@@ -8,6 +8,10 @@
 .learning-import-path input{padding:8px 10px;}
 .learning-import-preview{margin:0 0 12px;padding:10px 12px;border:1px solid #d9d0c2;border-radius:8px;}
 .learning-import-preview ul{margin:8px 0 0;padding-left:18px;}
+.learning-import-drafts{margin:0 0 12px;padding:10px 12px;border:1px solid #d9d0c2;border-radius:8px;}
+.learning-import-drafts ul{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px;}
+.learning-import-drafts li{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;}
+.learning-import-drafts small{display:block;margin-top:4px;color:#5c5348;}
 .learning-import-status{margin:0 0 8px;}
 .learning-import-error{display:flex;gap:8px;align-items:center;color:#8a1f1f;}
 .learning-import-batches{min-height:220px;}

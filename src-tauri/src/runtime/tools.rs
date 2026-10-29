@@ -112,11 +112,47 @@ pub fn ensure_space(folder: &Path, required: u64) -> Result<(), String> {
         }
         check_available_space(available, required)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), test))]
+    {
+        // Unit tests run on non-Windows agents. Production builds stay fail-closed below.
+        let available = test_available_bytes(folder)?;
+        check_available_space(available, required)
+    }
+    #[cfg(all(not(windows), not(test)))]
     {
         let _ = (folder, required);
         Err("下载功能当前仅支持 Windows".into())
     }
+}
+
+#[cfg(all(not(windows), test))]
+fn test_available_bytes(folder: &Path) -> Result<u64, String> {
+    #[repr(C)]
+    struct Statvfs {
+        f_bsize: u64,
+        f_frsize: u64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_favail: u64,
+        f_fsid: u64,
+        f_flag: u64,
+        f_namemax: u64,
+    }
+    unsafe extern "C" {
+        fn statvfs(path: *const std::os::raw::c_char, buf: *mut Statvfs) -> i32;
+    }
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(folder.as_os_str());
+    let path = std::ffi::CString::new(bytes).map_err(|_| "无法读取磁盘空间")?;
+    let mut buf = std::mem::MaybeUninit::<Statvfs>::zeroed();
+    let rc = unsafe { statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    if rc != 0 {
+        return Err("权限错误：无法读取磁盘空间".into());
+    }
+    let buf = unsafe { buf.assume_init() };
+    Ok(buf.f_bavail.saturating_mul(buf.f_frsize))
 }
 pub fn inspect(resource: Option<&Path>) -> Vec<ToolStatus> {
     ["yt-dlp", "ffmpeg", "ffprobe", "deno"]
