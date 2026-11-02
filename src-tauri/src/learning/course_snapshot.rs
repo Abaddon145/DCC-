@@ -564,6 +564,8 @@ fn open_copied(path: &Path, has_wal: bool) -> Result<Connection, String> {
 /// Windows deny-write holds for the main database and any existing `-wal` / `-shm`.
 /// Dropping the lease releases the share mode. Non-Windows builds hold nothing.
 /// Missing sidecars are not an error and are not created.
+/// `Debug` is required by `unwrap_err` in the Windows lease tests.
+#[derive(Debug)]
 struct SyntheticDenyWriteLease {
     #[cfg(windows)]
     _files: Vec<fs::File>,
