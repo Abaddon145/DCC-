@@ -249,17 +249,45 @@ pub(crate) fn run_local(
 ) -> Result<Value, String> {
     request.validate()?;
     let current = state.tasks.get(&task.id)?;
-    if current.library_id != task.library_id
-        || !matches!(
+    let payload_matches = current.library_id == task.library_id
+        && matches!(
             &current.payload,
             crate::tasks::TaskRequest::LearningImport(saved) if saved == request
-        )
-        || !state.tasks.is_active_task(&task.id)
-    {
+        );
+    let inactive = !state.tasks.is_active_task(&task.id);
+    if inactive && payload_matches {
+        if let ImportTaskRequest::CommitCourse {
+            selection_id,
+            preview_id,
+        } = request
+        {
+            super::course_source_readonly::abandon_synthetic_course_preflight(
+                state,
+                &task.library_id,
+                selection_id,
+                preview_id,
+                &task.id,
+            );
+        }
+    }
+    if !payload_matches || inactive {
         return Err("迁入任务已取消、失效或请求不一致".into());
     }
     let stopped = || !state.tasks.is_active_task(&task.id) || state.tasks.maintenance().is_some();
     if stopped() {
+        if let ImportTaskRequest::CommitCourse {
+            selection_id,
+            preview_id,
+        } = request
+        {
+            super::course_source_readonly::abandon_synthetic_course_preflight(
+                state,
+                &task.library_id,
+                selection_id,
+                preview_id,
+                &task.id,
+            );
+        }
         return Err("迁入任务已停止或素材库正在维护".into());
     }
     let scope = source_profiles::scope(state, &task.library_id)?;
@@ -292,8 +320,23 @@ pub(crate) fn run_local(
             }
             #[cfg(not(windows))]
             {
-                let _ = (selection_id, preview_id);
-                Err("课程来源迁入当前仅支持 Windows".into())
+                let value = super::course_source_readonly::commit_synthetic_course(
+                    state,
+                    &task.library_id,
+                    selection_id,
+                    preview_id,
+                    &task.id,
+                    stopped,
+                )?;
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    String::new(),
+                    "课程迁入提交已完成".into(),
+                    Some(value.clone()),
+                );
+                Ok(value)
             }
         }
         ImportTaskRequest::Prepare {
