@@ -97,6 +97,24 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if version < 38 {
+        tx.execute_batch(include_str!("schema-v38.sql"))
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE schema_meta SET value='38' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if version < 39 {
+        tx.execute_batch(include_str!("schema-v39.sql"))
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE schema_meta SET value='39' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;
@@ -117,15 +135,24 @@ mod course_apply;
 #[cfg(test)]
 mod course_apply_tests;
 #[allow(dead_code)]
-mod course_batch;
+pub mod course_batch;
 #[cfg(test)]
 mod course_batch_tests;
+#[cfg(windows)]
+pub mod course_import;
+#[cfg(not(windows))]
+#[path = "course_import_stub.rs"]
+pub mod course_import;
+#[cfg(all(test, windows))]
+mod course_import_tests;
 #[allow(dead_code)]
 mod course_origins;
 #[cfg(test)]
 mod course_origins_tests;
 #[cfg(test)]
 mod course_revert_tests;
+#[cfg(any(windows, test))]
+mod course_snapshot;
 pub mod excerpt_access;
 #[cfg(test)]
 mod excerpt_access_tests;
@@ -227,6 +254,9 @@ mod source_markdown_tests;
 pub mod source_profiles;
 #[cfg(test)]
 mod source_profiles_tests;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod source_sqlite;
 pub mod store;
 pub mod subtitles;
 pub mod transcription;

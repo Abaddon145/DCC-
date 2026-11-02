@@ -42,7 +42,7 @@ it("opens an associated project note by its exact identity",async()=>{
 it("opens the verified screenshot time and returns to the exact board item",async()=>{
   vi.mocked(learningApi.prepareBoardExcerptJump).mockResolvedValue({courseId:"course",mediaId:"media",positionMs:400,endMs:401,sourceFingerprint:"a".repeat(64)});
   render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"参考板"}));fireEvent.click(await screen.findByRole("button",{name:"学习参考截图"}));await screen.findByRole("button",{name:"返回参考板"});
-  expect(learningApi.prepareBoardExcerptJump).toHaveBeenCalledWith("lib","board","item");expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","course","a".repeat(64));
+  expect(learningApi.prepareBoardExcerptJump).toHaveBeenCalledWith("lib","board","item");await waitFor(()=>expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","course","a".repeat(64)));
   fireEvent.click(screen.getByRole("button",{name:"返回参考板"}));expect(await screen.findByText("参考板详情 board · item")).toBeInTheDocument();
 });
 it("opens a verified note range and returns to the same note identity",async()=>{

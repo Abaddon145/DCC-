@@ -32,3 +32,12 @@ it("scopes project learning links by library, project and note identities",async
 it("requests board source verification with only scoped board and item identities",async()=>{
   await learningApi.prepareBoardExcerptJump("library","board","item");expect(invoke).toHaveBeenCalledWith("prepare_learning_board_excerpt_jump",{expectedLibraryId:"library",boardId:"board",itemId:"item"});
 });
+it("requests a scoped page of course import entries",async()=>{
+  await learningApi.listCourseBatchEntries("library","batch",100);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("list_learning_course_batch_entries",{expectedLibraryId:"library",batchId:"batch",offset:100});
+});
+it("sends only the scoped cursor fields for course batch pages",async()=>{
+  const cursor=Object.assign({createdAt:"2026-01-01",id:"batch"},{path:"must not cross IPC"});
+  await learningApi.listCourseImportBatches("library",cursor);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("list_learning_course_batches",{expectedLibraryId:"library",cursor:{createdAt:"2026-01-01",id:"batch"}});
+});

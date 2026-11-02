@@ -167,9 +167,13 @@ impl TaskRequest {
     fn ensure_retryable(&self) -> Result<(), String> {
         match self {
             Self::CourseAnalysis(_) => Err("课程分析必须重新预览并确认费用，不能重放旧批准".into()),
-            Self::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert {
-                ..
-            }) => Err("请返回迁入页面重新检查并确认撤回".into()),
+            Self::LearningImport(
+                crate::learning::import_runner::ImportTaskRequest::Revert { .. }
+                | crate::learning::import_runner::ImportTaskRequest::RevertCourse { .. },
+            ) => Err("请返回迁入页面重新检查并确认撤回".into()),
+            Self::LearningImport(
+                crate::learning::import_runner::ImportTaskRequest::CommitCourse { .. },
+            ) => Err("请返回迁入页面重新预检并确认课程提交".into()),
             Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             _ => Ok(()),
         }
@@ -235,6 +239,7 @@ impl TaskRegistry {
         let task = &mut store.entries[index];
         task.status = "running".into();
         task.phase = "开始处理".into();
+        task.updated_at = Utc::now().to_rfc3339();
         let task = task.clone();
         if self.persist(&store).is_err() {
             for (position, task) in store
@@ -277,6 +282,7 @@ impl TaskRegistry {
             }
             _ => return Err("任务当前不能暂停".into()),
         }
+        task.updated_at = Utc::now().to_rfc3339();
         self.persist(&store)
     }
     pub fn resume_download(&self, id: &str) -> Result<bool, String> {
@@ -708,6 +714,7 @@ impl TaskRegistry {
                 .find(|t| t.status == "running" && t.label == label)
             {
                 task.result = Some(result);
+                task.updated_at = Utc::now().to_rfc3339();
             }
             self.persist_checked(&mut store);
         }
@@ -762,6 +769,7 @@ impl TaskRegistry {
             }
             .into();
             task.message = "尚未开始，已停止".into();
+            task.updated_at = Utc::now().to_rfc3339();
         } else if task.status == "running" {
             if !task.cancellable {
                 return Err("此任务处于数据维护阶段，请等待安全完成".into());
@@ -769,9 +777,11 @@ impl TaskRegistry {
             task.stop_requested = true;
             task.pause_requested = false;
             task.phase = "正在安全停止，当前步骤完成后生效".into();
+            task.updated_at = Utc::now().to_rfc3339();
         } else if task.status == "paused" && matches!(task.payload, TaskRequest::Download(_)) {
             task.status = "cancelled".into();
             task.pause_requested = false;
+            task.updated_at = Utc::now().to_rfc3339();
         }
         self.persist(&store)
     }
@@ -792,10 +802,17 @@ impl TaskRegistry {
                     (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Commit { batch_id }), Ok(value))
                         if value["status"] == "committed" && value["batchId"].as_str() == Some(batch_id.as_str())
                 );
+                let committed_import = committed_import
+                    || matches!((&task.payload,&result),(TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::CommitCourse{..}),Ok(value)) if value["status"]=="committed" && value["batchId"].as_str().is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
                 let reverted_import = matches!(
                     (&task.payload, &result),
-                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert { batch_id, .. }), Ok(value))
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert { batch_id, .. } | crate::learning::import_runner::ImportTaskRequest::RevertCourse { batch_id, .. }), Ok(value))
                         if value["status"] == "reverted" && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
+                let cancelled_course = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::CancelCourse { batch_id }), Ok(value))
+                        if matches!(value["status"].as_str(), Some("cancelled" | "committed")) && value["batchId"].as_str() == Some(batch_id.as_str())
                 );
                 let archived_external = matches!(
                     (&task.payload, &result),
@@ -817,6 +834,7 @@ impl TaskRegistry {
                 task.status = if committed_excerpt
                     || committed_import
                     || reverted_import
+                    || cancelled_course
                     || archived_external
                 {
                     "completed"
@@ -844,6 +862,93 @@ impl TaskRegistry {
             }
             self.persist_checked(&mut store);
         }
+    }
+}
+
+#[cfg(test)]
+mod task_timestamp_tests {
+    use super::*;
+
+    const OLD: &str = "2000-01-01T00:00:00+00:00";
+
+    fn backdate(registry: &TaskRegistry, id: &str) {
+        let mut store = registry.store.lock().unwrap();
+        store
+            .entries
+            .iter_mut()
+            .find(|task| task.id == id)
+            .unwrap()
+            .updated_at = OLD.into();
+        registry.persist(&store).unwrap();
+    }
+
+    #[test]
+    fn task_timestamp_changes_on_claim_checkpoint_and_running_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (task, _) = registry
+            .submit("library".into(), TaskRequest::Links)
+            .unwrap();
+        backdate(&registry, &task.id);
+        assert_ne!(registry.claim().unwrap().updated_at, OLD);
+        backdate(&registry, &task.id);
+        registry.checkpoint(&task.label, serde_json::json!({"step":1}));
+        let checkpoint = registry.get(&task.id).unwrap();
+        assert_ne!(checkpoint.updated_at, OLD);
+        assert_eq!(checkpoint.result, Some(serde_json::json!({"step":1})));
+        let persisted: Vec<LibraryTask> =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted[0].updated_at, checkpoint.updated_at);
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        let stopping = registry.get(&task.id).unwrap();
+        assert!(stopping.stop_requested);
+        assert_ne!(stopping.updated_at, OLD);
+    }
+
+    #[test]
+    fn task_timestamp_changes_on_queued_stop_but_not_a_terminal_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (task, _) = registry
+            .submit("library".into(), TaskRequest::Links)
+            .unwrap();
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        let stopped = registry.get(&task.id).unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert_ne!(stopped.updated_at, OLD);
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        assert_eq!(registry.get(&task.id).unwrap().updated_at, OLD);
+    }
+
+    #[test]
+    fn task_timestamp_changes_for_queued_and_running_download_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request = TaskRequest::Download(crate::downloader::models::DownloadRequest {
+            url: "https://example.com/video".into(),
+            format: "best".into(),
+            quality: "best".into(),
+            audio_only: false,
+            subtitles: false,
+            output_mode: "library".into(),
+        });
+        let (first, _) = registry.submit("library".into(), request.clone()).unwrap();
+        backdate(&registry, &first.id);
+        registry.pause_download(&first.id).unwrap();
+        assert_ne!(registry.get(&first.id).unwrap().updated_at, OLD);
+        backdate(&registry, &first.id);
+        registry.cancel(&first.id).unwrap();
+        assert_ne!(registry.get(&first.id).unwrap().updated_at, OLD);
+        let (second, _) = registry.submit("library".into(), request).unwrap();
+        registry.claim().unwrap();
+        backdate(&registry, &second.id);
+        registry.pause_download(&second.id).unwrap();
+        assert_ne!(registry.get(&second.id).unwrap().updated_at, OLD);
+        assert!(registry.get(&second.id).unwrap().pause_requested);
     }
 }
 
@@ -904,6 +1009,46 @@ mod excerpt_lifecycle_tests {
 #[cfg(test)]
 mod import_lifecycle_tests {
     use super::*;
+    #[test]
+    fn learning_import_course_revert_late_stop_requires_fresh_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({"kind":"learningImport","request":{"action":"revertCourse","batchId":batch,"expectedEpoch":Uuid::new_v4().to_string()}})).unwrap();
+        assert!(payload.ensure_retryable().is_err());
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"reverted"})),
+        );
+        assert_eq!(registry.get(&task.id).unwrap().status, "completed");
+    }
+
+    #[test]
+    fn learning_import_course_cancel_late_stop_only_accepts_matching_terminal_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({"kind":"learningImport","request":{"action":"cancelCourse","batchId":batch}})).unwrap();
+        let (first, _) = registry.submit("library".into(), payload.clone()).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&first.id).unwrap();
+        registry.finish(
+            &first.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"cancelled"})),
+        );
+        assert_eq!(registry.get(&first.id).unwrap().status, "completed");
+        let (second, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&second.id).unwrap();
+        registry.finish(
+            &second.id,
+            Ok(serde_json::json!({"batchId":Uuid::new_v4().to_string(),"status":"cancelled"})),
+        );
+        assert_eq!(registry.get(&second.id).unwrap().status, "stopped");
+    }
     #[test]
     fn learning_import_generic_ipc_rejects_prepare_but_allows_commit_cancel() {
         use crate::learning::import_runner::ImportTaskRequest;
@@ -1256,6 +1401,7 @@ pub(crate) fn ensure_generic_ipc_payload(payload: &TaskRequest) -> Result<(), St
         payload,
         TaskRequest::LearningImport(
             crate::learning::import_runner::ImportTaskRequest::Prepare { .. }
+                | crate::learning::import_runner::ImportTaskRequest::CommitCourse { .. }
         )
     ) {
         return Err("学习资料迁入准备只能经来源绑定与预检入口排队".into());

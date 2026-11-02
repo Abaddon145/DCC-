@@ -17,6 +17,16 @@ pub struct ImportSourceBinding {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SqliteSourceBinding {
+    pub selection_id: String,
+    pub library_id: String,
+    pub profile_id: String,
+    pub epoch: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportNotePreview {
     pub profile_id: String,
     pub epoch: String,
@@ -65,6 +75,31 @@ pub struct ImportItemView {
 
 fn unsupported() -> String {
     "学习资料迁入目前仅支持 Windows 来源目录绑定".into()
+}
+
+#[tauri::command]
+pub async fn select_learning_course_source(
+    _app: AppHandle,
+    _expected_library_id: String,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    Err(unsupported())
+}
+
+#[tauri::command]
+pub async fn current_learning_course_source(
+    _app: AppHandle,
+    _expected_library_id: String,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    Err(unsupported())
+}
+
+#[tauri::command]
+pub async fn release_learning_course_source(
+    _app: AppHandle,
+    _expected_library_id: String,
+    _selection_id: String,
+) -> Result<bool, String> {
+    Err(unsupported())
 }
 
 #[tauri::command]

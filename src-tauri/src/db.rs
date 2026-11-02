@@ -10,7 +10,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 37;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 39;
 pub(crate) const FUTURE_SCHEMA_ERROR: &str = "此素材库由更新版本创建，请使用更新版本打开";
 
 pub(crate) fn schema_version(connection: &Connection) -> Result<u32, String> {
@@ -3034,6 +3034,37 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    #[test]
+    fn bundled_sqlite_includes_wal_safety_fixes() {
+        let version = unsafe { rusqlite::ffi::sqlite3_libversion_number() };
+        println!("bundled SQLite version {version}");
+        assert!(
+            version >= 3_053_003,
+            "bundled SQLite version {version} predates WAL fixes"
+        );
+    }
+
+    #[test]
+    fn sqlite_unsigned_conversions_remain_checked() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE values_test(value INTEGER)", [])
+            .unwrap();
+        db.execute("INSERT INTO values_test VALUES(?1)", [i64::MAX as u64])
+            .unwrap();
+        assert!(db
+            .execute("INSERT INTO values_test VALUES(?1)", [u64::MAX])
+            .is_err());
+        assert_eq!(
+            db.query_row("SELECT value FROM values_test", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            i64::MAX as u64
+        );
+        assert!(db
+            .query_row("SELECT -1", [], |row| row.get::<_, u64>(0))
+            .is_err());
+    }
+
     fn setup() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("images/originals")).unwrap();
@@ -3436,7 +3467,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "37");
+        assert_eq!(version, "39");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

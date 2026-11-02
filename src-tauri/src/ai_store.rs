@@ -22,7 +22,7 @@ fn sql_value(v: &Value) -> SqlValue {
 }
 pub fn rows(c: &Connection, sql: &str, values: &[Value]) -> Result<Vec<Row>, String> {
     let mut stmt = c.prepare(sql).map_err(error)?;
-    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
     let result = stmt
         .query_map(params_from_iter(values.iter().map(sql_value)), |r| {
             let mut item = Row::new();

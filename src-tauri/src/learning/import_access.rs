@@ -15,6 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
+    io::Read,
     path::{Path, PathBuf},
 };
 use tauri::{AppHandle, State};
@@ -31,6 +32,30 @@ pub(crate) struct AuthorizedSource {
 pub(crate) struct ImportSelection {
     generation: String,
     selected: Option<AuthorizedSource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqliteSourceBinding {
+    pub selection_id: String,
+    pub library_id: String,
+    pub profile_id: String,
+    pub epoch: String,
+    pub file_name: String,
+}
+
+#[derive(Clone)]
+pub(super) struct SqliteAccessGrant {
+    pub(super) scope: source_profiles::LibraryScope,
+    pub(super) binding: SqliteSourceBinding,
+    pub(super) path: PathBuf,
+}
+
+#[derive(Default)]
+pub(crate) struct SqliteAccessSelection {
+    pub(super) generation: String,
+    pub(super) selected: Option<SqliteAccessGrant>,
+    pub(super) approved: Option<super::course_import::ApprovedCourse>,
 }
 
 impl ImportSelection {
@@ -175,6 +200,178 @@ fn scope_for(state: &AppState, library: &str) -> Result<source_profiles::Library
     let scope = source_profiles::scope(state, library)?;
     require_active(state, library)?;
     Ok(scope)
+}
+
+pub(super) fn select_sqlite_with_picker(
+    state: &AppState,
+    library: &str,
+    picker: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    let scope = scope_for(state, library)?;
+    let ticket = uuid::Uuid::new_v4().to_string();
+    {
+        let _operation = state
+            .sqlite_import_gate
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        source_profiles::scoped(state, &scope, |_| {
+            let mut current = state
+                .sqlite_import_selection
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?;
+            current.generation = ticket.clone();
+            current.selected = None;
+            current.approved = None;
+            Ok(())
+        })?;
+    }
+    let picked = picker();
+    source_profiles::scoped(state, &scope, |_| {
+        if state
+            .sqlite_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?
+            .generation
+            != ticket
+        {
+            return Err("来源选择已变化，请重试".into());
+        }
+        Ok(())
+    })?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let _operation = state
+        .sqlite_import_gate
+        .lock()
+        .map_err(|_| "来源会话状态不可用")?;
+    let candidate = super::source_sqlite::open_candidate(&path)?;
+    let mut lease = super::source_markdown::open_checked_deny_write(&candidate.path)?;
+    let mut header = [0u8; 100];
+    lease
+        .read_exact(&mut header)
+        .map_err(|_| "无法读取来源数据库文件头")?;
+    super::source_sqlite::validate_database_header(&header)?;
+    let result = source_profiles::scoped(state, &scope, |db| {
+        let mut current = state
+            .sqlite_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if current.generation != ticket {
+            return Err("来源选择已变化，请重试".into());
+        }
+        let selection = super::source_sqlite::bind_candidate_in(db, &scope, candidate)?;
+        let binding = SqliteSourceBinding {
+            selection_id: ticket,
+            library_id: library.into(),
+            profile_id: selection.profile_id().into(),
+            epoch: selection.epoch().into(),
+            file_name: selection
+                .path()
+                .file_name()
+                .ok_or("来源文件无效")?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        current.selected = Some(SqliteAccessGrant {
+            scope: scope.clone(),
+            binding: binding.clone(),
+            path: selection.path().to_path_buf(),
+        });
+        Ok(Some(binding))
+    });
+    drop(lease);
+    result
+}
+
+pub(super) fn verify_sqlite_selection(
+    state: &AppState,
+    library: &str,
+    ticket: &str,
+) -> Result<(), String> {
+    let selected = state
+        .sqlite_import_selection
+        .lock()
+        .map_err(|_| "来源会话状态不可用")?
+        .selected
+        .clone()
+        .ok_or("请重新选择课程来源数据库")?;
+    if selected.binding.library_id != library || selected.binding.selection_id != ticket {
+        return Err("课程来源选择已变化，请重新选择".into());
+    }
+    source_profiles::scoped(state, &selected.scope, |_| Ok(()))?;
+    let candidate = super::source_sqlite::open_candidate(&selected.path)?;
+    source_profiles::scoped(state, &selected.scope, |db| {
+        let current = state
+            .sqlite_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if current.generation != ticket
+            || current
+                .selected
+                .as_ref()
+                .map(|value| value.binding.selection_id.as_str())
+                != Some(ticket)
+        {
+            return Err("课程来源选择已变化，请重新选择".into());
+        }
+        super::source_sqlite::check_file_binding_in(
+            db,
+            &selected.binding.profile_id,
+            &selected.binding.epoch,
+            &candidate.file,
+        )
+    })
+}
+
+pub(super) fn release_sqlite_selection(
+    state: &AppState,
+    library: &str,
+    ticket: &str,
+) -> Result<bool, String> {
+    let _operation = state
+        .sqlite_import_gate
+        .lock()
+        .map_err(|_| "来源会话状态不可用")?;
+    let scope = scope_for(state, library)?;
+    source_profiles::scoped(state, &scope, |_| {
+        let mut current = state
+            .sqlite_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if !current
+            .selected
+            .as_ref()
+            .is_some_and(|value| value.scope == scope && value.binding.selection_id == ticket)
+        {
+            return Ok(false);
+        }
+        current.generation = uuid::Uuid::new_v4().to_string();
+        current.selected = None;
+        current.approved = None;
+        Ok(true)
+    })
+}
+
+pub(super) fn current_sqlite_selection(
+    state: &AppState,
+    library: &str,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    scope_for(state, library)?;
+    let selected = state
+        .sqlite_import_selection
+        .lock()
+        .map_err(|_| "来源会话状态不可用")?
+        .selected
+        .clone();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    if selected.binding.library_id != library {
+        return Ok(None);
+    }
+    verify_sqlite_selection(state, library, &selected.binding.selection_id)?;
+    Ok(Some(selected.binding))
 }
 
 fn open_selection(
@@ -862,6 +1059,49 @@ where
     })
     .await
     .map_err(|_| "学习资料迁入操作中断，请重新核对来源与批次".to_owned())?
+}
+
+#[tauri::command]
+pub async fn select_learning_course_source(
+    app: AppHandle,
+    expected_library_id: String,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    let picker_app = app.clone();
+    job(app, move |state| {
+        select_sqlite_with_picker(state, &expected_library_id, || {
+            picker_app
+                .dialog()
+                .file()
+                .set_title("选择映流课程数据库")
+                .add_filter("SQLite 数据库", &["sqlite", "sqlite3", "db"])
+                .blocking_pick_file()
+                .and_then(|path| path.into_path().ok())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn current_learning_course_source(
+    app: AppHandle,
+    expected_library_id: String,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    job(app, move |state| {
+        current_sqlite_selection(state, &expected_library_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn release_learning_course_source(
+    app: AppHandle,
+    expected_library_id: String,
+    selection_id: String,
+) -> Result<bool, String> {
+    job(app, move |state| {
+        release_sqlite_selection(state, &expected_library_id, &selection_id)
+    })
+    .await
 }
 
 #[tauri::command]

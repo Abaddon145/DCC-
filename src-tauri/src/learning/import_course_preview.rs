@@ -3,8 +3,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-#[derive(Debug, Clone)]
-pub(super) struct CourseMediaBinding {
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CourseMediaBinding {
     pub source_item_id: String,
     pub media_id: String,
 }
@@ -86,6 +87,7 @@ pub(super) struct CourseImportPreview {
     pub conflicts: Vec<Conflict>,
     pub source_fingerprint: String,
     pub target_fingerprint: String,
+    pub source_binding: Option<String>,
 }
 
 /// Compares only previewed fields; this does not authorize or atomically commit an import.
@@ -119,7 +121,17 @@ pub(super) fn preview_courses_from_profile(
     bindings: &[CourseMediaBinding],
     profile: &str,
 ) -> Result<CourseImportPreview, String> {
-    preview_courses_inner(source, target, bindings, Some(profile))
+    preview_courses_inner(source, target, bindings, Some(profile), None)
+}
+
+pub(super) fn preview_courses_from_profile_selected(
+    source: &Connection,
+    target: &Connection,
+    bindings: &[CourseMediaBinding],
+    profile: &str,
+    series: &[String],
+) -> Result<CourseImportPreview, String> {
+    preview_courses_inner(source, target, bindings, Some(profile), Some(series))
 }
 
 pub(super) fn recheck_preview_from_profile(
@@ -138,7 +150,87 @@ pub(super) fn preview_courses(
     target: &Connection,
     bindings: &[CourseMediaBinding],
 ) -> Result<CourseImportPreview, String> {
-    preview_courses_inner(source, target, bindings, None)
+    preview_courses_inner(source, target, bindings, None, None)
+}
+
+pub(super) fn check_source_schema(source: &Connection) -> Result<(), String> {
+    let failed = || "课程来源快照无效".to_string();
+    let required: &[(&str, &[&str])] = &[
+        ("schema_version", &["version"]),
+        ("series", &["id", "title", "description", "sort_order"]),
+        (
+            "series_items",
+            &["id", "series_id", "title", "duration_ms", "sort_order"],
+        ),
+        (
+            "playback_progress",
+            &[
+                "item_id",
+                "position_ms",
+                "duration_ms",
+                "playback_rate",
+                "completed",
+                "last_played_at",
+                "updated_at",
+                "last_sequence",
+            ],
+        ),
+    ];
+    for (table, columns) in required {
+        let kind: String = source.query_row(
+            "SELECT type FROM pragma_table_list() WHERE schema='main' AND name=?1 COLLATE BINARY",
+            [table], |row| row.get(0),
+        ).map_err(|_| failed())?;
+        if kind != "table" {
+            return Err(failed());
+        }
+        let mut stmt = source
+            .prepare("SELECT name FROM pragma_table_xinfo(?1,'main') WHERE hidden=0")
+            .map_err(|_| failed())?;
+        let actual = stmt
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|_| failed())?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(|_| failed())?;
+        if columns.iter().any(|column| !actual.contains(*column)) {
+            return Err(failed());
+        }
+    }
+    Ok(())
+}
+
+fn check_source_budget(
+    source: &Connection,
+    selected_series: Option<&[String]>,
+) -> Result<(), String> {
+    // ponytail: bound the current whole-library preview; page batches before raising this limit.
+    const MAX_ROWS: i64 = 10_000;
+    const MAX_BYTES: i64 = 2 * 1024 * 1024;
+    let failed = || "课程来源快照无效".to_string();
+    let queries = [
+        "SELECT count(*),coalesce(sum(coalesce(octet_length(id),0)+coalesce(octet_length(title),0)+coalesce(octet_length(description),0)+coalesce(octet_length(sort_order),0)),0) FROM (SELECT id,title,description,sort_order FROM main.series WHERE ?1 IS NULL OR id COLLATE BINARY IN (SELECT value FROM json_each(?1)) LIMIT 10001)",
+        "SELECT count(*),coalesce(sum(coalesce(octet_length(id),0)+coalesce(octet_length(series_id),0)+coalesce(octet_length(title),0)+coalesce(octet_length(duration_ms),0)+coalesce(octet_length(sort_order),0)),0) FROM (SELECT id,series_id,title,duration_ms,sort_order FROM main.series_items WHERE ?1 IS NULL OR series_id COLLATE BINARY IN (SELECT value FROM json_each(?1)) LIMIT 10001)",
+        "SELECT count(*),coalesce(sum(coalesce(octet_length(item_id),0)+coalesce(octet_length(position_ms),0)+coalesce(octet_length(duration_ms),0)+coalesce(octet_length(playback_rate),0)+coalesce(octet_length(completed),0)+coalesce(octet_length(last_played_at),0)+coalesce(octet_length(updated_at),0)+coalesce(octet_length(last_sequence),0)),0) FROM (SELECT item_id,position_ms,duration_ms,playback_rate,completed,last_played_at,updated_at,last_sequence FROM main.playback_progress WHERE ?1 IS NULL OR item_id COLLATE BINARY IN (SELECT id FROM main.series_items WHERE series_id COLLATE BINARY IN (SELECT value FROM json_each(?1))) LIMIT 10001)",
+    ];
+    let mut rows = 0i64;
+    let mut bytes = 0i64;
+    let selected_json = selected_series
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| failed())?;
+    for query in queries {
+        let (count, size): (i64, i64) = source
+            .query_row(query, [&selected_json], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|_| failed())?;
+        rows = rows.checked_add(count).ok_or_else(failed)?;
+        bytes = bytes.checked_add(size).ok_or_else(failed)?;
+        if rows > MAX_ROWS || bytes > MAX_BYTES {
+            return Err("课程来源过大，当前版本无法一次预检".into());
+        }
+    }
+    Ok(())
 }
 
 fn preview_courses_inner(
@@ -146,18 +238,24 @@ fn preview_courses_inner(
     target: &Connection,
     bindings: &[CourseMediaBinding],
     profile: Option<&str>,
+    selected_series: Option<&[String]>,
 ) -> Result<CourseImportPreview, String> {
     let failed = || "课程来源快照无效".to_string();
     let source_tx = source.unchecked_transaction().map_err(|_| failed())?;
+    check_source_schema(&source_tx)?;
     let user_version: i64 = source_tx
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .query_row("PRAGMA main.user_version", [], |r| r.get(0))
         .map_err(|_| failed())?;
-    let versions: (i64, i64, i64) = source_tx.query_row("SELECT count(*), coalesce(min(version),0), coalesce(max(version),0) FROM schema_version", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| failed())?;
+    let versions: (i64, i64, i64) = source_tx.query_row("SELECT count(*), coalesce(min(version),0), coalesce(max(version),0) FROM (SELECT version FROM main.schema_version LIMIT 2)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| failed())?;
     if user_version != 8 || versions != (1, 8, 8) {
         return Err(failed());
     }
-    let orphaned: bool = source_tx.query_row("SELECT EXISTS(SELECT 1 FROM series_items i LEFT JOIN series s ON s.id=i.series_id WHERE s.id IS NULL) OR EXISTS(SELECT 1 FROM playback_progress p LEFT JOIN series_items i ON i.id=p.item_id WHERE i.id IS NULL)", [], |r| r.get(0)).map_err(|_| failed())?;
-    if orphaned {
+    if selected_series.is_some_and(|ids| ids.len() > 10000) {
+        return Err("所选系列过多".into());
+    }
+    check_source_budget(&source_tx, selected_series)?;
+    let invalid_relations: bool = source_tx.query_row("SELECT EXISTS(SELECT 1 FROM main.series GROUP BY id COLLATE BINARY HAVING count(*)>1) OR EXISTS(SELECT 1 FROM main.series_items GROUP BY id COLLATE BINARY HAVING count(*)>1) OR EXISTS(SELECT 1 FROM main.playback_progress GROUP BY item_id COLLATE BINARY HAVING count(*)>1) OR EXISTS(SELECT 1 FROM main.series_items i LEFT JOIN main.series s ON s.id COLLATE BINARY=i.series_id COLLATE BINARY WHERE s.id IS NULL) OR EXISTS(SELECT 1 FROM main.playback_progress p LEFT JOIN main.series_items i ON i.id COLLATE BINARY=p.item_id COLLATE BINARY WHERE i.id IS NULL)", [], |r| r.get(0)).map_err(|_| failed())?;
+    if invalid_relations {
         return Err(failed());
     }
     let mut binding_map = HashMap::new();
@@ -176,11 +274,21 @@ fn preview_courses_inner(
     let profile_state = profile
         .map(|id| super::source_profiles::get_in(&tx, id))
         .transpose()?;
+    let source_binding = profile
+        .map(|id| super::source_profiles::sqlite_binding_in(&tx, id))
+        .transpose()?
+        .flatten();
+    let selected_json = selected_series
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| failed())?;
     let mut series_stmt = source_tx
-        .prepare("SELECT id,title,description FROM series ORDER BY sort_order,id")
+        .prepare(
+            "SELECT id,title,description FROM main.series WHERE ?1 IS NULL OR id COLLATE BINARY IN (SELECT value FROM json_each(?1)) ORDER BY sort_order,id COLLATE BINARY",
+        )
         .map_err(|_| failed())?;
     let source_series = series_stmt
-        .query_map([], |r| {
+        .query_map([&selected_json], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -190,14 +298,35 @@ fn preview_courses_inner(
         .map_err(|_| failed())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| failed())?;
+    let chosen = if let Some(ids) = selected_series {
+        let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        if ids.is_empty()
+            || set.len() != ids.len()
+            || ids.iter().any(|id| !valid_id(id))
+            || !set
+                .iter()
+                .all(|id| source_series.iter().any(|series| series.0 == *id))
+        {
+            return Err("所选系列已变化，请重新选择".into());
+        }
+        Some(set)
+    } else {
+        None
+    };
     let mut item_stmt = source_tx
-        .prepare("SELECT id,title,duration_ms FROM series_items WHERE series_id=?1 ORDER BY sort_order,id")
+        .prepare("SELECT id,title,duration_ms FROM main.series_items WHERE series_id COLLATE BINARY=?1 ORDER BY sort_order,id COLLATE BINARY")
         .map_err(|_| failed())?;
     let mut seen = HashSet::new();
     let mut series = Vec::new();
     for (id, title, description) in source_series {
         if !valid_id(&id) {
             return Err(failed());
+        }
+        if chosen
+            .as_ref()
+            .is_some_and(|set| !set.contains(id.as_str()))
+        {
+            continue;
         }
         let ids = item_stmt
             .query_map([&id], |r| {
@@ -219,7 +348,7 @@ fn preview_courses_inner(
             if source_duration_ms.is_some_and(|v| v < 0) {
                 return Err(failed());
             }
-            let raw: Option<(i64, Option<i64>, f64, i64, Option<i64>, i64, i64)> = source_tx.query_row("SELECT position_ms,duration_ms,playback_rate,completed,last_played_at,updated_at,last_sequence FROM playback_progress WHERE item_id=?1", [&item_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|_| failed())?;
+            let raw: Option<(i64, Option<i64>, f64, i64, Option<i64>, i64, i64)> = source_tx.query_row("SELECT position_ms,duration_ms,playback_rate,completed,last_played_at,updated_at,last_sequence FROM main.playback_progress WHERE item_id COLLATE BINARY=?1", [&item_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|_| failed())?;
             let (source_progress, source_progress_metadata) = match raw {
                 Some((
                     position_ms,
@@ -465,10 +594,17 @@ fn preview_courses_inner(
         .collect();
     let source_fingerprint = fingerprint("yingliu.course-preview.source.v2", &source_view)?;
     let profile_binding = profile_state.as_ref().map(|p| (&p.id, &p.access_epoch));
-    let target_fingerprint = fingerprint(
-        "yingliu.course-preview.target.v4",
-        &(profile_binding, target_view),
-    )?;
+    let target_fingerprint = if let Some(binding) = &source_binding {
+        fingerprint(
+            "yingliu.course-preview.target.v5",
+            &(profile_binding, target_view, binding),
+        )?
+    } else {
+        fingerprint(
+            "yingliu.course-preview.target.v4",
+            &(profile_binding, target_view),
+        )?
+    };
     drop(item_stmt);
     drop(series_stmt);
     source_tx.commit().map_err(|_| failed())?;
@@ -478,6 +614,7 @@ fn preview_courses_inner(
         conflicts,
         source_fingerprint,
         target_fingerprint,
+        source_binding,
     })
 }
 

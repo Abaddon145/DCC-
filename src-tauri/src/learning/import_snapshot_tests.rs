@@ -35,6 +35,1080 @@ fn source(path: &Path) -> Connection {
     db
 }
 
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_child_rejects_missing_sidecars_without_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'safe')", [])
+        .unwrap();
+    drop(writer);
+    let wal = temp.path().join("synthetic.db-wal");
+    let shm = temp.path().join("synthetic.db-shm");
+    assert!(!wal.exists() && !shm.exists());
+    let before = fs::read(&path).unwrap();
+    assert!(super::import_snapshot::open_synthetic_readonly_shm_child(&path).is_err());
+    assert!(!wal.exists() && !shm.exists());
+    fs::write(&wal, b"synthetic-wal").unwrap();
+    assert!(super::import_snapshot::open_synthetic_readonly_shm_child(&path).is_err());
+    assert!(!shm.exists());
+    assert_eq!(fs::read(&wal).unwrap(), b"synthetic-wal");
+    fs::remove_file(&wal).unwrap();
+    fs::write(&shm, b"synthetic-shm").unwrap();
+    assert!(super::import_snapshot::open_synthetic_readonly_shm_child(&path).is_err());
+    assert!(!wal.exists());
+    assert_eq!(fs::read(&shm).unwrap(), b"synthetic-shm");
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_child_rejects_existing_rollback_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+        .unwrap();
+    let files = [
+        path.clone(),
+        temp.path().join("synthetic.db-wal"),
+        temp.path().join("synthetic.db-shm"),
+    ];
+    let journal = temp.path().join("synthetic.db-journal");
+    fs::write(&journal, b"synthetic-journal").unwrap();
+    let before = files
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(super::import_snapshot::open_synthetic_readonly_shm_child(&path).is_err());
+    assert_eq!(
+        before,
+        files
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    );
+    assert_eq!(fs::read(&journal).unwrap(), b"synthetic-journal");
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_child_rejects_corrupt_wal_before_opening_sqlite() {
+    use std::io::{Seek, SeekFrom, Write};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+        .unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    drop(writer);
+    let wal = temp.path().join("synthetic.db-wal");
+    let shm = temp.path().join("synthetic.db-shm");
+    let mut corrupt = fs::OpenOptions::new().write(true).open(&wal).unwrap();
+    corrupt.seek(SeekFrom::Start(8)).unwrap();
+    corrupt.write_all(&0u32.to_be_bytes()).unwrap();
+    drop(corrupt);
+    let files = [path.clone(), wal, shm];
+    let before = files
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        super::import_snapshot::open_synthetic_readonly_shm_child(&path)
+            .err()
+            .unwrap(),
+        "来源数据库或 WAL 文件头无效"
+    );
+    assert_eq!(
+        before,
+        files
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_process_child() {
+    if !std::env::args().any(|arg| arg == "--exact") {
+        return;
+    }
+    let Some(root) = std::env::var_os("STACKDCC_READONLY_WAL_ROOT") else {
+        return;
+    };
+    let raw = std::path::PathBuf::from(root);
+    let root = raw.canonicalize().unwrap();
+    assert!(root.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+    assert_eq!(root.file_name().unwrap(), "source");
+    let token = std::env::var("STACKDCC_READONLY_WAL_TOKEN").unwrap();
+    assert!(uuid::Uuid::parse_str(&token).is_ok());
+    assert_eq!(fs::read_to_string(root.join(".fixture")).unwrap(), token);
+    let lease =
+        super::import_snapshot::open_synthetic_readonly_shm_child(&raw.join("synthetic.db"))
+            .unwrap();
+    let reader = lease.connection();
+    if std::env::var_os("STACKDCC_READONLY_WAL_CONCURRENT").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        use rusqlite::backup::{Backup, StepResult};
+        reader
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        reader.busy_timeout(Duration::ZERO).unwrap();
+        let mut snapshot = Connection::open_in_memory().unwrap();
+        {
+            let backup = Backup::new(reader, &mut snapshot).unwrap();
+            assert!(matches!(backup.step(1).unwrap(), StepResult::More));
+            fs::write(root.join(".ready"), &token).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while fs::read_to_string(root.join(".resume")).ok().as_deref() != Some(token.as_str()) {
+                assert!(
+                    Instant::now() < deadline,
+                    "synthetic writer did not resume backup"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "synthetic concurrent backup timed out"
+                );
+                match backup.step(64).unwrap() {
+                    StepResult::Done => break,
+                    StepResult::More => continue,
+                    _ => panic!("synthetic concurrent backup blocked"),
+                }
+            }
+        }
+        let values: (i64, i64) = snapshot
+            .query_row("SELECT a,b FROM proof", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(values, (10, 10));
+        return;
+    }
+    let snapshot = snapshot_synthetic_connection(reader, Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT body FROM video_notes WHERE id=1", [], |row| row
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+        "wal-only"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_separate_process_preserves_source_files() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("中文 # %").join("source");
+    fs::create_dir_all(&root).unwrap();
+    let token = uuid::Uuid::new_v4().to_string();
+    fs::write(root.join(".fixture"), &token).unwrap();
+    let path = root.join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal-only')", [])
+        .unwrap();
+    assert!(!root.join("synthetic.db-journal").exists());
+    let (locked_root, _directories) = super::source_markdown::lock_vault_root(&root).unwrap();
+    let leased_paths = [
+        locked_root.join("synthetic.db"),
+        locked_root.join("synthetic.db-wal"),
+        locked_root.join("synthetic.db-shm"),
+    ];
+    let _leases = leased_paths
+        .iter()
+        .map(|path| super::source_markdown::open_checked_shared(path))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for (index, source) in leased_paths.iter().enumerate() {
+        assert!(fs::rename(source, locked_root.join(format!("replacement-{index}"))).is_err());
+    }
+    let files = [
+        path.clone(),
+        root.join("synthetic.db-wal"),
+        root.join("synthetic.db-shm"),
+    ];
+    let before = files
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "learning::import_snapshot_tests::learning_import_readonly_shm_process_child",
+            "--nocapture",
+        ])
+        .env("STACKDCC_READONLY_WAL_ROOT", &root)
+        .env("STACKDCC_READONLY_WAL_TOKEN", &token)
+        .env("STACKDCC_READONLY_WAL_CONCURRENT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("synthetic readonly child exceeded deadline");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic readonly child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = files
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(!root.join("synthetic.db-journal").exists());
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_process_backup_survives_concurrent_commits() {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    let token = uuid::Uuid::new_v4().to_string();
+    fs::write(root.join(".fixture"), &token).unwrap();
+    let writer = source(&root.join("synthetic.db"));
+    writer
+        .execute_batch("CREATE TABLE proof(a INTEGER, b INTEGER); INSERT INTO proof VALUES(0,0);")
+        .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "learning::import_snapshot_tests::learning_import_readonly_shm_process_child",
+            "--nocapture",
+        ])
+        .env("STACKDCC_READONLY_WAL_ROOT", &root)
+        .env("STACKDCC_READONLY_WAL_TOKEN", &token)
+        .env("STACKDCC_READONLY_WAL_CONCURRENT", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut committed = false;
+    while child.try_wait().unwrap().is_none() {
+        if !committed
+            && fs::read_to_string(root.join(".ready")).ok().as_deref() == Some(token.as_str())
+        {
+            assert!(!root.join("synthetic.db-journal").exists());
+            assert!(fs::rename(root.join("synthetic.db"), root.join("moved.db")).is_err());
+            assert!(fs::rename(&root, temp.path().join("moved-source")).is_err());
+            for _ in 0..10 {
+                writer.execute("UPDATE proof SET a=a+1,b=b+1", []).unwrap();
+            }
+            fs::write(root.join(".resume"), &token).unwrap();
+            committed = true;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("synthetic concurrent readonly child exceeded deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic concurrent child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        committed,
+        "synthetic writer did not run between backup steps"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_readonly_shm_selection_discards_stale_child_result() {
+    use super::{import_snapshot::SyntheticSqliteSelections, source_profiles, source_sqlite};
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    for change in [
+        "unchanged",
+        "revoke",
+        "epoch",
+        "scope",
+        "hardlink",
+        "wal_hardlink",
+        "shm_hardlink",
+        "journal",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(&temp.path().join("library"));
+        let library = state.active_library_id().unwrap();
+        let scope = source_profiles::scope(&state, &library).unwrap();
+        let root = temp.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let marker = uuid::Uuid::new_v4().to_string();
+        fs::write(root.join(".fixture"), &marker).unwrap();
+        let path = root.join("synthetic.db");
+        let writer = source(&path);
+        writer
+            .execute_batch(
+                "CREATE TABLE proof(a INTEGER, b INTEGER); INSERT INTO proof VALUES(0,0);",
+            )
+            .unwrap();
+        let bound = source_sqlite::bind_selected(&state, &scope, &path).unwrap();
+        let choices = SyntheticSqliteSelections::default();
+        let mut invoked = false;
+        assert!(choices
+            .inspect_isolated(&state, "invalid", |_| {
+                invoked = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!invoked);
+        let ticket = choices
+            .select(&state, &library, bound.profile_id(), bound.epoch(), || {
+                Some(path.clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            choices
+                .inspect_isolated(&state, &ticket, |selected| {
+                    assert_eq!(
+                        selected.canonicalize().unwrap(),
+                        path.canonicalize().unwrap()
+                    );
+                    Ok("current selection")
+                })
+                .unwrap(),
+            "current selection"
+        );
+        if change == "journal" {
+            let journal = root.join("synthetic.db-journal");
+            fs::write(&journal, b"synthetic").unwrap();
+            let mut called = false;
+            assert!(choices
+                .inspect_isolated(&state, &ticket, |_| {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+            assert!(!called);
+            fs::remove_file(journal).unwrap();
+        }
+        let child_completed = std::cell::Cell::new(false);
+        let result = choices.inspect_isolated(&state, &ticket, |selected| {
+            assert_eq!(
+                selected.canonicalize().unwrap(),
+                path.canonicalize().unwrap()
+            );
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "learning::import_snapshot_tests::learning_import_readonly_shm_process_child",
+                    "--nocapture",
+                ])
+                .env("STACKDCC_READONLY_WAL_ROOT", selected.parent().unwrap())
+                .env("STACKDCC_READONLY_WAL_TOKEN", &marker)
+                .env("STACKDCC_READONLY_WAL_CONCURRENT", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .creation_flags(0x08000000)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut changed = false;
+            while child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                if !changed
+                    && fs::read_to_string(root.join(".ready")).ok().as_deref()
+                        == Some(marker.as_str())
+                {
+                    match change {
+                        "unchanged" => (),
+                        "revoke" => choices.revoke()?,
+                        "epoch" => {
+                            state.with_library(|db, _| source_profiles::invalidate_epochs(db))?
+                        }
+                        "scope" => *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4(),
+                        "hardlink" => fs::hard_link(&path, root.join("alias.db"))
+                            .map_err(|error| error.to_string())?,
+                        "wal_hardlink" => {
+                            fs::hard_link(root.join("synthetic.db-wal"), root.join("alias.wal"))
+                                .map_err(|error| error.to_string())?
+                        }
+                        "shm_hardlink" => {
+                            fs::hard_link(root.join("synthetic.db-shm"), root.join("alias.shm"))
+                                .map_err(|error| error.to_string())?
+                        }
+                        "journal" => fs::write(root.join("synthetic.db-journal"), b"synthetic")
+                            .map_err(|error| error.to_string())?,
+                        _ => unreachable!(),
+                    }
+                    for _ in 0..10 {
+                        writer
+                            .execute("UPDATE proof SET a=a+1,b=b+1", [])
+                            .map_err(|error| error.to_string())?;
+                    }
+                    fs::write(root.join(".resume"), &marker).map_err(|error| error.to_string())?;
+                    changed = true;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("synthetic child timeout".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+            assert!(changed, "did not change {change} during backup");
+            assert!(
+                output.status.success(),
+                "synthetic child failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            child_completed.set(true);
+            Ok("snapshot ready")
+        });
+        assert!(
+            child_completed.get(),
+            "synthetic child did not finish after {change}"
+        );
+        if change == "unchanged" {
+            assert_eq!(result.unwrap(), "snapshot ready");
+            continue;
+        }
+        let error = result.expect_err("stale child result must not be returned");
+        let expected = match change {
+            "revoke" => "来源选择已变化",
+            "epoch" => "来源状态已变化，请重新选择",
+            "scope" => "素材库会话已变化，请重新检查来源",
+            "hardlink" => "无法确认来源数据库身份",
+            "wal_hardlink" | "shm_hardlink" => "来源文件身份不可验证",
+            "journal" => "合成来源快照不可用",
+            _ => unreachable!(),
+        };
+        assert_eq!(error, expected);
+    }
+}
+
+#[test]
+fn learning_import_snapshot_deadline_includes_validation_queries() {
+    let source = Connection::open_in_memory().unwrap();
+    source
+        .execute_batch(
+            "PRAGMA user_version=8;
+        CREATE VIEW schema_version AS WITH RECURSIVE values_to_check(n) AS
+        (VALUES(1) UNION ALL SELECT n+1 FROM values_to_check WHERE n<10000000)
+        SELECT 8 AS version FROM (SELECT sum(n) FROM values_to_check);",
+        )
+        .unwrap();
+    assert!(snapshot_synthetic_connection(&source, Duration::from_millis(100)).is_err());
+    source.execute_batch("DROP VIEW schema_version; CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(8);").unwrap();
+    let snapshot = snapshot_synthetic_connection(&source, Duration::from_millis(100)).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let sum: i64 = snapshot.query_row("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<10000) SELECT sum(n) FROM numbers", [], |row| row.get(0)).unwrap();
+    assert_eq!(sum, 50005000);
+}
+
+#[test]
+fn learning_import_snapshot_rejects_oversized_database_before_returning_it() {
+    let source = Connection::open_in_memory().unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE schema_version(version INTEGER NOT NULL);
+         INSERT INTO schema_version VALUES(8);
+         PRAGMA user_version=8;
+         CREATE TABLE content(value BLOB);
+         INSERT INTO content VALUES(zeroblob(262144));",
+        )
+        .unwrap();
+    let pages: u64 = source
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    let page_size: u64 = source
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .unwrap();
+    let exact_limit = pages * page_size;
+    let snapshot = super::import_snapshot::snapshot_synthetic_connection_with_limit(
+        &source,
+        Duration::from_secs(2),
+        exact_limit,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT length(value) FROM content", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        262144
+    );
+    assert_eq!(
+        super::import_snapshot::snapshot_synthetic_connection_with_limit(
+            &source,
+            Duration::from_secs(2),
+            exact_limit - 1,
+        )
+        .err()
+        .unwrap(),
+        "合成来源快照超过大小上限"
+    );
+    assert_eq!(
+        source
+            .query_row("SELECT length(value) FROM content", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        262144
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_wal_header_gate_rejects_invalid_page_sizes_before_sqlite() {
+    let mut database = [0u8; 100];
+    database[..16].copy_from_slice(b"SQLite format 3\0");
+    database[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    database[18] = 2;
+    database[19] = 2;
+    let mut wal = [0u8; 32];
+    wal[..4].copy_from_slice(&0x377f0682u32.to_be_bytes());
+    wal[4..8].copy_from_slice(&3007000u32.to_be_bytes());
+    wal[8..12].copy_from_slice(&4096u32.to_be_bytes());
+    assert!(super::source_sqlite::validate_wal_headers(&database, &wal, 32).is_ok());
+    assert!(super::source_sqlite::validate_wal_headers(&database, &[], 0).is_ok());
+    for invalid in [0u32, 1, 513, 8192, 131072] {
+        let mut bad = wal;
+        bad[8..12].copy_from_slice(&invalid.to_be_bytes());
+        assert!(super::source_sqlite::validate_wal_headers(&database, &bad, 32).is_err());
+    }
+    assert!(super::source_sqlite::validate_wal_headers(&database, &wal[..12], 12).is_err());
+    let mut bad_magic = wal;
+    bad_magic[0] = 0;
+    assert!(super::source_sqlite::validate_wal_headers(&database, &bad_magic, 32).is_err());
+    let mut bad_version = wal;
+    bad_version[4..8].copy_from_slice(&0u32.to_be_bytes());
+    assert!(super::source_sqlite::validate_wal_headers(&database, &bad_version, 32).is_err());
+    let mut bad_mode = database;
+    bad_mode[19] = 1;
+    assert!(super::source_sqlite::validate_wal_headers(&bad_mode, &wal, 32).is_err());
+    database[16..18].copy_from_slice(&1u16.to_be_bytes());
+    wal[8..12].copy_from_slice(&65536u32.to_be_bytes());
+    assert!(super::source_sqlite::validate_wal_headers(&database, &wal, 32).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_wal_header_gate_stops_corrupt_copy_before_snapshot() {
+    use std::io::{Seek, SeekFrom, Write};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'synthetic')", [])
+        .unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    drop(writer);
+    let wal_path = temp.path().join("synthetic.db-wal");
+    let mut wal = fs::OpenOptions::new().write(true).open(&wal_path).unwrap();
+    wal.seek(SeekFrom::Start(8)).unwrap();
+    wal.write_all(&0u32.to_be_bytes()).unwrap();
+    drop(wal);
+    let before = [
+        fs::read(&path).unwrap(),
+        fs::read(&wal_path).unwrap(),
+        fs::read(temp.path().join("synthetic.db-shm")).unwrap(),
+    ];
+    let error = match super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {},
+    ) {
+        Ok(_) => panic!("invalid WAL was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error, "来源数据库或 WAL 文件头无效");
+    assert_eq!(
+        before,
+        [
+            fs::read(&path).unwrap(),
+            fs::read(&wal_path).unwrap(),
+            fs::read(temp.path().join("synthetic.db-shm")).unwrap()
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_sqlite_selection_rejects_profile_for_different_file() {
+    use super::{import_snapshot::SyntheticSqliteSelections, source_profiles, source_sqlite};
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::state::test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let first = temp.path().join("first.db");
+    let second = temp.path().join("second.db");
+    let _writer_first = source(&first);
+    let _writer_second = source(&second);
+    let bound = source_sqlite::bind_selected(&state, &scope, &first).unwrap();
+    let choices = SyntheticSqliteSelections::default();
+    let unbound = source_profiles::create(&state, &scope).unwrap();
+    assert!(choices
+        .select(&state, &library, &unbound.id, &unbound.access_epoch, || {
+            Some(first.clone())
+        })
+        .is_err());
+    assert!(choices
+        .select(
+            &state,
+            &library,
+            bound.profile_id(),
+            bound.epoch(),
+            || Some(second)
+        )
+        .is_err());
+    let ticket = choices
+        .select(&state, &library, bound.profile_id(), bound.epoch(), || {
+            Some(first.clone())
+        })
+        .unwrap()
+        .unwrap();
+    fs::hard_link(&first, temp.path().join("linked.db")).unwrap();
+    assert!(choices
+        .snapshot(&state, &ticket, Duration::from_secs(2), || {})
+        .is_err());
+    fs::remove_file(temp.path().join("linked.db")).unwrap();
+    assert!(choices
+        .snapshot(&state, &ticket, Duration::from_secs(2), || {
+            fs::hard_link(&first, temp.path().join("linked-late.db")).unwrap();
+        })
+        .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_sqlite_selection_requires_current_choice_scope_and_epoch() {
+    use super::{import_snapshot::SyntheticSqliteSelections, source_profiles, source_sqlite};
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::state::test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let path = temp.path().join("selected.db");
+    let writer = source(&path);
+    let bound = source_sqlite::bind_selected(&state, &scope, &path).unwrap();
+    let profile = source_profiles::get(&state, &scope, bound.profile_id()).unwrap();
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'selected')", [])
+        .unwrap();
+    let choices = SyntheticSqliteSelections::default();
+    assert!(choices
+        .snapshot(&state, "unselected", Duration::from_secs(2), || {})
+        .is_err());
+    let first = choices
+        .select(&state, &library, &profile.id, &profile.access_epoch, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let result = choices
+        .snapshot(&state, &first, Duration::from_secs(2), || {})
+        .unwrap();
+    assert_eq!(
+        result
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(choices
+        .select(&state, &library, &profile.id, &profile.access_epoch, || {
+            None
+        })
+        .unwrap()
+        .is_none());
+    assert!(choices
+        .snapshot(&state, &first, Duration::from_secs(2), || {})
+        .is_err());
+    let second = choices
+        .select(&state, &library, &profile.id, &profile.access_epoch, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    state
+        .with_library(|db, _| source_profiles::invalidate_epochs(db))
+        .unwrap();
+    assert!(choices
+        .snapshot(&state, &second, Duration::from_secs(2), || {})
+        .is_err());
+    let current = source_profiles::get(&state, &scope, &profile.id).unwrap();
+    let third = choices
+        .select(&state, &library, &profile.id, &current.access_epoch, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(choices
+        .snapshot(&state, &third, Duration::from_secs(2), || {})
+        .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_sqlite_selection_rejects_reselection_during_snapshot() {
+    use super::{import_snapshot::SyntheticSqliteSelections, source_profiles, source_sqlite};
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::state::test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let path = temp.path().join("selected.db");
+    let _writer = source(&path);
+    let bound = source_sqlite::bind_selected(&state, &scope, &path).unwrap();
+    let profile = source_profiles::get(&state, &scope, bound.profile_id()).unwrap();
+    let choices = SyntheticSqliteSelections::default();
+    let first = choices
+        .select(&state, &library, &profile.id, &profile.access_epoch, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    assert!(choices
+        .snapshot(&state, &first, Duration::from_secs(2), || {
+            assert!(choices
+                .select(&state, &library, &profile.id, &profile.access_epoch, || {
+                    None
+                })
+                .unwrap()
+                .is_none());
+        })
+        .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_sqlite_selection_rejects_stale_picker_and_mid_read_epoch() {
+    use super::{import_snapshot::SyntheticSqliteSelections, source_profiles, source_sqlite};
+    let temp = tempfile::tempdir().unwrap();
+    let state = crate::state::test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let path = temp.path().join("selected.db");
+    let _writer = source(&path);
+    let bound = source_sqlite::bind_selected(&state, &scope, &path).unwrap();
+    let profile = source_profiles::get(&state, &scope, bound.profile_id()).unwrap();
+    let choices = SyntheticSqliteSelections::default();
+    let latest = std::cell::RefCell::new(String::new());
+    let stale = choices.select(&state, &library, &profile.id, &profile.access_epoch, || {
+        *latest.borrow_mut() = choices
+            .select(&state, &library, &profile.id, &profile.access_epoch, || {
+                Some(path.clone())
+            })
+            .unwrap()
+            .unwrap();
+        Some(path.clone())
+    });
+    assert!(stale.is_err());
+    assert!(choices
+        .snapshot(&state, &latest.borrow(), Duration::from_secs(2), || {
+            state
+                .with_library(|db, _| source_profiles::invalidate_epochs(db))
+                .unwrap();
+        })
+        .is_err());
+    let current = source_profiles::get(&state, &scope, &profile.id).unwrap();
+    assert!(choices
+        .select(&state, &library, &profile.id, &current.access_epoch, || {
+            *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+            Some(path.clone())
+        })
+        .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_pinned_snapshot_accepts_quiet_database_without_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let bytes = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&path, bytes).unwrap();
+    let snapshot =
+        super::import_snapshot::snapshot_pinned_synthetic(&path, Duration::from_secs(2), || {
+            assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+            assert!(fs::rename(&path, temp.path().join("renamed.sqlite")).is_err());
+        })
+        .unwrap();
+    let target = crate::db::open_database(&temp.path().join("target.db")).unwrap();
+    let preview = super::import_course_preview::preview_courses(&snapshot, &target, &[]).unwrap();
+    assert_eq!(preview.series[0].id, "series-1");
+    assert_eq!(
+        preview.series[0].items[0]
+            .source_progress
+            .as_ref()
+            .unwrap()
+            .position_ms,
+        11000
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!temp
+            .path()
+            .join(format!("synthetic.sqlite{suffix}"))
+            .exists());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_quiet_snapshot_rejects_sidecar_race_and_writer() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let bytes = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&path, bytes).unwrap();
+    let sidecar = temp.path().join("synthetic.sqlite-wal");
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {
+            fs::write(&sidecar, b"new wal").unwrap();
+        }
+    )
+    .is_err());
+    assert_eq!(fs::read(&sidecar).unwrap(), b"new wal");
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_err());
+    fs::remove_file(sidecar).unwrap();
+    let journal = temp.path().join("synthetic.sqlite-journal");
+    fs::write(&journal, b"journal").unwrap();
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_err());
+    fs::remove_file(journal).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_err());
+    drop(writer);
+    assert!(
+        super::import_snapshot::snapshot_pinned_synthetic(&path, Duration::ZERO, || {}).is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_quiet_snapshot_accepts_rollback_journal_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    fs::write(
+        &path,
+        include_bytes!("fixtures/yingliu-migration-sample.sqlite"),
+    )
+    .unwrap();
+    let db = Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+    drop(db);
+    let before = fs::read(&path).unwrap();
+    let snapshot =
+        super::import_snapshot::snapshot_pinned_synthetic(&path, Duration::from_secs(2), || {})
+            .unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!temp
+            .path()
+            .join(format!("synthetic.sqlite{suffix}"))
+            .exists());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_pinned_snapshot_reads_wal_and_rejects_linked_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal')", [])
+        .unwrap();
+    let before = [
+        fs::read(&path).unwrap(),
+        fs::read(temp.path().join("synthetic.db-wal")).unwrap(),
+        fs::read(temp.path().join("synthetic.db-shm")).unwrap(),
+    ];
+    let snapshot =
+        super::import_snapshot::snapshot_pinned_synthetic(&path, Duration::from_secs(2), || {
+            assert!(fs::rename(&path, temp.path().join("renamed.db")).is_err());
+            assert!(fs::rename(
+                temp.path().join("synthetic.db-wal"),
+                temp.path().join("renamed.wal")
+            )
+            .is_err());
+        })
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .query_row("SELECT count(*) FROM video_notes", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        before,
+        [
+            fs::read(&path).unwrap(),
+            fs::read(temp.path().join("synthetic.db-wal")).unwrap(),
+            fs::read(temp.path().join("synthetic.db-shm")).unwrap()
+        ]
+    );
+    fs::hard_link(&path, temp.path().join("other.db")).unwrap();
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_err());
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_pinned_wal_snapshot_rejects_rollback_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    writer
+        .execute("INSERT INTO video_notes VALUES(1,'wal')", [])
+        .unwrap();
+    let journal = temp.path().join("synthetic.db-journal");
+    fs::write(&journal, b"journal").unwrap();
+    let mut called = false;
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {
+            called = true;
+        }
+    )
+    .is_err());
+    assert!(!called);
+    fs::remove_file(&journal).unwrap();
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_ok());
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {
+            fs::write(&journal, b"journal").unwrap();
+        }
+    )
+    .is_err());
+    assert_eq!(fs::read(&journal).unwrap(), b"journal");
+    drop(writer);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_import_pinned_snapshot_rejects_changes_and_missing_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.db");
+    let writer = source(&path);
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &path,
+        Duration::from_secs(2),
+        || {
+            writer
+                .execute("INSERT INTO video_notes VALUES(1,'changed')", [])
+                .unwrap();
+        }
+    )
+    .is_err());
+    drop(writer);
+    let empty = temp.path().join("missing.db");
+    fs::write(&empty, b"not a database").unwrap();
+    assert!(super::import_snapshot::snapshot_pinned_synthetic(
+        &empty,
+        Duration::from_secs(2),
+        || {}
+    )
+    .is_err());
+    assert!(!temp.path().join("missing.db-wal").exists());
+    assert!(!temp.path().join("missing.db-shm").exists());
+}
+
 #[test]
 fn learning_import_snapshot_reads_wal_without_changing_source_database_or_wal() {
     let temp = tempfile::tempdir().unwrap();

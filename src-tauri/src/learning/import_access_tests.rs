@@ -19,6 +19,301 @@ fn write_note(root: &std::path::Path, relative: &str, body: &str) {
     fs::write(path, body).unwrap();
 }
 
+fn write_sqlite_fixture(path: &std::path::Path) {
+    fs::write(
+        path,
+        include_bytes!("fixtures/yingliu-migration-sample.sqlite"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_header_lease_pins_identity_and_blocks_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let renamed = temp.path().join("renamed.sqlite");
+    let original = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&path, original).unwrap();
+
+    let candidate = super::source_sqlite::open_candidate(&path).unwrap();
+    assert!(fs::rename(&path, &renamed).is_err());
+    let lease = super::source_markdown::open_checked_deny_write(&candidate.path).unwrap();
+    assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+    assert!(fs::rename(&path, &renamed).is_err());
+    drop(lease);
+    assert!(fs::rename(&path, &renamed).is_err());
+    drop(candidate);
+    fs::rename(&path, &renamed).unwrap();
+    assert_eq!(fs::read(&renamed).unwrap(), original);
+}
+
+#[test]
+fn learning_import_sqlite_picker_checks_header_before_registering() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let bad = temp.path().join("not-sqlite.db");
+    fs::write(&bad, [0u8; 100]).unwrap();
+    assert!(import_access::select_sqlite_with_picker(&state, &library, || Some(bad)).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    let good = temp.path().join("synthetic.sqlite");
+    let original = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&good, original).unwrap();
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || Some(good.clone()))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fs::read(good).unwrap(), original);
+}
+
+#[test]
+fn learning_import_sqlite_picker_rejects_active_writer_without_touching_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "wal");
+    writer
+        .execute_batch("CREATE TABLE test(id INTEGER); INSERT INTO test VALUES(1);")
+        .unwrap();
+    let wal = temp.path().join("synthetic.sqlite-wal");
+    let shm = temp.path().join("synthetic.sqlite-shm");
+    let before = [
+        fs::read(&path).unwrap(),
+        fs::read(&wal).unwrap(),
+        fs::read(&shm).unwrap(),
+    ];
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || Some(path.clone())).is_err()
+    );
+    assert_eq!(
+        before,
+        [
+            fs::read(&path).unwrap(),
+            fs::read(&wal).unwrap(),
+            fs::read(&shm).unwrap()
+        ]
+    );
+    writer.execute("INSERT INTO test VALUES(2)", []).unwrap();
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_picker_is_scoped_revocable_and_does_not_pin_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&path);
+    assert!(
+        import_access::current_sqlite_selection(&state, &uuid::Uuid::new_v4().to_string()).is_err()
+    );
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || None)
+            .unwrap()
+            .is_none()
+    );
+    let chosen = import_access::select_sqlite_with_picker(&state, &library, || Some(path.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.library_id, library);
+    assert_eq!(chosen.file_name, "synthetic.sqlite");
+    assert!(import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_ok());
+    let renamed = temp.path().join("renamed.sqlite");
+    fs::rename(&path, &renamed).unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_err()
+    );
+    fs::write(&path, b"replacement").unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_err()
+    );
+    assert!(
+        import_access::release_sqlite_selection(&state, &library, &chosen.selection_id).unwrap()
+    );
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library, &chosen.selection_id).unwrap()
+    );
+}
+
+#[test]
+fn learning_import_sqlite_picker_rejects_stale_choice_without_orphan_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let first = temp.path().join("first.sqlite");
+    let second = temp.path().join("second.sqlite");
+    write_sqlite_fixture(&first);
+    write_sqlite_fixture(&second);
+    let current = std::cell::RefCell::new(None);
+    let stale = import_access::select_sqlite_with_picker(&state, &library, || {
+        *current.borrow_mut() =
+            import_access::select_sqlite_with_picker(&state, &library, || Some(second.clone()))
+                .unwrap();
+        Some(first.clone())
+    });
+    assert!(stale.is_err());
+    let selected = current.into_inner().unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &selected.selection_id).is_ok()
+    );
+    assert!(!import_access::release_sqlite_selection(
+        &state,
+        &library,
+        &uuid::Uuid::new_v4().to_string()
+    )
+    .unwrap());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_sqlite_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_picker_invalidates_old_scope_after_library_switch() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_library = temp.path().join("library-a");
+    let state = test_state(&first_library);
+    let library_a = state.active_library_id().unwrap();
+    let source = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&source);
+    let selected_a =
+        import_access::select_sqlite_with_picker(&state, &library_a, || Some(source.clone()))
+            .unwrap()
+            .unwrap();
+    let second_library = temp.path().join("library-b");
+    state
+        .change_library(crate::models::StorageChangeRequest {
+            mode: "create".into(),
+            path: second_library.to_string_lossy().into_owned(),
+            name: Some("B".into()),
+        })
+        .unwrap();
+    let library_b = state.active_library_id().unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_a, &selected_a.selection_id)
+            .is_err()
+    );
+    assert!(import_access::current_sqlite_selection(&state, &library_b)
+        .unwrap()
+        .is_none());
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_a.selection_id)
+            .unwrap()
+    );
+    let selected_b =
+        import_access::select_sqlite_with_picker(&state, &library_b, || Some(source.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_a.selection_id)
+            .unwrap()
+    );
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .is_ok()
+    );
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .unwrap()
+    );
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .is_err()
+    );
+    state
+        .change_library(crate::models::StorageChangeRequest {
+            mode: "open".into(),
+            path: first_library.to_string_lossy().into_owned(),
+            name: None,
+        })
+        .unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_a, &selected_a.selection_id)
+            .is_err()
+    );
+    assert!(import_access::current_sqlite_selection(&state, &library_a)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn learning_import_sqlite_picker_discards_selection_if_scope_changes_during_dialog() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&path);
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || {
+            *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+            Some(path.clone())
+        })
+        .is_err()
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn learning_import_access_bind_preview_prepare_without_overwrite_on_conflict() {
     let temp = tempfile::tempdir().unwrap();

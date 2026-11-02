@@ -17,6 +17,98 @@ fn scope(state: &AppState) -> source_profiles::LibraryScope {
 }
 
 #[test]
+fn learning_source_sqlite_identity_upgrade_is_atomic() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    state.with_library(|db, _| {
+        db.execute_batch("DROP TABLE IF EXISTS learning_source_sqlite_bindings; UPDATE schema_meta SET value='37' WHERE key='schema_version'; CREATE TRIGGER reject_v38 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='38' BEGIN SELECT RAISE(ABORT,'rollback'); END;").unwrap();
+        assert!(super::migrate(db).is_err());
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).unwrap(), "37");
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='learning_source_sqlite_bindings'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        db.execute_batch("DROP TRIGGER reject_v38").unwrap();
+        super::migrate(db)?;
+        super::migrate(db)?;
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).unwrap(), "39");
+        Ok(())
+    }).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_source_sqlite_identity_is_bound_to_selected_file_and_restore_epoch() {
+    use super::source_sqlite::bind_selected;
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let first_path = temp.path().join("first.db");
+    let second_path = temp.path().join("second.db");
+    fs::write(&first_path, b"synthetic source").unwrap();
+    fs::write(&second_path, b"synthetic source").unwrap();
+    let scope = scope(&state);
+    let first = bind_selected(&state, &scope, &first_path).unwrap();
+    let repeat = bind_selected(&state, &scope, &first_path).unwrap();
+    let second = bind_selected(&state, &scope, &second_path).unwrap();
+    assert_eq!(first.profile_id(), repeat.profile_id());
+    assert_ne!(first.profile_id(), second.profile_id());
+    assert!(first.check(&state).is_ok());
+    assert!(fs::rename(&first_path, temp.path().join("renamed.db")).is_err());
+    let hardlink = temp.path().join("hardlink.db");
+    fs::hard_link(&second_path, &hardlink).unwrap();
+    assert!(second.check(&state).is_err());
+    assert!(bind_selected(&state, &scope, &hardlink).is_err());
+    let old_epoch = first.epoch().to_string();
+    let backup = temp.path().join("backup.dccassetlib");
+    state
+        .with_library(|db, base| crate::backup::export_library(db, base, &backup))
+        .unwrap();
+    state.restore_backup_for_task(&backup).unwrap();
+    assert!(first.check(&state).is_err());
+    let fresh = bind_selected(
+        &state,
+        &super::source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap(),
+        &first_path,
+    )
+    .unwrap();
+    assert_eq!(fresh.profile_id(), first.profile_id());
+    assert_ne!(fresh.epoch(), old_epoch);
+}
+
+#[cfg(windows)]
+#[test]
+fn learning_source_sqlite_identity_failure_does_not_leave_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let path = temp.path().join("selected.db");
+    fs::write(&path, b"synthetic source").unwrap();
+    state.with_library(|db, _| {
+        db.execute_batch("CREATE TRIGGER reject_sqlite_binding BEFORE INSERT ON learning_source_sqlite_bindings BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+        Ok(())
+    }).unwrap();
+    assert!(super::source_sqlite::bind_selected(&state, &scope(&state), &path).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_sqlite_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn learning_source_scope_is_invalidated_after_task_backup_restore() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
@@ -82,7 +174,7 @@ fn learning_source_vault_binding_upgrade_rolls_back_and_preserves_profile() {
         db.execute_batch("DROP TRIGGER reject_v33;").unwrap();
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "37");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "39");
         Ok(())
     }).unwrap();
 }
@@ -101,7 +193,7 @@ fn learning_source_profiles_migrate_v30_once_and_preserve_existing_notes_and_arc
         let archived = archive_bytes(db, base, &ArchiveSource { profile_id:&old_profile, source_key:"old/vault.md", version_key:"v1" }, raw, &sha)?;
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "37");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "39");
         assert_eq!(knowledge::get(db, &note.id)?.document, document);
         assert_eq!(read_archive(db, base, &archived.id)?, raw);
         assert_eq!(db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r.get::<_,i64>(0)).unwrap(), 0);

@@ -42,6 +42,16 @@ export type ImportItemView={
   id:string;batchId:string;status:string;conflictCode:string|null;targetId:string|null;
   sourceSha256:string;stageRelative:string|null;relativePath?:string;
 };
+export type CourseImportBatchSummary={id:string;status:string;createdAt:string;staged:boolean;committed:number;conflicts:number;reverted:boolean;revertDamaged:boolean;currentSourceEpoch:string|null};
+export type CourseBatchCursor={createdAt:string;id:string};
+export type CourseImportEntry={id:string;entryKind:"course"|"series";sourceId:string;status:"committed"|"conflict";conflictCode:string|null;targetId:string|null};
+export type CourseRevertReport={batchId:string;reverted:string[];kept:{entryId:string;outcome:string;targetKind:"course"|"series";targetId:string|null}[];archivesKept:true};
+export type CourseImportEntryPage={items:CourseImportEntry[];hasMore:boolean;revertReport:CourseRevertReport|null;revertDamaged:boolean};
+export type CourseSourceBinding={selectionId:string;libraryId:string;profileId:string;epoch:string;fileName:string};
+export type CourseImportBinding={sourceItemId:string;mediaId:string};
+export type CourseImportProgress={positionMs:number;durationMs:number|null;rate:number;completed:boolean};
+export type CourseSqlitePreview={previewId:string;selectionId:string;sourceFingerprint:string;targetFingerprint:string;expiresAt:number;series:{id:string;title:string;conflictCodes?:string[];items:{id:string;title:string;mediaId:string|null;sourceProgress:CourseImportProgress|null;targetProgress:CourseImportProgress|null;conflictCodes:string[]}[]}[]};
+export type CourseSourceSeries={id:string;title:string;courseCount:number};
 
 export const learningApi={
   startExcerptTask:(expectedLibraryId:string,request:ExcerptTaskRequest)=>invoke<LibraryTask>("start_library_task",{expectedLibraryId,payload:{kind:"courseExcerpt",request:writableExcerptTask(request)}}),
@@ -91,11 +101,19 @@ export const learningApi={
   transcriptPage:(expectedLibraryId:string,courseId:string,subtitleId:string,offset=0,limit=50)=>invoke<Page<TranscriptCue>>("transcript_page",{expectedLibraryId,courseId,subtitleId,offset,limit}),
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
   bindImportSource:(expectedLibraryId:string,vault:string)=>invoke<ImportSourceBinding|null>("bind_learning_import_source",{expectedLibraryId,vault}),
+  selectCourseSource:(expectedLibraryId:string)=>invoke<CourseSourceBinding|null>("select_learning_course_source",{expectedLibraryId}),
+  currentCourseSource:(expectedLibraryId:string)=>invoke<CourseSourceBinding|null>("current_learning_course_source",{expectedLibraryId}),
+  releaseCourseSource:(expectedLibraryId:string,selectionId:string)=>invoke<boolean>("release_learning_course_source",{expectedLibraryId,selectionId}),
+  listCourseSourceSeries:(expectedLibraryId:string,selectionId:string)=>invoke<CourseSourceSeries[]>("list_learning_course_source_series",{expectedLibraryId,selectionId}),
+  previewCourseImport:(expectedLibraryId:string,selectionId:string,bindings:CourseImportBinding[],seriesIds?:string[])=>invoke<CourseSqlitePreview>("preview_learning_course_import",{expectedLibraryId,selectionId,bindings:bindings.map(({sourceItemId,mediaId})=>({sourceItemId,mediaId})),...(seriesIds?{seriesIds:[...seriesIds]}:{})}),
+  queueCourseImport:(expectedLibraryId:string,selectionId:string,previewId:string)=>invoke<LibraryTask>("queue_learning_course_import",{expectedLibraryId,selectionId,previewId}),
   pickImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string)=>invoke<ImportNotePreview|null>("pick_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot}),
   pickImportNotes:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string)=>invoke<ImportNotePreview[]|null>("pick_learning_import_notes",{expectedLibraryId,profileId,epoch,vault,selectedRoot}),
   previewImportNote:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string)=>invoke<ImportNotePreview>("preview_learning_import_note",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath}),
   queueImportPrepare:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,relativePath:string,expectedSourceSha256:string,expectedSelectionId:string,expectedTargetToken:string)=>invoke<LibraryTask>("queue_learning_import_prepare",{expectedLibraryId,profileId,epoch,vault,selectedRoot,relativePath,expectedSourceSha256,expectedSelectionId,expectedTargetToken}),
   queueImportPrepareBatch:(expectedLibraryId:string,profileId:string,epoch:string,vault:string,selectedRoot:string,notes:{relativePath:string;sourceSha256:string;targetToken:string}[],expectedSelectionId:string)=>invoke<LibraryTask>("queue_learning_import_prepare_batch",{expectedLibraryId,profileId,epoch,vault,selectedRoot,notes,expectedSelectionId}),
   listImportBatches:(expectedLibraryId:string)=>invoke<ImportBatchView[]>("list_learning_import_batches",{expectedLibraryId}),
+  listCourseImportBatches:(expectedLibraryId:string,cursor?:CourseBatchCursor|null)=>invoke<CourseImportBatchSummary[]>("list_learning_course_batches",{expectedLibraryId,cursor:cursor?{createdAt:cursor.createdAt,id:cursor.id}:null}),
+  listCourseBatchEntries:(expectedLibraryId:string,batchId:string,offset:number)=>invoke<CourseImportEntryPage>("list_learning_course_batch_entries",{expectedLibraryId,batchId,offset}),
   listImportItems:(expectedLibraryId:string,batchId:string)=>invoke<ImportItemView[]>("list_learning_import_items",{expectedLibraryId,batchId}),
 };
