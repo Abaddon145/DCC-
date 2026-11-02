@@ -320,15 +320,47 @@ pub(super) fn validate_wal_headers(
     Ok(())
 }
 
-fn single_link(meta: &fs::Metadata) -> bool {
+fn single_link(path: &Path, meta: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
+        let _ = path;
         std::os::unix::fs::MetadataExt::nlink(meta) == 1
     }
+    // `MetadataExt::number_of_links` is still unstable (`windows_by_handle`)
+    // and returns `Option<u32>` on current stable. Query the same count through
+    // `GetFileInformationByHandle`, which this crate already uses elsewhere.
     #[cfg(windows)]
     {
-        std::os::windows::fs::MetadataExt::number_of_links(meta) == 1
+        let _ = meta;
+        windows_single_link(path)
     }
+}
+
+/// Hard link count via a stable Win32 call. `nNumberOfLinks == 1` means this
+/// name is not an alias of another file. Opening or querying the count and
+/// getting anything else fails closed. The handle is dropped before the
+/// deny-write lease, and the share mode still allows a later `FILE_SHARE_READ`
+/// hold and a second read while that hold is active.
+#[cfg(windows)]
+fn windows_single_link(path: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let Ok(file) = options.open(path) else {
+        return false;
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let queried = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    queried != 0 && info.nNumberOfLinks == 1
 }
 
 /// Refuse an unmarked path before opening or hashing the database file.
@@ -348,7 +380,7 @@ pub(super) fn require_synthetic_marker(database: &Path) -> Result<(), String> {
     let marker = parent.join(SYNTHETIC_COURSE_MARKER);
     let meta = fs::symlink_metadata(&marker).map_err(|_| unmarked())?;
     if !meta.file_type().is_file()
-        || !single_link(&meta)
+        || !single_link(&marker, &meta)
         || meta.len() != SYNTHETIC_COURSE_MARKER_BODY.len() as u64
     {
         return Err(unmarked());
@@ -385,7 +417,7 @@ fn read_regular(
         return Err(isolate_failed());
     }
     let meta = fs::symlink_metadata(path).map_err(|_| isolate_failed())?;
-    if !meta.file_type().is_file() || !single_link(&meta) {
+    if !meta.file_type().is_file() || !single_link(path, &meta) {
         return Err(isolate_failed());
     }
     let len = meta.len();
@@ -582,7 +614,7 @@ fn lease_regular_file(path: &Path, required: bool) -> Result<Option<fs::File>, S
                 Ok(None)
             }
         }
-        Ok(meta) if meta.file_type().is_file() && single_link(&meta) => {
+        Ok(meta) if meta.file_type().is_file() && single_link(path, &meta) => {
             let file = super::source_markdown::open_checked_deny_write(path)
                 .map_err(|_| isolate_failed())?;
             Ok(Some(file))
@@ -723,7 +755,9 @@ fn stamp_dir(meta: &fs::Metadata) -> DirStamp {
 fn optional_file_stamp(path: &Path) -> Result<Option<FileStamp>, String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Ok(meta) if meta.file_type().is_file() && single_link(&meta) => Ok(Some(stamp_file(&meta))),
+        Ok(meta) if meta.file_type().is_file() && single_link(path, &meta) => {
+            Ok(Some(stamp_file(&meta)))
+        }
         _ => Err(isolate_failed()),
     }
 }
@@ -738,7 +772,7 @@ fn source_window(path: &Path) -> Result<SourceWindow, String> {
     }
     let marker = parent.join(SYNTHETIC_COURSE_MARKER);
     let marker_meta = fs::symlink_metadata(&marker).map_err(|_| isolate_failed())?;
-    if !marker_meta.file_type().is_file() || !single_link(&marker_meta) {
+    if !marker_meta.file_type().is_file() || !single_link(&marker, &marker_meta) {
         return Err(isolate_failed());
     }
     let journal = sidecar_name(path, "-journal");
@@ -747,7 +781,7 @@ fn source_window(path: &Path) -> Result<SourceWindow, String> {
         _ => return Err(isolate_failed()),
     }
     let database_meta = fs::symlink_metadata(path).map_err(|_| isolate_failed())?;
-    if !database_meta.file_type().is_file() || !single_link(&database_meta) {
+    if !database_meta.file_type().is_file() || !single_link(path, &database_meta) {
         return Err(isolate_failed());
     }
     let wal = optional_file_stamp(&sidecar_name(path, "-wal"))?;
