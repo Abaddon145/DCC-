@@ -26,12 +26,18 @@ Linux 测试 `synthetic_course_gate_rejects_inplace_rewrite_when_mtime_is_restor
 
 同一次 `cargo test` 为 819 通过、0 失败、2 忽略。本环境没有重跑它们。这只说明那次 CI 编过并跑过这些测试，不是对正在运行的映流进程所持 SHM 的抢锁。
 
+## Windows CI 第一轮
+
+推送 `b9ac0ca` 的 Windows validation `41422611748`：前端、Rust fmt 通过，Rust 测试 806 通过、14 失败。失败都是「合成课程来源无法只读隔离，请重试」，包括安静样本，并且新测试在侧文件搅动之前就失败了。
+
+重叠 `ReadDirectoryChangesW` 排队成功时返回值是非零（notify 的 Windows 测试也这样断言）。上一版把非零当成失败，所以监视在第一次读取之前就拒绝。这一轮改为：非零或 `ERROR_IO_PENDING` 都表示已经排队；`lpBytesReturned` 传空，字节数只在 `GetOverlappedResult` 里取。
+
 ## 仍然不做
 
 - 监视从租约之后才开始。租约开始前已经完成、并且第一次读取时字节和戳都已经稳定的替换，这次双读和监视都看不到。
 - 只改权限或扩展属性（`IN_ATTRIB`、Windows 属性/最后访问时间）不在过滤里。文件戳不含权限位。
 - Linux 上 `utimensat` 改不回目录 ctime。创建再删除侧文件之后，即便把目录 mtime 设回去，目录戳的 ctime 已经变了，上一版就会拒绝。本切片不把这个 Linux 形状说成新补上的洞。Windows 目录戳只有创建时间和最后写入时间，`SetFileTime` 可以设回去；`windows_directory_watch_rejects_sidecar_churn_when_directory_times_are_restored` 覆盖「侧文件出现又消失，目录时间被设回」后仍然失败。这则测试没有在本环境编译或运行。
-- 本环境没有编译 Windows 目标，因此 `ReadDirectoryChangesW` 路径和上面那则测试都还没有在 Windows 上执行。
+- `41422611748` 已经在 Windows 上编译并跑过 `ReadDirectoryChangesW`。那一轮在排队成功时就失败，没有进到侧文件搅动。修正后的排队判断还没有在 Windows 上再跑。本 Linux 环境仍然编不进这条路径。
 - macOS 以及其它非 Linux、非 Windows 系统没有监视。
 - 没有制造 inotify 队列溢出或 Windows 通知缓冲溢出。代码路径是失败闭合，没有单独测试。
 - 没有读取用户 Vault，没有对正在运行的映流进程抢 SHM，没有安装、NSIS、付费 AI，没有合并 main。

@@ -214,9 +214,6 @@ fn scan_inotify(buf: &[u8], names: &[Vec<u8>]) -> Result<bool, ()> {
 
 #[cfg(windows)]
 fn arm_windows(database: &Path, marker: &str) -> Result<DirectoryWatch, ()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Storage::FileSystem::ReadDirectoryChangesW;
     use windows_sys::Win32::System::Threading::CreateEventW;
     use windows_sys::Win32::System::IO::OVERLAPPED;
 
@@ -238,30 +235,12 @@ fn arm_windows(database: &Path, marker: &str) -> Result<DirectoryWatch, ()> {
         names,
         pending: false,
     };
-    watch.overlapped.hEvent = event;
-    let handle = watch.file.as_raw_handle();
-    let buffer_ptr = watch.buffer.bytes.as_mut_ptr();
-    let buffer_len = watch.buffer.bytes.len() as u32;
-    let mut transferred = 0u32;
-    let queued = unsafe {
-        ReadDirectoryChangesW(
-            handle,
-            buffer_ptr.cast(),
-            buffer_len,
-            0,
-            NOTIFY_FILTER,
-            &mut transferred,
-            &mut *watch.overlapped,
-            None,
-        )
-    };
-    if queued == 0 && unsafe { GetLastError() } == windows_sys::Win32::Foundation::ERROR_IO_PENDING
-    {
-        watch.pending = true;
-        return Ok(watch);
+    // A queued overlapped read returns nonzero. Treating that as failure
+    // rejected every quiet snapshot on Windows CI run 41422611748.
+    if queue_changes(&mut watch).is_err() {
+        return Err(());
     }
-    watch.pending = false;
-    Err(())
+    Ok(watch)
 }
 
 #[cfg(windows)]
@@ -311,12 +290,9 @@ fn windows_names(database: &Path, marker: &str) -> Result<Vec<Vec<u16>>, ()> {
 #[cfg(windows)]
 fn check_windows(watch: &mut DirectoryWatch) -> Result<(), ()> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::ReadDirectoryChangesW;
-    use windows_sys::Win32::System::Threading::{ResetEvent, WaitForSingleObject};
-    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::System::IO::GetOverlappedResult;
 
     for _ in 0..64 {
         if watch.pending {
@@ -347,36 +323,51 @@ fn check_windows(watch: &mut DirectoryWatch) -> Result<(), ()> {
                 return Err(());
             }
         }
-        unsafe {
-            if ResetEvent(watch.event) == 0 {
-                return Err(());
-            }
+        if queue_changes(watch).is_err() {
+            return Err(());
         }
-        *watch.overlapped = OVERLAPPED::default();
-        watch.overlapped.hEvent = watch.event;
-        let handle = watch.file.as_raw_handle();
-        let buffer_ptr = watch.buffer.bytes.as_mut_ptr();
-        let buffer_len = watch.buffer.bytes.len() as u32;
-        let mut transferred = 0u32;
-        let queued = unsafe {
-            ReadDirectoryChangesW(
-                handle,
-                buffer_ptr.cast(),
-                buffer_len,
-                0,
-                NOTIFY_FILTER,
-                &mut transferred,
-                &mut *watch.overlapped,
-                None,
-            )
-        };
-        if queued == 0 && unsafe { GetLastError() } == ERROR_IO_PENDING {
-            watch.pending = true;
-            continue;
-        }
-        watch.pending = false;
-        return Err(());
     }
+    Err(())
+}
+
+/// Queue one overlapped directory read. Nonzero means the read was queued.
+/// `lpBytesReturned` stays null because that out-parameter is undefined until
+/// `GetOverlappedResult`.
+#[cfg(windows)]
+fn queue_changes(watch: &mut DirectoryWatch) -> Result<(), ()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_IO_PENDING};
+    use windows_sys::Win32::Storage::FileSystem::ReadDirectoryChangesW;
+    use windows_sys::Win32::System::Threading::ResetEvent;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    unsafe {
+        if ResetEvent(watch.event) == 0 {
+            return Err(());
+        }
+    }
+    *watch.overlapped = OVERLAPPED::default();
+    watch.overlapped.hEvent = watch.event;
+    let handle = watch.file.as_raw_handle();
+    let buffer_ptr = watch.buffer.bytes.as_mut_ptr();
+    let buffer_len = watch.buffer.bytes.len() as u32;
+    let queued = unsafe {
+        ReadDirectoryChangesW(
+            handle,
+            buffer_ptr.cast(),
+            buffer_len,
+            0,
+            NOTIFY_FILTER,
+            std::ptr::null_mut(),
+            &mut *watch.overlapped,
+            None,
+        )
+    };
+    if queued != 0 || unsafe { GetLastError() } == ERROR_IO_PENDING {
+        watch.pending = true;
+        return Ok(());
+    }
+    watch.pending = false;
     Err(())
 }
 
