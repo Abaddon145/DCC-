@@ -3,10 +3,10 @@ import {beforeEach,expect,it,vi} from "vitest";
 import {CourseAnalysisPanel} from "./CourseAnalysisPanel";
 import {learningApi} from "./api";
 import {api} from "../../lib/api";
-import type {CourseAnalysisDetail,CourseAnalysisPreview,CourseAnalysisHistoryItem,CourseAnalysisResult} from "./types";
+import type {CourseAnalysisDetail,CourseAnalysisPreview,CourseAnalysisHistoryItem,CourseAnalysisResult,WhisperComponentStatus} from "./types";
 import type {LibraryTask} from "../../types";
 
-vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn(),transcriptionComponents:vi.fn()}}));
 vi.mock("../../lib/api",()=>({api:{startLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),cancelLibraryTask:vi.fn(),getLibraryTask:vi.fn()}}));
 const now=Math.floor(Date.now()/1000);
 const preview:CourseAnalysisPreview={previewId:"preview",courseId:"course",fingerprint:"a".repeat(64),subtitleId:"subtitle",frameIds:["frame"],model:"deepseek-chat",templateId:"general",templateVersion:1,promptVersion:"dcc-course-v1",createdAt:now,expiresAt:now+86400,stages:[{key:"s1",startMs:10000,endMs:12000,cached:true,tokensMax:5000},{key:"s2",startMs:40000,endMs:42000,cached:false,tokensMax:10000}],tokensMax:10000,warnings:["不上传整段视频"]};
@@ -26,6 +26,7 @@ beforeEach(()=>{
   vi.mocked(api.startLibraryTask).mockResolvedValue(task);
   vi.mocked(api.cancelLibraryTask).mockResolvedValue(undefined);
   vi.mocked(api.getLibraryTask).mockResolvedValue(task);
+  vi.mocked(learningApi.transcriptionComponents).mockResolvedValue({version:"1.9.1",modelRevision:"fixed",toolReady:false,toolMessage:"工具未安装",models:[]});
 });
 it("previews explicit materials and costs but sends no paid task until separate consent",async()=>{
   render(<CourseAnalysisPanel {...props}/>);
@@ -35,6 +36,9 @@ it("previews explicit materials and costs but sends no paid task until separate 
   fireEvent.click(screen.getByRole("button",{name:"预览分段分析"}));
   await screen.findByText(/本次上限 10,000 Token/);
   expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[12500,30000]});
+  expect(learningApi.transcriptionComponents).not.toHaveBeenCalled();
+  expect(screen.getByText(/不把整段画面当作视觉分析/)).toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"开始本地转写"})).toBeNull();
   const start=screen.getByRole("button",{name:"确认并开始分析"});
   expect(start).toBeDisabled();
   expect(screen.getByText(/1 个阶段可复用缓存/)).toBeInTheDocument();
@@ -152,4 +156,52 @@ it("pages a long cost preview instead of rendering every stage at once",async()=
   fireEvent.click(within(region).getByRole("button",{name:"下一页预览"}));
   expect(within(region).getAllByRole("listitem")).toHaveLength(1);
   expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+const whisperReady:WhisperComponentStatus={version:"1.9.1",modelRevision:"fixed",toolReady:true,toolMessage:"已核验",models:[{id:"base",label:"Whisper Base",bytes:147951465,url:"https://example.invalid/base.bin",installed:true,message:"已核验"},{id:"small",label:"Whisper Small",bytes:487601967,url:"https://example.invalid/small.bin",installed:false,message:"模型尚未安装"}]};
+it("offers checked local Whisper only when no usable subtitle exists and does not start paid analysis",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);
+  vi.mocked(learningApi.transcriptionComponents).mockResolvedValue(whisperReady);
+  render(<CourseAnalysisPanel {...props}/>);
+  expect(await screen.findByRole("button",{name:"开始本地转写"})).toBeDisabled();
+  expect(screen.getByText(/不会自动下载/)).toBeInTheDocument();
+  expect(learningApi.transcriptionComponents).toHaveBeenCalledWith("lib");
+  fireEvent.click(screen.getByRole("checkbox",{name:/确认使用本机 CPU/}));
+  fireEvent.click(screen.getByRole("button",{name:"开始本地转写"}));
+  await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"courseTranscription",request:{courseId:"course",modelId:"base"}},"lib"));
+  expect(learningApi.prepareCourseAnalysis).not.toHaveBeenCalled();
+});
+it("keeps frame-only preview available when Whisper is not installed and never downloads a model",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);
+  render(<CourseAnalysisPanel {...props}/>);
+  expect(await screen.findByText(/工具未安装/)).toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"开始本地转写"})).toBeNull();
+  fireEvent.change(screen.getByLabelText("采样时间（秒）"),{target:{value:"12.5"}});
+  fireEvent.click(screen.getByRole("button",{name:"预览分段分析"}));
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:null,frameTimesMs:[12500]});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("selects a finished local transcript without sending a paid preview",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValueOnce([]);
+  vi.mocked(learningApi.transcriptionComponents).mockResolvedValue(whisperReady);
+  const running:LibraryTask={...task,id:"whisper",status:"running",payload:{kind:"courseTranscription",request:{courseId:"course",modelId:"base"}}};
+  const done:LibraryTask={...running,status:"completed",result:{courseId:"course",subtitleId:"generated"}};
+  vi.mocked(api.startLibraryTask).mockResolvedValue(running);
+  vi.mocked(api.getLibraryTask).mockResolvedValue(done);
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"generated",courseId:"course",name:"whisper-base.srt",format:"srt",sha256:"b".repeat(64),cueCount:4}]);
+  render(<CourseAnalysisPanel {...props}/>);
+  fireEvent.click(await screen.findByRole("checkbox",{name:/确认使用本机 CPU/}));
+  fireEvent.click(screen.getByRole("button",{name:"开始本地转写"}));
+  expect(await screen.findByRole("option",{name:/whisper-base/})).toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"开始本地转写"})).toBeNull();
+  expect(learningApi.prepareCourseAnalysis).not.toHaveBeenCalled();
+  expect(api.startLibraryTask).toHaveBeenCalledTimes(1);
+});
+it("prefers a subtitle with cues over an empty track and does not offer Whisper",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"empty",courseId:"course",name:"空字幕.srt",format:"srt",sha256:"c".repeat(64),cueCount:0},{id:"subtitle",courseId:"course",name:"学习字幕.srt",format:"srt",sha256:"a".repeat(64),cueCount:2}]);
+  render(<CourseAnalysisPanel {...props}/>);
+  expect(await screen.findByRole("option",{name:/学习字幕/})).toBeInTheDocument();
+  expect(screen.getByLabelText("分析字幕")).toHaveValue("subtitle");
+  expect(screen.queryByRole("region",{name:"本地转写材料"})).toBeNull();
+  expect(learningApi.transcriptionComponents).not.toHaveBeenCalled();
 });

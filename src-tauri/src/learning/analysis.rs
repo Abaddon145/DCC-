@@ -398,6 +398,12 @@ pub(super) fn source_scope_changed(
         Err(std::sync::TryLockError::Poisoned(_)) => true,
     }
 }
+pub(super) fn preferred_subtitle_id(rows: &[super::models::LearningSubtitle]) -> Option<String> {
+    rows.iter()
+        .rev()
+        .find(|row| row.cue_count > 0)
+        .map(|row| row.id.clone())
+}
 pub(super) fn source_file_id(db: &rusqlite::Connection, media: &str) -> Result<String, String> {
     db.query_row(
         "SELECT f.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id AND f.entry_id=e.id AND f.role='main' WHERE e.id=?1 AND e.deleted_at IS NULL AND e.kind='video'",
@@ -429,9 +435,9 @@ pub(super) fn live_source_controlled(
     let subtitle_id = if let Some(id) = subtitle {
         Some(id.to_owned())
     } else if choose_default {
-        super::subtitles::list(&db, &course.id)?
-            .last()
-            .map(|s| s.id.clone())
+        // Prefer the newest imported track that actually has cues. An empty
+        // file is not a text source and must not block frame-only analysis.
+        preferred_subtitle_id(&super::subtitles::list(&db, &course.id)?)
     } else {
         None
     };
