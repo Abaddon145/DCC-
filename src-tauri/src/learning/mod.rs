@@ -140,7 +140,7 @@ pub mod course_batch;
 mod course_batch_tests;
 #[path = "course_import_stub.rs"]
 pub mod course_import;
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 #[allow(dead_code)]
 mod course_import_legacy;
 #[cfg(all(test, windows))]
@@ -257,7 +257,7 @@ mod source_markdown_tests;
 pub mod source_profiles;
 #[cfg(test)]
 mod source_profiles_tests;
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 #[allow(dead_code)]
 mod source_sqlite;
 pub mod store;

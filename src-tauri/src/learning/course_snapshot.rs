@@ -3,7 +3,9 @@
 //! `open_isolated_readonly` is the synthetic gate used by course UI commands: a sibling
 //! marker file is required, sidecars are fail-closed, and SQLite is opened only on a
 //! temporary copy. On Windows, an existing `-shm` is held deny-write before that open.
-//! `open` remains the older Windows lease helper for tests and is not the course UI path.
+//! The two reads also compare marker and sidecar presence, file identity, and the parent
+//! directory stamp, so a name that appears and disappears between them fails closed.
+//! `open` is the older unmarked copy helper and is compiled only into Windows tests.
 use rusqlite::{
     backup::{Backup, StepResult},
     config::DbConfig,
@@ -17,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 pub(super) struct LockedSnapshot {
     pub connection: Connection,
     pub database: fs::File,
@@ -26,7 +28,7 @@ pub(super) struct LockedSnapshot {
     _directories: Vec<fs::File>,
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 impl LockedSnapshot {
     pub(super) fn recheck(&self) -> Result<(), String> {
         let absent = |file: &Path| matches!(fs::symlink_metadata(file),Err(error) if error.kind()==std::io::ErrorKind::NotFound);
@@ -44,14 +46,14 @@ impl LockedSnapshot {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     name.into()
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 pub(super) fn open(path: &Path) -> Result<LockedSnapshot, String> {
     let failed = || "无法生成课程来源副本，请关闭映流后重试".to_string();
     let started = Instant::now();
@@ -566,8 +568,164 @@ fn acquire_product_shm_lease(database: &Path) -> Result<ShmDenyWriteLease, Strin
     }
 }
 
+/// Identity of one regular file. Timestamps that a read can change are omitted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    mtime_sec: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    nlink: u64,
+    #[cfg(windows)]
+    attributes: u32,
+    #[cfg(windows)]
+    created: u64,
+    #[cfg(windows)]
+    written: u64,
+}
+
+/// Parent directory identity. Creating or removing a marker or sidecar updates it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DirStamp {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    len: u64,
+    #[cfg(unix)]
+    mtime_sec: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    ctime_sec: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(windows)]
+    created: u64,
+    #[cfg(windows)]
+    written: u64,
+}
+
+/// Marker, database, and paired sidecars as seen at one end of the dual-read window.
+#[derive(Clone, PartialEq, Eq)]
+struct SourceWindow {
+    directory: DirStamp,
+    marker: FileStamp,
+    database: FileStamp,
+    wal: Option<FileStamp>,
+    shm: Option<FileStamp>,
+}
+
+fn stamp_file(meta: &fs::Metadata) -> FileStamp {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        FileStamp {
+            len: meta.len(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            nlink: meta.nlink(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        FileStamp {
+            len: meta.len(),
+            attributes: meta.file_attributes(),
+            created: meta.creation_time(),
+            written: meta.last_write_time(),
+        }
+    }
+}
+
+fn stamp_dir(meta: &fs::Metadata) -> DirStamp {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        DirStamp {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime_sec: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        DirStamp {
+            created: meta.creation_time(),
+            written: meta.last_write_time(),
+        }
+    }
+}
+
+fn optional_file_stamp(path: &Path) -> Result<Option<FileStamp>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(meta) if meta.file_type().is_file() && single_link(&meta) => Ok(Some(stamp_file(&meta))),
+        _ => Err(isolate_failed()),
+    }
+}
+
+/// Presence and identity of the marker and sidecars. Does not read database bytes.
+fn source_window(path: &Path) -> Result<SourceWindow, String> {
+    require_synthetic_marker(path)?;
+    let parent = path.parent().ok_or_else(isolate_failed)?;
+    let parent_meta = fs::symlink_metadata(parent).map_err(|_| isolate_failed())?;
+    if !parent_meta.file_type().is_dir() {
+        return Err(isolate_failed());
+    }
+    let marker = parent.join(SYNTHETIC_COURSE_MARKER);
+    let marker_meta = fs::symlink_metadata(&marker).map_err(|_| isolate_failed())?;
+    if !marker_meta.file_type().is_file() || !single_link(&marker_meta) {
+        return Err(isolate_failed());
+    }
+    let journal = sidecar_name(path, "-journal");
+    match fs::symlink_metadata(&journal) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(isolate_failed()),
+    }
+    let database_meta = fs::symlink_metadata(path).map_err(|_| isolate_failed())?;
+    if !database_meta.file_type().is_file() || !single_link(&database_meta) {
+        return Err(isolate_failed());
+    }
+    let wal = optional_file_stamp(&sidecar_name(path, "-wal"))?;
+    let shm = optional_file_stamp(&sidecar_name(path, "-shm"))?;
+    if wal.is_some() != shm.is_some() {
+        return Err(isolate_failed());
+    }
+    Ok(SourceWindow {
+        directory: stamp_dir(&parent_meta),
+        marker: stamp_file(&marker_meta),
+        database: stamp_file(&database_meta),
+        wal,
+        shm,
+    })
+}
+
+fn require_same_window(path: &Path, anchor: &SourceWindow) -> Result<(), String> {
+    if source_window(path)? != *anchor {
+        return Err(isolate_failed());
+    }
+    Ok(())
+}
+
 /// Copy a marked synthetic database and open SQLite only on that copy.
-/// `interfere` runs between the two source reads so a torn sidecar fails closed.
+/// `interfere` runs between the two source reads. A content digest change, or a
+/// marker/sidecar that appears and disappears, fails closed before the copy is kept.
 pub(super) fn open_isolated_readonly(
     path: &Path,
     timeout: Duration,
@@ -588,12 +746,15 @@ fn open_isolated_readonly_leased(
     require_synthetic_marker(path)?;
     let held = lease(path)?;
     let started = Instant::now();
+    let anchor = source_window(path)?;
     let first = read_bundle(path, started, timeout)?;
+    require_same_window(path, &anchor)?;
     interfere();
     let second = read_bundle(path, started, timeout)?;
     if second.digest != first.digest {
         return Err(isolate_failed());
     }
+    require_same_window(path, &anchor)?;
     let temp = tempfile::tempdir().map_err(|_| isolate_failed())?;
     let copied = temp.path().join("snapshot.db");
     write_copy(&copied, &second.database, started, timeout)?;
@@ -617,6 +778,7 @@ fn open_isolated_readonly_leased(
     if after.digest != first.digest {
         return Err(isolate_failed());
     }
+    require_same_window(path, &anchor)?;
     drop(held);
     Ok(snapshot)
 }

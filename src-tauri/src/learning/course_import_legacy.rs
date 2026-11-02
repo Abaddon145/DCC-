@@ -1,8 +1,7 @@
 //! Windows lease tests for the older offline copy.
 //!
-//! Course UI commands and the commitCourse worker do not call this module.
-//! They use the marked synthetic session. These helpers can still copy a database
-//! chosen by a test, including one without the synthetic marker.
+//! This module is compiled only into Windows test builds. Course UI commands and the
+//! commitCourse worker use the marked synthetic session and cannot call these helpers.
 use super::{
     course_apply, course_snapshot,
     import_access::SqliteAccessGrant,
