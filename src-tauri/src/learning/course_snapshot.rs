@@ -2,9 +2,12 @@
 //!
 //! `open_isolated_readonly` is the synthetic gate used by course UI commands: a sibling
 //! marker file is required, sidecars are fail-closed, and SQLite is opened only on a
-//! temporary copy. On Windows, an existing `-shm` is held deny-write before that open.
-//! The two reads also compare marker and sidecar presence, file identity, and the parent
-//! directory stamp, so a name that appears and disappears between them fails closed.
+//! temporary copy. On Windows, the main database and any existing `-wal` / `-shm` are
+//! held deny-write (`FILE_SHARE_READ`) before the two reads. A file that is already open
+//! for write fails that lease. Missing sidecars are not created. Non-Windows builds do
+//! not take the lease. The two reads also compare marker and sidecar presence, file
+//! identity, and the parent directory stamp, so a name that appears and disappears
+//! between them fails closed.
 //! `open` is the older unmarked copy helper and is compiled only into Windows tests.
 use rusqlite::{
     backup::{Backup, StepResult},
@@ -526,45 +529,90 @@ fn open_copied(path: &Path, has_wal: bool) -> Result<Connection, String> {
     Ok(connection)
 }
 
-/// Windows deny-write hold on an existing `-shm`. Dropping it releases the share mode.
-/// Non-Windows builds do not take this lease. Missing `-shm` is not an error and is not created.
-struct ShmDenyWriteLease {
+/// Windows deny-write holds for the main database and any existing `-wal` / `-shm`.
+/// Dropping the lease releases the share mode. Non-Windows builds hold nothing.
+/// Missing sidecars are not an error and are not created.
+struct SyntheticDenyWriteLease {
     #[cfg(windows)]
-    _file: Option<fs::File>,
+    _files: Vec<fs::File>,
 }
 
-impl ShmDenyWriteLease {
+impl SyntheticDenyWriteLease {
     fn none() -> Self {
         Self {
             #[cfg(windows)]
-            _file: None,
+            _files: Vec::new(),
         }
     }
 }
 
-/// When `-shm` already exists, hold it with `FILE_SHARE_READ` before any SQLite open.
-/// A writer that already has the file open for write makes this fail closed.
-/// The marker check happens first, so an unmarked database is not opened here.
-fn acquire_product_shm_lease(database: &Path) -> Result<ShmDenyWriteLease, String> {
+/// Parent directory in the `\\?\` form `open_checked_deny_write` compares against
+/// `GetFinalPathNameByHandleW`. The file name is not resolved through a symlink.
+#[cfg(windows)]
+fn canonical_database_path(database: &Path) -> Result<PathBuf, String> {
+    let name = database.file_name().ok_or_else(isolate_failed)?;
+    let parent = database
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(isolate_failed)?;
+    crate::media_access::reject_links(database).map_err(|_| isolate_failed())?;
+    let root = parent.canonicalize().map_err(|_| isolate_failed())?;
+    if root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .starts_with(r"\\?\unc\")
+    {
+        return Err(isolate_failed());
+    }
+    crate::media_access::reject_links(&root).map_err(|_| isolate_failed())?;
+    let path = root.join(name);
+    crate::media_access::reject_links(&path).map_err(|_| isolate_failed())?;
+    Ok(path)
+}
+
+/// `required` is the main database. Sidecars use `required = false` so a missing
+/// name stays missing. A directory, link, or extra hard link fails closed.
+#[cfg(windows)]
+fn lease_regular_file(path: &Path, required: bool) -> Result<Option<fs::File>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if required {
+                Err(isolate_failed())
+            } else {
+                Ok(None)
+            }
+        }
+        Ok(meta) if meta.file_type().is_file() && single_link(&meta) => {
+            let file = super::source_markdown::open_checked_deny_write(path)
+                .map_err(|_| isolate_failed())?;
+            Ok(Some(file))
+        }
+        _ => Err(isolate_failed()),
+    }
+}
+
+/// Hold the main database, and `-wal` / `-shm` when they already exist, with
+/// `FILE_SHARE_READ` before any SQLite open. A writer that already has one of
+/// those files open for write makes this fail closed. The marker check happens
+/// first, so an unmarked database is not opened here. Non-Windows builds return
+/// an empty lease and do not create sidecars.
+fn acquire_product_deny_write_lease(database: &Path) -> Result<SyntheticDenyWriteLease, String> {
     #[cfg(windows)]
     {
-        let shm = sidecar_name(database, "-shm");
-        match fs::symlink_metadata(&shm) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(ShmDenyWriteLease::none())
+        let database = canonical_database_path(database)?;
+        let mut files = Vec::with_capacity(3);
+        files.push(lease_regular_file(&database, true)?.ok_or_else(isolate_failed)?);
+        for suffix in ["-wal", "-shm"] {
+            if let Some(file) = lease_regular_file(&sidecar_name(&database, suffix), false)? {
+                files.push(file);
             }
-            Ok(meta) if meta.file_type().is_file() && single_link(&meta) => {
-                let file = super::source_markdown::open_checked_deny_write(&shm)
-                    .map_err(|_| isolate_failed())?;
-                Ok(ShmDenyWriteLease { _file: Some(file) })
-            }
-            _ => Err(isolate_failed()),
         }
+        Ok(SyntheticDenyWriteLease { _files: files })
     }
     #[cfg(not(windows))]
     {
         let _ = database;
-        Ok(ShmDenyWriteLease::none())
+        Ok(SyntheticDenyWriteLease::none())
     }
 }
 
@@ -724,21 +772,23 @@ fn require_same_window(path: &Path, anchor: &SourceWindow) -> Result<(), String>
 }
 
 /// Copy a marked synthetic database and open SQLite only on that copy.
-/// `interfere` runs between the two source reads. A content digest change, or a
-/// marker/sidecar that appears and disappears, fails closed before the copy is kept.
+/// `interfere` runs between the two source reads, while the Windows deny-write
+/// lease is still held. A content digest change, a marker/sidecar that appears
+/// and disappears, or a database / `-wal` / `-shm` that is already open for
+/// write on Windows, fails closed before the copy is kept.
 pub(super) fn open_isolated_readonly(
     path: &Path,
     timeout: Duration,
     interfere: impl FnOnce(),
 ) -> Result<Connection, String> {
-    open_isolated_readonly_leased(path, timeout, interfere, acquire_product_shm_lease)
+    open_isolated_readonly_leased(path, timeout, interfere, acquire_product_deny_write_lease)
 }
 
 fn open_isolated_readonly_leased(
     path: &Path,
     timeout: Duration,
     interfere: impl FnOnce(),
-    lease: impl FnOnce(&Path) -> Result<ShmDenyWriteLease, String>,
+    lease: impl FnOnce(&Path) -> Result<SyntheticDenyWriteLease, String>,
 ) -> Result<Connection, String> {
     if timeout.is_zero() {
         return Err(isolate_failed());
@@ -802,7 +852,7 @@ mod lease_gate_tests {
             || {},
             |_| {
                 called.set(true);
-                Ok(ShmDenyWriteLease::none())
+                Ok(SyntheticDenyWriteLease::none())
             },
         )
         .unwrap_err();
@@ -852,7 +902,7 @@ mod lease_gate_tests {
         fs::write(&path, FIXTURE).unwrap();
         let shm = sidecar_name(&path, "-shm");
         fs::write(&shm, b"shm-bytes").unwrap();
-        let lease = acquire_product_shm_lease(&path).unwrap();
+        let lease = acquire_product_deny_write_lease(&path).unwrap();
         assert_eq!(fs::read(&shm).unwrap(), b"shm-bytes");
         let mut contested = fs::OpenOptions::new();
         contested
@@ -860,7 +910,195 @@ mod lease_gate_tests {
             .write(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
         assert!(contested.open(&shm).is_err());
+        assert!(contested.open(&path).is_err());
         drop(lease);
         assert!(contested.open(&shm).is_ok());
+    }
+
+    /// Not executed on Linux CI. The product lease uses `FILE_SHARE_READ` on the
+    /// main database and on `-wal` / `-shm` when those names already exist.
+    /// A later write-sharing open fails; a plain read still succeeds; dropping
+    /// the lease allows the write-sharing open. Missing sidecars are not created.
+    #[cfg(windows)]
+    #[test]
+    fn windows_database_and_wal_deny_write_lease_blocks_share_write_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let wal = sidecar_name(&path, "-wal");
+        let shm = sidecar_name(&path, "-shm");
+        fs::write(&wal, b"wal-bytes").unwrap();
+        fs::write(&shm, b"shm-bytes").unwrap();
+        let lease = acquire_product_deny_write_lease(&path).unwrap();
+        assert!(!sidecar_name(&path, "-journal").exists());
+        let mut contested = fs::OpenOptions::new();
+        contested
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        assert!(contested.open(&path).is_err());
+        assert!(contested.open(&wal).is_err());
+        assert!(contested.open(&shm).is_err());
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert_eq!(fs::read(&wal).unwrap(), b"wal-bytes");
+        assert_eq!(fs::read(&shm).unwrap(), b"shm-bytes");
+        drop(lease);
+        assert!(contested.open(&path).is_ok());
+        assert!(contested.open(&wal).is_ok());
+        assert!(contested.open(&shm).is_ok());
+    }
+
+    /// Not executed on Linux CI. A quiet marked database gets a deny-write lease
+    /// and still snapshots. The lease must not create `-wal` or `-shm`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_quiet_database_lease_blocks_share_write_without_creating_sidecars() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let wal = sidecar_name(&path, "-wal");
+        let shm = sidecar_name(&path, "-shm");
+        let lease = acquire_product_deny_write_lease(&path).unwrap();
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let mut contested = fs::OpenOptions::new();
+        contested
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        assert!(contested.open(&path).is_err());
+        let snapshot = open_isolated_readonly(&path, Duration::from_secs(2), || {}).unwrap();
+        let version: i64 = snapshot
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        drop(snapshot);
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        drop(lease);
+        assert!(contested.open(&path).is_ok());
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+    }
+
+    /// Not executed on Linux CI. A writer that keeps the database open and does
+    /// not change its bytes is rejected before SQLite opens a copy.
+    #[cfg(windows)]
+    #[test]
+    fn windows_unchanged_database_writer_fails_closed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let mut writer = fs::OpenOptions::new();
+        writer
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        let held = writer.open(&path).unwrap();
+        let error = open_isolated_readonly(&path, Duration::from_secs(2), || {}).unwrap_err();
+        assert!(error.contains("无法只读隔离"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!sidecar_name(&path, "-wal").exists());
+        assert!(!sidecar_name(&path, "-shm").exists());
+        assert!(!sidecar_name(&path, "-journal").exists());
+        drop(held);
+        let snapshot = open_isolated_readonly(&path, Duration::from_secs(2), || {}).unwrap();
+        let version: i64 = snapshot
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!sidecar_name(&path, "-wal").exists());
+    }
+
+    /// Not executed on Linux CI. An existing `-wal` held open for write is
+    /// rejected even when its bytes stay put. The lease does not create `-shm`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_unchanged_wal_writer_fails_closed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let wal = sidecar_name(&path, "-wal");
+        let shm = sidecar_name(&path, "-shm");
+        fs::write(&wal, b"wal-bytes").unwrap();
+        let mut writer = fs::OpenOptions::new();
+        writer
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        let held = writer.open(&wal).unwrap();
+        let error = acquire_product_deny_write_lease(&path).unwrap_err();
+        assert!(error.contains("无法只读隔离"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert_eq!(fs::read(&wal).unwrap(), b"wal-bytes");
+        assert!(!shm.exists());
+        drop(held);
+        let lease = acquire_product_deny_write_lease(&path).unwrap();
+        assert_eq!(fs::read(&wal).unwrap(), b"wal-bytes");
+        assert!(!shm.exists());
+        drop(lease);
+        assert!(!shm.exists());
+    }
+
+    /// Linux has no `FILE_SHARE_READ` lease. An open writer is not rejected, and
+    /// the no-op lease does not create sidecars. This is the documented skip.
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_deny_write_lease_does_not_reject_an_open_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let lease = acquire_product_deny_write_lease(&path).unwrap();
+        drop(lease);
+        assert!(!sidecar_name(&path, "-wal").exists());
+        assert!(!sidecar_name(&path, "-shm").exists());
+        let _writer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let snapshot = open_isolated_readonly(&path, Duration::from_secs(2), || {}).unwrap();
+        let version: i64 = snapshot
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!sidecar_name(&path, "-wal").exists());
+        assert!(!sidecar_name(&path, "-shm").exists());
     }
 }
