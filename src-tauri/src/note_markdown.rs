@@ -366,10 +366,29 @@ pub fn export(
     let folder = format!("note-files-{}", Uuid::new_v4());
     let stage_files = stage.path().join(&folder);
     let mut text = markdown.to_string();
+    let mut raw_blocks = Vec::new();
     let mut nodes = vec![&note.document];
     let mut copied = HashSet::new();
     let mut total = 0u64;
     while let Some(node) = nodes.pop() {
+        if node["type"] == "preservedMarkdown" {
+            let id = node["attrs"]["archiveItemId"]
+                .as_str()
+                .ok_or("原文片段标识缺失")?;
+            let raw = crate::learning::note_archive::read_archive_item(db, base, id)?;
+            let label = node["attrs"]["label"].as_str().ok_or("原文片段标题缺失")?;
+            let mut escaped = String::new();
+            for ch in label.chars() {
+                if matches!(ch, '\\' | '[' | ']') {
+                    escaped.push('\\');
+                }
+                escaped.push(ch);
+            }
+            raw_blocks.push((
+                format!("[{escaped}](dccpreserved://{id})"),
+                String::from_utf8(raw).map_err(|_| "原文片段编码无效")?,
+            ));
+        }
         if node["type"] == "mindMap" {
             let map_id = node["attrs"]["id"].as_str().ok_or("导图 ID 无效")?;
             Uuid::parse_str(map_id).map_err(|_| "导图 ID 无效")?;
@@ -417,6 +436,40 @@ pub fn export(
             nodes.extend(children);
         }
     }
+    // Match the serialized document before inserting any source bytes; raw markers are never recursively expanded.
+    let mut replacements = Vec::new();
+    let mut markers = HashSet::new();
+    for (marker, raw) in &raw_blocks {
+        if !markers.insert(marker) {
+            continue;
+        }
+        let matches = text.match_indices(marker).collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err("导出正文与保留原文块不一致，请保存后重试".into());
+        }
+        for (start, _) in matches {
+            replacements.push((start, start + marker.len(), raw));
+        }
+    }
+    replacements.sort_by_key(|value| value.0);
+    let mut complete = String::new();
+    let mut cursor = 0;
+    for (start, end, raw) in replacements {
+        if start < cursor {
+            return Err("原文导出占位重叠，未写入输出文件".into());
+        }
+        if complete.len() + start - cursor + raw.len() > 8 * 1024 * 1024 {
+            return Err("含原文的Markdown导出超过8MiB，请使用笔记包".into());
+        }
+        complete.push_str(&text[cursor..start]);
+        complete.push_str(raw);
+        cursor = end;
+    }
+    if complete.len() + text.len() - cursor > 8 * 1024 * 1024 {
+        return Err("Markdown导出超过8MiB".into());
+    }
+    complete.push_str(&text[cursor..]);
+    text = complete;
     let mut output = tempfile::NamedTempFile::new_in(parent).map_err(err)?;
     output.write_all(text.as_bytes()).map_err(err)?;
     output.as_file().sync_all().map_err(err)?;

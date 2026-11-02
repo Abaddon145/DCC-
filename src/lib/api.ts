@@ -22,6 +22,8 @@ export const mediaLibraryFileUrl = (fileId: string) => `http://dcc-media.localho
 export const mediaLibraryBundleUrl = (entryId: string, logicalPath: string) => `http://dcc-media.localhost/library/bundle/${encodeURIComponent(entryId)}/${logicalPath.split("/").map(encodeURIComponent).join("/")}`;
 
 export const api = {
+  getExternalBackupSummary: (expectedLibraryId:string) => invoke<{count:number;bytes:number}>("get_external_backup_summary",{expectedLibraryId}),
+  archiveExternalVideo: (expectedLibraryId:string, entryId:string, operationId:string) => invoke<string>("archive_external_video",{expectedLibraryId,entryId,operationId}),
   startLibraryTask: (payload:LibraryTaskRequest,expectedLibraryId?:string) => invoke<LibraryTask>("start_library_task",{payload,expectedLibraryId}),
   resolveDownload: (url:string) => invoke<import("../types").DownloadInfo>("resolve_download",{url}),
   getDownloadTools: () => invoke<import("../types").DownloadTool[]>("get_download_tools"),

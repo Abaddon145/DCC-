@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssetEditor as ActualAssetEditor } from "./AssetEditor";
-import type { ComponentProps } from "react";
+import { useLayoutEffect, type ComponentProps } from "react";
 import { api } from "../lib/api";
 import type { AssetDetail, FabMetadata } from "../types";
 
@@ -19,6 +19,22 @@ describe("AssetEditor online translation", () => {
     vi.clearAllMocks();
     vi.mocked(api.getTranslationSettings).mockResolvedValue({ provider: "deepseek", configured: true, fabAutoTranslate: true, contentLanguage: "zh-CN" });
     vi.mocked(api.estimateTranslationCost).mockResolvedValue({ pendingFieldCount: 2, characters: 30, cacheHits: 1, tokensMin: 0, tokensMax: 6000, month: "2026-10", monthUsed: 500, monthLimit: 1000000, wouldExceed: false, onlineRequests: 1, baiduCharacters: 0, rows: [], warnings: [] });
+  });
+
+  it("retains a new confirmation started before the changed fingerprint effect finishes", async () => {
+    function ImmediateSave({ libraryId, submit }: { libraryId: string; submit: boolean }) {
+      useLayoutEffect(() => {
+        if (submit) screen.getByRole("button", { name: "保存素材" }).click();
+      }, [submit]);
+      return <AssetEditor asset={null} categories={[]} contentLanguage="zh-CN" expectedLibraryId={libraryId} onClose={vi.fn()} onSave={vi.fn()} />;
+    }
+    const { rerender } = render(<ImmediateSave libraryId="first" submit={false} />);
+    fireEvent.change(screen.getByLabelText(/中文名称/), { target: { value: "新素材" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存素材" })).toBeEnabled());
+    rerender(<ImmediateSave libraryId="second" submit />);
+    expect(await screen.findByRole("dialog", { name: "翻译费用确认" })).toBeInTheDocument();
+    expect(await screen.findByText(/0–6,000/)).toBeInTheDocument();
+    expect(api.estimateTranslationCost).toHaveBeenCalledWith(expect.anything(), "second");
   });
 
   it("shows_pending_fields_cache_and_reserved_interval", async () => {

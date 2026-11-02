@@ -18,8 +18,11 @@ mod knowledge;
 mod knowledge_ai;
 mod knowledge_commands;
 mod knowledge_files;
+mod learning;
 mod link_checker;
 mod media;
+mod media_access;
+mod media_archive;
 mod media_engine;
 mod media_library;
 mod model_access;
@@ -35,16 +38,35 @@ mod projects;
 mod reference_boards;
 mod reliability;
 mod runtime;
+mod search;
 mod search_syntax;
 mod state;
 mod tasks;
 mod translation;
 mod translation_service;
 mod upgrade_backup;
+mod workflow;
 
 use commands::*;
 use state::AppState;
 use tauri::Manager;
+
+#[cfg(all(windows, debug_assertions))]
+pub fn run_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::run(root)
+}
+#[cfg(all(windows, debug_assertions))]
+pub fn resume_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::resume(root)
+}
+#[cfg(all(windows, debug_assertions))]
+pub fn verify_learning_native_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::verify(root)
+}
+#[cfg(all(windows, debug_assertions))]
+pub fn run_learning_workspace_qa(root: std::path::PathBuf) -> Result<(), String> {
+    learning::native_qa::run_workspace(root)
+}
 
 pub fn run_browser_capture_host() -> Result<(), String> {
     browser_capture::native_host()
@@ -72,6 +94,8 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
             | "open_external_url"
             | "set_knowledge_editing"
             | "finish_knowledge_close"
+            | "stop_learning_playback"
+            | "set_learning_viewport"
             | "get_upgrade_backup_status"
     ) || (backup
         && command != "list_reference_boards"
@@ -88,6 +112,26 @@ fn main_window_action(label: &str, close_requested: bool) -> MainWindowAction {
     } else {
         MainWindowAction::Ignore
     }
+}
+
+fn show_startup_error(error: &str) {
+    let message = format!("素材库无法打开。\n\n{error}\n\n请检查上述原因后重新启动栈藏。");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let title: Vec<u16> = "栈藏启动失败\0".encode_utf16().collect();
+        let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("{message}");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -117,7 +161,23 @@ pub fn run() {
     if let Ok(entry) = keyring::Entry::new("DCCAssetLibrary.BaiduNetdisk", "default") {
         let _ = entry.delete_credential();
     }
-    let state = AppState::initialize().unwrap_or_else(|error| panic!("无法启动素材库：{error}"));
+    let state = match AppState::initialize() {
+        Ok(state) => state,
+        Err(error) => {
+            show_startup_error(&error);
+            return;
+        }
+    };
+    application_builder(state, None)
+        .run(context)
+        .expect("运行 Tauri 应用失败");
+}
+
+fn application_builder(
+    state: AppState,
+    qa_root: Option<std::path::PathBuf>,
+) -> tauri::Builder<tauri::Wry> {
+    let isolated_qa = qa_root.is_some();
     tauri::Builder::default()
         .register_uri_scheme_protocol("dcc-media", |context, request| {
             let path = request.uri().path().trim_matches('/');
@@ -136,25 +196,33 @@ pub fn run() {
                     .body("素材库正在安全维护".as_bytes().to_vec())
                     .unwrap();
             }
-            match state.with_library(|connection, base_dir| {
-                if id == "note" {
-                    knowledge_files::response(connection, base_dir, variant)
-                } else if id == "library" && variant == "file" {
-                    media_library::protocol_response(
-                        connection,
-                        base_dir,
-                        parts.next().unwrap_or_default(),
-                        range,
-                    )
-                } else if id == "library" && variant == "bundle" {
-                    let entry_id = parts.next().unwrap_or_default();
-                    let raw = parts.collect::<Vec<_>>().join("/");
-                    let logical = percent_encoding::percent_decode_str(&raw).decode_utf8_lossy();
-                    media_library::bundle_response(connection, base_dir, entry_id, &logical, range)
-                } else {
-                    media::protocol_response(connection, base_dir, id, variant, range)
-                }
-            }) {
+            let response = if id == "note-preview" {
+                learning::note_preview_runtime::image_route(&state, path)
+            } else {
+                state.with_library(|connection, base_dir| {
+                    if id == "note" {
+                        knowledge_files::response(connection, base_dir, variant)
+                    } else if id == "library" && variant == "file" {
+                        media_library::protocol_response(
+                            connection,
+                            base_dir,
+                            parts.next().unwrap_or_default(),
+                            range,
+                        )
+                    } else if id == "library" && variant == "bundle" {
+                        let entry_id = parts.next().unwrap_or_default();
+                        let raw = parts.collect::<Vec<_>>().join("/");
+                        let logical =
+                            percent_encoding::percent_decode_str(&raw).decode_utf8_lossy();
+                        media_library::bundle_response(
+                            connection, base_dir, entry_id, &logical, range,
+                        )
+                    } else {
+                        media::protocol_response(connection, base_dir, id, variant, range)
+                    }
+                })
+            };
+            match response {
                 Ok(response) => response,
                 Err(error) => tauri::http::Response::builder()
                     .status(404)
@@ -165,7 +233,21 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(all(windows, debug_assertions))]
+            if let Some(root) = qa_root {
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .data_directory(root.join("webview"))
+                .title("栈藏 · 隔离学习工作区验收")
+                .inner_size(1000.0, 700.0)
+                .min_inner_size(980.0, 680.0)
+                .build()?;
+                return Ok(());
+            }
             if let Err(error) = downloader::auth::clean_stale() {
                 eprintln!("下载Cookie临时文件清理失败：{error}");
             }
@@ -222,10 +304,28 @@ pub fn run() {
                     );
                     return;
                 }
-                window.app_handle().exit(0);
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                }
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(error) = learning::native_player::exit_application(&app, false) {
+                        let _ = tauri::Emitter::emit(&app, "learning-close-failed", error);
+                    }
+                });
             }
         })
-        .invoke_handler(|invoke| {
+        .invoke_handler(move |invoke| {
+            #[cfg(all(windows, debug_assertions))]
+            if isolated_qa
+                && !learning::native_qa::workspace_command_allowed(invoke.message.command())
+            {
+                invoke
+                    .resolver
+                    .reject("隔离验收禁止访问凭据、联网、安装或用户文件操作");
+                return true;
+            }
+            let _ = isolated_qa;
             let webview = invoke.message.webview();
             let interrupted = webview
                 .state::<AppState>()
@@ -262,7 +362,81 @@ pub fn run() {
             }
             let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool> =
                 Box::new(tauri::generate_handler![
+                    commands::preview_external_video,
+                    learning::commands::start_learning_playback,
+                    learning::excerpt_access::get_learning_excerpt,
+                    learning::excerpt_access::get_learning_excerpt_operation,
+                    learning::excerpt_access::list_learning_excerpt_operations,
+                    learning::excerpt_access::cancel_learning_excerpt_preview,
+                    learning::excerpt_access::cancel_learning_excerpt_operation,
+                    learning::excerpt_access::get_learning_excerpt_targets,
+                    learning::import_access::bind_learning_import_source,
+                    learning::course_import::select_learning_course_source,
+                    learning::course_import::current_learning_course_source,
+                    learning::course_import::release_learning_course_source,
+                    learning::course_import::preview_learning_course_import,
+                    learning::course_import::list_learning_course_source_series,
+                    learning::course_import::queue_learning_course_import,
+                    learning::import_access::pick_learning_import_note,
+                    learning::import_access::pick_learning_import_notes,
+                    learning::import_access::preview_learning_import_note,
+                    learning::import_access::queue_learning_import_prepare,
+                    learning::import_access::queue_learning_import_prepare_batch,
+                    learning::import_access::list_learning_import_batches,
+                    learning::course_batch::list_learning_course_batches,
+                    learning::course_batch::list_learning_course_batch_entries,
+                    learning::import_access::list_learning_import_items,
+                    learning::excerpt_board_source::prepare_learning_board_excerpt_jump,
+                    learning::project_notes::list_project_learning_notes,
+                    learning::project_notes::link_project_learning_note,
+                    learning::project_notes::unlink_project_learning_note,
+                    learning::note_preview_runtime::prepare_note_conversion_preview,
+                    learning::note_preview_runtime::read_note_conversion_block,
+                    learning::note_preview_runtime::list_learning_note_archives,
+                    learning::note_preview_runtime::read_learning_note_archive,
+                    learning::note_preview_runtime::export_learning_note_archive,
+                    learning::note_preview_runtime::get_note_conversion_preview,
+                    learning::note_preview_runtime::commit_note_preview,
+                    learning::note_preview_runtime::cancel_note_conversion_preview,
+                    learning::commands::control_learning_playback,
+                    learning::commands::get_learning_playback,
+                    learning::commands::set_learning_viewport,
+                    learning::commands::stop_learning_playback,
+                    learning::commands::ensure_learning_course,
+                    learning::commands::get_learning_course,
+                    learning::commands::list_learning_courses,
+                    learning::commands::list_learning_series,
+                    learning::commands::upsert_learning_series,
+                    learning::commands::set_learning_series_members,
+                    learning::commands::delete_learning_series,
+                    learning::commands::import_learning_subtitle,
+                    learning::commands::list_learning_subtitles,
+                    learning::commands::get_learning_transcription_components,
+                    learning::commands::import_learning_transcription_model,
+                    learning::commands::install_learning_transcription_tools,
+                    learning::commands::transcript_page,
+                    learning::commands::load_learning_subtitle,
+                    learning::commands::prepare_course_analysis,
+                    learning::commands::prepare_course_summary,
+                    learning::commands::get_course_analysis,
+                    learning::commands::list_course_analyses,
+                    commands::get_external_backup_summary,
+                    commands::commit_external_video,
+                    commands::relocate_external_video,
+                    commands::archive_external_video,
                     asset::commands::search_core_assets,
+                    asset::commands::create_asset_relation,
+                    asset::commands::delete_asset_relation,
+                    asset::commands::get_asset_graph,
+                    asset::commands::prepare_asset_analysis,
+                    asset::commands::upsert_prompt_asset,
+                    asset::commands::upsert_shot_asset,
+                    asset::commands::get_shot_asset,
+                    asset::commands::list_project_shot_assets,
+                    asset::commands::get_prompt_asset,
+                    asset::commands::trash_text_assets,
+                    asset::commands::get_asset_analysis,
+                    asset::commands::apply_asset_analysis_tags,
                     asset::commands::get_core_asset,
                     asset::commands::get_asset_scan_page,
                     asset::commands::set_core_asset_tags,
@@ -308,6 +482,8 @@ pub fn run() {
                     knowledge_commands::export_note_markdown,
                     knowledge_commands::export_note_document,
                     knowledge_commands::get_note_export_html,
+                    knowledge_commands::read_note_preserved_markdown,
+                    learning::commands::prepare_learning_note_jump,
                     knowledge_commands::export_note_map,
                     knowledge_commands::import_note_package,
                     knowledge_commands::search_note_reference_targets,
@@ -538,8 +714,6 @@ pub fn run() {
                 ]);
             handler(invoke)
         })
-        .run(context)
-        .expect("运行 Tauri 应用失败");
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 export interface SourceFileRef {kind:"image"|"assetMedia"|"mediaFile";id:string;role:string}
-export interface CoreOrigin {kind:"legacy"|"media";id:string}
-export interface Asset {id:string;name:string;assetType:"asset"|"image"|"audio"|"video"|"model";description:string;thumbnail:SourceFileRef|null;tags:string[];createdAt:string;updatedAt:string;origin:CoreOrigin;deleted:boolean}
+export interface CoreOrigin {kind:"legacy"|"media"|"entity";id:string}
+export interface Asset {id:string;name:string;assetType:"asset"|"image"|"audio"|"video"|"model"|"prompt"|"shot";description:string;thumbnail:SourceFileRef|null;tags:string[];createdAt:string;updatedAt:string;origin:CoreOrigin;deleted:boolean}
 export interface AssetFile {id:string;assetId:string;sourceRef:SourceFileRef;role:string;filename:string;extension:string;size:number;hash:string;createdAt:string;available:boolean;preview?:SourceFileRef;mediaEntryId?:string|null;logicalPath?:string|null}
 export interface AssetMetadata {fileId:string;width:number|null;height:number|null;duration:number|null;codec:string|null;fps:number|null}
 export interface AssetSource {id:string;assetId:string;sourceType:string;url:string;author:string;createdAt:string;editable:boolean}
@@ -8,7 +8,7 @@ export interface AssetVersion {id:string;assetId:string;fileId:string;version:st
 export interface AssetLink {id:string;name:string}
 export interface CoreTag {id:string;name:string;color:string;createdAt:string}
 export interface CoreAssetDetail {asset:Asset;files:AssetFile[];metadata:AssetMetadata[];sources:AssetSource[];versions:AssetVersion[];projects:AssetLink[];knowledgeLinks:AssetLink[];relatedAssets:AssetLink[];tagDetails:CoreTag[];processingHistory:{id:string;label:string;status:string;phase:string;message:string;updatedAt:string}[]}
-export interface CoreSearchRequest {query:string;assetType:string|null;source:string|null;locale:string;offset:number;limit:number}
+export interface CoreSearchRequest {query:string;assetType:string|null;source:string|null;projectId?:string|null;locale:string;offset:number;limit:number}
 export interface CoreVersionInput {assetId:string;fileId:string;version:string;note:string}
 export interface CoreSourceInput {assetId:string;sourceType:string;url:string;author:string}
 export interface Page<T> {items:T[];total:number;offset:number;limit:number}

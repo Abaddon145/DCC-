@@ -1,7 +1,30 @@
 import {describe,expect,it} from "vitest";
 import {parseNoteMarkdown,serializeNoteMarkdown} from "./noteMarkdown";
+import conversionFixtures from "./fixtures/learningMarkdown.json";
+import type {JSONContent} from "@tiptap/react";
+
+// Compare source semantics without editor-only default attributes.
+function semanticNode(node:JSONContent):JSONContent {
+  const out:JSONContent={type:node.type};
+  const key=node.type==="heading"?"level":node.type==="orderedList"?"start":node.type==="taskItem"?"checked":null;
+  if(key)out.attrs={[key]:node.attrs?.[key]};
+  if(node.text!==undefined)out.text=node.text;
+  if(node.content?.length)out.content=node.content.map(semanticNode);
+  if(node.marks?.length)out.marks=node.marks.map(mark=>mark.type==="link"?{type:mark.type,attrs:{href:mark.attrs?.href}}:{type:mark.type});
+  return out;
+}
 
 describe("portable note Markdown",()=>{
+  it.each(conversionFixtures)("shares background conversion semantics: $name",fixture=>{
+    expect(semanticNode(parseNoteMarkdown(fixture.markdown))).toEqual(fixture.document);
+  });
+  it("serializes raw archive markers and every non-contiguous learning range",()=>{
+    const result=serializeNoteMarkdown({type:"doc",content:[{type:"preservedMarkdown",attrs:{archiveItemId:"59f222de-82c9-4e8e-8352-17142811caa7",label:"保留 [块]"}},{type:"learningReference",attrs:{courseId:"596d257d-3e5c-46c4-a464-187cf180c6bd",mediaId:"b01c829f-de85-4671-8464-5e7db03edf8a",fingerprint:"a".repeat(64),ranges:[{startMs:1000,endMs:3000},{startMs:5000,endMs:6000}],label:"制作步骤"}}]});
+    expect(result).toContain("dccpreserved://59f222de-82c9-4e8e-8352-17142811caa7");
+    expect(result).toContain("保留 \\[块\\]");
+    expect(result).toContain("ranges=1000-3000,5000-6000");
+    expect(result).toContain("sha256="+"a".repeat(64));
+  });
   it("exports hierarchy independently of heading style with image links retained",()=>{
     const result=serializeNoteMarkdown({type:"doc",content:[{type:"heading",attrs:{level:1,topicDepth:0},content:[{type:"text",text:"主题"}]},{type:"paragraph",attrs:{topicDepth:1},content:[{type:"text",text:"子主题"}]},{type:"image",attrs:{topicDepth:2,src:"http://dcc-media.localhost/note/image",alt:"示例"}}]});
     expect(result).toContain("- # 主题");expect(result).toContain("    - 子主题");expect(result).toContain("        - ![示例]");

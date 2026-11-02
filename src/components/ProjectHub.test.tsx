@@ -3,12 +3,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssetDetail, CreativeProject, MediaEntry, ProjectSummary, ProjectUnit } from "../types";
 import { api } from "../lib/api";
 import { ProjectHub } from "./ProjectHub";
+import {intelligenceApi} from "../features/intelligence/api";
+import type {ShotAsset} from "../features/intelligence/types";
 
-vi.mock("../lib/api", () => ({ mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`, api: {
+vi.mock("../lib/api", () => ({ mediaLibraryBundleUrl:(id:string,path:string)=>`http://dcc-media.localhost/library/bundle/${id}/${path}`,mediaLibraryFileUrl: (id: string) => `http://dcc-media.localhost/library/file/${id}`, api: {
   listProjectAssets: vi.fn(), listProjectTasks: vi.fn(), updateProjectAssets: vi.fn(), getProjectUnitImpact: vi.fn(), listProjects: vi.fn(), getProject: vi.fn(), moveProjectTask: vi.fn(), listReferenceBoards: vi.fn(),
-  unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(),
+  unlinkProjectMedia: vi.fn().mockResolvedValue(1), searchMediaEntries: vi.fn(), saveProject: vi.fn(), setProjectShotVideo: vi.fn(), getAsset: vi.fn(), getMediaEntry:vi.fn(),
 } }));
 vi.mock("./DetailPanel", () => ({ DetailPanel: ({ asset }: { asset: AssetDetail }) => <aside className="detail-panel" aria-label="项目素材详情">{asset.name}</aside> }));
+vi.mock("../features/intelligence/api",()=>({intelligenceApi:{listShots:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:200})}}));
+vi.mock("../features/intelligence/shot/ShotPanel",()=>({ShotPanel:({unitId,onSaved}:{unitId?:string;onSaved:(id:string)=>void})=><div>正在登记 {unitId}<button onClick={()=>onSaved("registered")}>完成登记</button></div>}));
+vi.mock("../features/assets/AssetDetail",()=>({AssetDetail:({onClose}:{onClose:()=>void})=><aside><button onClick={onClose}>关闭 Shot 详情</button></aside>}));
+vi.mock("./ProjectLearningNotes",()=>({ProjectLearningNotes:({onOpenNote}:{onOpenNote?:(id:string)=>void})=><button onClick={()=>onOpenNote?.("note-real")}>打开关联笔记</button>}));
+beforeEach(()=>vi.mocked(intelligenceApi.listShots).mockReset().mockResolvedValue({items:[],total:0,offset:0,limit:200}));
 
 const summary: ProjectSummary = {
   id: "project-1", name: "遗迹短片", description: "UE 镜头练习", projectType: "animation", status: "active",
@@ -39,6 +46,19 @@ async function pointerDrop(source:HTMLElement,target:HTMLElement){
 }
 
 describe("ProjectHub", () => {
+  it("opens project learning materials using the selected note identity",async()=>{
+    const onOpenNote=vi.fn();render(<ProjectHub libraryId="lib" onOpenNote={onOpenNote} contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));fireEvent.click(await screen.findByRole("button",{name:"学习资料"}));fireEvent.click(screen.getByRole("button",{name:"打开关联笔记"}));expect(onOpenNote).toHaveBeenCalledWith("note-real");
+  });
+  it("reopens the exact project video and originating tab even without remembered workspace",async()=>{
+    const video={...image,id:"video",kind:"video" as const,name:"课程",format:"mp4",projectIds:[summary.id],assetIds:[],files:[{id:"file-1",entryId:"video",role:"main" as const,logicalPath:"originals/video.mp4",originalName:"video.mp4",mimeType:"video/mp4",fileSize:512,checksum:"sha",width:320,height:180,durationMs:60000}]};
+    vi.mocked(api.getProject).mockResolvedValue({...detail,media:[video]});vi.mocked(api.getMediaEntry).mockResolvedValue(video);
+    const onLearn=vi.fn();
+    render(<ProjectHub libraryId="lib" initialProjectId={summary.id} initialMediaId="video" initialContext={{tab:"media",scroll:123}} onLearn={onLearn} contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+    fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));
+    expect(screen.getByRole("button",{name:"关联媒体 1"})).toHaveClass("active");
+    expect(onLearn).toHaveBeenCalledWith("video",summary.id,{tab:"media",scroll:123});
+  });
   beforeEach(() => {
     vi.mocked(api.listProjects).mockResolvedValue([summary]);
     vi.mocked(api.getProject).mockResolvedValue(detail);
@@ -194,4 +214,39 @@ describe("ProjectHub", () => {
     await pointerDrop(task.closest("article")!,screen.getByText("任务 41").closest("article")!);
     await waitFor(()=>expect(api.moveProjectTask).toHaveBeenCalledWith("task-40","todo",41));
   });
+});
+
+function shotProject():CreativeProject {
+ const unit={id:"unit-shot",projectId:summary.id,parentId:"scene",kind:"shot",name:"航拍",description:"",startFrame:1,endFrame:100,sortOrder:0} as ProjectUnit;
+ return {...detail,units:[{...unit,id:"scene",kind:"scene",parentId:null,name:"沙漠"},unit]};
+}
+function registeredShot(unitId:string):ShotAsset {return {asset:{id:`core-${unitId}`,name:"航拍",assetType:"shot",description:"",thumbnail:null,tags:[],origin:{kind:"entity",id:`entity-${unitId}`},deleted:false,createdAt:"now",updatedAt:"now"},revision:1,projectId:summary.id,projectUnitId:unitId,act:"ACT1",shotNumber:"001",status:"todo",unit:null,createdAt:"now",updatedAt:"now"};}
+async function openShotUnits(){
+ vi.mocked(api.listProjects).mockResolvedValue([summary]);
+ vi.mocked(api.getProject).mockImplementation(async()=>shotProject());
+ render(<ProjectHub libraryId="lib" contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);
+ fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));
+ fireEvent.click(await screen.findByRole("button",{name:"场景 / 镜头"}));
+}
+it("登记后即使项目更新时间不变也刷新 Shot 身份",async()=>{
+ let registered=false;vi.mocked(intelligenceApi.listShots).mockImplementation(async()=>({items:registered?[registeredShot("unit-shot")]:[],total:registered?1:0,offset:0,limit:200}));
+ await openShotUnits();const button=await screen.findByRole("button",{name:"登记为 Shot Asset"});await waitFor(()=>expect(button).not.toBeDisabled());fireEvent.click(button);
+ registered=true;fireEvent.click(await screen.findByRole("button",{name:"完成登记"}));fireEvent.click(await screen.findByRole("button",{name:"关闭 Shot 详情"}));
+ expect(await screen.findByRole("button",{name:"打开 Shot 资产"})).toBeEnabled();
+});
+it("完整分页读取第201项 Shot，不将未加载记录当作未登记",async()=>{
+ const rows=[...Array.from({length:200},(_,i)=>registeredShot(`other-${i}`)),registeredShot("unit-shot")];
+ vi.mocked(intelligenceApi.listShots).mockImplementation(async(_lib,_id,offset=0)=>({items:rows.slice(offset,offset+200),total:201,offset,limit:200}));
+ await openShotUnits();expect(await screen.findByRole("button",{name:"打开 Shot 资产"})).toBeEnabled();expect(intelligenceApi.listShots).toHaveBeenCalledWith("lib","project-1",200);
+});
+it("登记身份仍在读取或读取失败时不允许误登记",async()=>{
+ let reject!:(reason:Error)=>void;vi.mocked(intelligenceApi.listShots).mockReturnValueOnce(new Promise((_,failure)=>{reject=failure}));
+ await openShotUnits();const button=await screen.findByRole("button",{name:"登记为 Shot Asset"});expect(button).toBeDisabled();
+ await act(async()=>reject(new Error("读取失败")));expect(button).toBeDisabled();
+});
+
+it("项目内可以为既有镜头登记 Shot Asset，不替代旧编辑入口",async()=>{
+ const shot={id:"unit-shot",projectId:summary.id,parentId:"scene",kind:"shot",name:"航拍",description:"",startFrame:1,endFrame:100,sortOrder:0} as ProjectUnit;
+ vi.mocked(api.listProjects).mockResolvedValue([summary]);vi.mocked(api.getProject).mockResolvedValue({...detail,units:[{...shot,id:"scene",kind:"scene",parentId:null,name:"沙漠"},shot]});
+ render(<ProjectHub libraryId="lib" contentLanguage="zh-CN" notify={vi.fn()} onOpenReference={vi.fn()} onEditAsset={vi.fn()}/>);fireEvent.click(await screen.findByRole("button",{name:/打开工作区/}));fireEvent.click(await screen.findByRole("button",{name:"场景 / 镜头"}));const register=await screen.findByRole("button",{name:"登记为 Shot Asset"});await waitFor(()=>expect(register).toBeEnabled());fireEvent.click(register);expect(await screen.findByText("正在登记 unit-shot")).toBeTruthy();expect(screen.getByText("1–100 帧")).toBeTruthy();
 });

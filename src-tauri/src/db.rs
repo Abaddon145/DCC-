@@ -10,8 +10,70 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 39;
+pub(crate) const FUTURE_SCHEMA_ERROR: &str = "此素材库由更新版本创建，请使用更新版本打开";
+
+pub(crate) fn schema_version(connection: &Connection) -> Result<u32, String> {
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM sqlite_schema WHERE name='schema_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    match kind.as_deref() {
+        None => return Ok(0),
+        Some("table") => {}
+        _ => return Err("数据库版本记录无效，已停止升级".into()),
+    }
+    let mut statement = connection
+        .prepare("SELECT value FROM schema_meta WHERE key='schema_version'")
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    let version: Option<String> = rows
+        .next()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+        .map(|row| row.get(0))
+        .transpose()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?;
+    if rows
+        .next()
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+        .is_some()
+    {
+        return Err("数据库版本记录重复，已停止升级".into());
+    }
+    match version {
+        None => Ok(0),
+        Some(value) => value
+            .parse()
+            .map_err(|_| "数据库版本无效，已停止升级".into()),
+    }
+}
+
 pub fn open_database(path: &Path) -> Result<Connection, String> {
     let connection = Connection::open(path).map_err(|e| e.to_string())?;
+    if !connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(|e| format!("无法检查数据库版本：{e}"))?
+    {
+        return Err("无法启用数据库检查保护，已停止打开".into());
+    }
+    if schema_version(&connection)? > CURRENT_SCHEMA_VERSION {
+        return Err(FUTURE_SCHEMA_ERROR.into());
+    }
+    connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            false,
+        )
+        .map_err(|e| format!("配置数据库失败：{e}"))?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")
         .map_err(|e| format!("配置数据库失败：{e}"))?;
@@ -45,6 +107,7 @@ pub fn open_database(path: &Path) -> Result<Connection, String> {
     crate::reliability::migrate_workflows(&connection)?;
     crate::downloader::service::migrate(&connection)?;
     crate::asset::migrate(&connection)?;
+    crate::learning::migrate(&connection)?;
     Ok(connection)
 }
 
@@ -258,7 +321,7 @@ fn migrate_to_v4(connection: &Connection) -> Result<(), String> {
     }
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','4')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<4",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -268,7 +331,7 @@ fn migrate_to_v4(connection: &Connection) -> Result<(), String> {
 fn migrate_to_v5(connection: &Connection) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','5')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<5",
             [],
         )
         .map_err(|e| format!("升级数据库到 v5 失败：{e}"))?;
@@ -278,7 +341,7 @@ fn migrate_to_v5(connection: &Connection) -> Result<(), String> {
 fn migrate_to_v6(connection: &Connection) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','6')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<6",
             [],
         )
         .map_err(|e| format!("升级数据库到 v6 失败：{e}"))?;
@@ -327,7 +390,7 @@ fn migrate_to_v7(connection: &Connection) -> Result<(), String> {
         .map_err(|e| format!("升级数据库到 v7 失败：{e}"))?;
     connection
         .execute(
-            "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('schema_version','7')",
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(schema_meta.value AS INTEGER)<7",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -2063,6 +2126,7 @@ pub fn restore_trash_batch(
         .map_err(|e| e.to_string())?;
     transaction.execute("UPDATE media_folders SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction.execute("UPDATE media_entries SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
+    transaction.execute("UPDATE asset_entities SET deleted_at=NULL,delete_batch_id=NULL,revision=revision+1 WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction
         .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
         .map_err(|e| e.to_string())?;
@@ -2108,7 +2172,7 @@ pub fn purge_trash_batch(
         .map_err(|e| e.to_string())?;
     drop(media_statement);
     let independent_media_paths = {
-        let mut statement=connection.prepare("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.delete_batch_id=?1").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT f.rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.delete_batch_id=?1 AND NOT EXISTS(SELECT 1 FROM media_external_files x WHERE x.file_id=f.id)").map_err(|e|e.to_string())?;
         let values = statement
             .query_map([batch_id], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
@@ -2119,6 +2183,12 @@ pub fn purge_trash_batch(
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     transaction.execute("DELETE FROM asset_search WHERE asset_id IN (SELECT id FROM assets WHERE delete_batch_id=?1)", [batch_id]).map_err(|e| e.to_string())?;
     let deleting_cores = crate::asset::repository::prepare_trash_purge(&transaction, batch_id)?;
+    transaction
+        .execute(
+            "DELETE FROM asset_entities WHERE delete_batch_id=?1",
+            [batch_id],
+        )
+        .map_err(|e| e.to_string())?;
     for id in deleting_cores {
         transaction
             .execute("DELETE FROM asset_versions WHERE asset_id=?1", [id])
@@ -2166,7 +2236,7 @@ pub fn purge_trash_batch(
         return Err("回收站记录不存在".into());
     }
     transaction.execute("DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM asset_tags at WHERE at.tag_id=tags.id)", []).map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags at WHERE at.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM asset_entity_tags et WHERE et.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     for (original, thumb) in paths {
         images::remove_managed_file(base_dir, &original);
@@ -2399,7 +2469,7 @@ pub fn batch_update_assets(
             [],
         )
         .map_err(|e| e.to_string())?;
-    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM localized_tags WHERE NOT EXISTS(SELECT 1 FROM asset_localized_tags WHERE asset_localized_tags.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM media_entry_tags mt WHERE mt.tag_id=localized_tags.id) AND NOT EXISTS(SELECT 1 FROM asset_entity_tags et WHERE et.tag_id=localized_tags.id)", []).map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(BatchUpdateReport {
         requested: ids.len(),
@@ -2827,7 +2897,7 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
     let mut missing_original = 0;
     let mut missing_dependency = 0;
     {
-        let mut statement=connection.prepare("SELECT role,rel_path FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.deleted_at IS NULL AND f.role IN ('main','dependency')").map_err(|e|e.to_string())?;
+        let mut statement=connection.prepare("SELECT f.role,f.id FROM media_files f JOIN media_entries e ON e.id=f.entry_id WHERE e.deleted_at IS NULL AND f.role IN ('main','dependency')").map_err(|e|e.to_string())?;
         let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -2835,7 +2905,12 @@ pub fn health_summary(connection: &Connection, base_dir: &Path) -> Result<Health
             .map_err(|e| e.to_string())?;
         for row in rows {
             let (role, path) = row.map_err(|e| e.to_string())?;
-            if !base_dir.join(path).is_file() {
+            if crate::media_access::LocalMediaGrants::local()
+                .and_then(|grants| {
+                    crate::media_access::resolve_media_file(connection, base_dir, &path, &grants)
+                })
+                .is_err()
+            {
                 if role == "main" {
                     missing_original += 1
                 } else {
@@ -2959,12 +3034,67 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    #[test]
+    fn bundled_sqlite_includes_wal_safety_fixes() {
+        let version = unsafe { rusqlite::ffi::sqlite3_libversion_number() };
+        println!("bundled SQLite version {version}");
+        assert!(
+            version >= 3_053_003,
+            "bundled SQLite version {version} predates WAL fixes"
+        );
+    }
+
+    #[test]
+    fn sqlite_unsigned_conversions_remain_checked() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE values_test(value INTEGER)", [])
+            .unwrap();
+        db.execute("INSERT INTO values_test VALUES(?1)", [i64::MAX as u64])
+            .unwrap();
+        assert!(db
+            .execute("INSERT INTO values_test VALUES(?1)", [u64::MAX])
+            .is_err());
+        assert_eq!(
+            db.query_row("SELECT value FROM values_test", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            i64::MAX as u64
+        );
+        assert!(db
+            .query_row("SELECT -1", [], |row| row.get::<_, u64>(0))
+            .is_err());
+    }
+
     fn setup() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("images/originals")).unwrap();
         fs::create_dir_all(dir.path().join("images/thumbnails")).unwrap();
         let connection = open_database(&dir.path().join("test.db")).unwrap();
         (dir, connection)
+    }
+
+    #[test]
+    fn legacy_migrations_never_lower_newer_schema_version() {
+        let (_dir, connection) = setup();
+        for expected in ["31", "99"] {
+            connection
+                .execute(
+                    "UPDATE schema_meta SET value=?1 WHERE key='schema_version'",
+                    [expected],
+                )
+                .unwrap();
+            for migration in [migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7] {
+                migration(&connection).unwrap();
+                let version: String = connection
+                    .query_row(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(version, expected);
+            }
+        }
     }
 
     #[test]
@@ -3337,7 +3467,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "21");
+        assert_eq!(version, "39");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

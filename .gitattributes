@@ -1,0 +1,6 @@
+src-tauri/resources/media-tools/mpv/fonts.conf -text -whitespace
+src-tauri/resources/media-tools/licenses/MPV-*.txt -text
+src-tauri/src/learning/fixtures/yingliu-migration-sample.json -text
+src-tauri/src/learning/fixtures/yingliu-migration-sample.sqlite -text
+src-tauri/src/learning/fixtures/yingliu-files/* -text
+src-tauri/src/learning/fixtures/yingliu-files/complex.md whitespace=cr-at-eol

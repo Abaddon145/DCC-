@@ -64,6 +64,7 @@ pub fn validate(db: &Connection, note: &str, slice: &Value) -> Result<String, St
     let content = slice["content"].as_array().ok_or("剪贴板缺少选区")?;
     let document = json!({"type":"doc","content":content});
     let (text, _) = knowledge::inspect_document(&document)?;
+    crate::learning::note_nodes::validate_registered(db, &document)?;
     let ids = files(slice);
     if ids.len() > 100 {
         return Err("一次最多复制 100 个附件".into());

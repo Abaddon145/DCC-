@@ -38,3 +38,4 @@ safety-backups/
 .tools/
 .dcc/
 *.exe.sha256
+src-tauri/resources/media-tools/mpv.exe

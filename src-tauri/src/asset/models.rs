@@ -149,6 +149,8 @@ pub struct CoreSearchRequest {
     pub asset_type: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
     #[serde(default = "default_locale")]
     pub locale: String,
     #[serde(default)]

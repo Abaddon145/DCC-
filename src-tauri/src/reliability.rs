@@ -420,7 +420,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("library.db");
         let db = crate::db::open_database(&path).unwrap();
-        db.execute_batch("ALTER TABLE ai_sessions DROP COLUMN actual_tokens; UPDATE schema_meta SET value='18' WHERE key='schema_version';").unwrap();
+        db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles; ALTER TABLE ai_sessions DROP COLUMN actual_tokens; UPDATE schema_meta SET value='18' WHERE key='schema_version';").unwrap();
         migrate_workflows(&db).unwrap();
         migrate_workflows(&db).unwrap();
         assert_eq!(

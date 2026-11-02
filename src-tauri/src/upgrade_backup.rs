@@ -59,7 +59,43 @@ pub(crate) fn run_upgrade_backup(
     keep: usize,
     record: &mut UpgradeBackupRecord,
 ) -> Result<UpgradeBackupStatus, String> {
-    run_upgrade_backup_checked(base_dir, version, keep, record, verify_snapshot)
+    run_upgrade_backup_checked(base_dir, version, keep, record, verify_snapshot, false)
+}
+
+pub(crate) fn run_schema_upgrade_backup(
+    base_dir: &Path,
+    version: &str,
+    keep: usize,
+    record: &mut UpgradeBackupRecord,
+) -> Result<UpgradeBackupStatus, String> {
+    run_upgrade_backup_checked(base_dir, version, keep, record, verify_snapshot, true)
+}
+
+pub(crate) fn open_readonly(path: &Path) -> Result<Connection, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    if !connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map_err(|e| e.to_string())?
+    {
+        return Err("无法启用数据库只读保护".into());
+    }
+    connection
+        .busy_timeout(Duration::from_secs(3))
+        .map_err(|e| e.to_string())?;
+    Ok(connection)
+}
+
+pub(crate) fn schema_needs_upgrade(base_dir: &Path) -> Result<bool, String> {
+    let connection = open_readonly(&base_dir.join("library.db"))?;
+    let version = crate::db::schema_version(&connection)?;
+    if version > crate::db::CURRENT_SCHEMA_VERSION {
+        return Err(crate::db::FUTURE_SCHEMA_ERROR.into());
+    }
+    Ok(version < crate::db::CURRENT_SCHEMA_VERSION)
 }
 
 pub(crate) fn library_key(base_dir: &Path) -> Result<String, String> {
@@ -207,9 +243,10 @@ fn run_upgrade_backup_checked(
     keep: usize,
     record: &mut UpgradeBackupRecord,
     verify: fn(&Path) -> Result<(), String>,
+    required_for_schema: bool,
 ) -> Result<UpgradeBackupStatus, String> {
     let keep = keep.clamp(1, 20);
-    if record.last_success_app_version == version {
+    if !required_for_schema && record.last_success_app_version == version {
         return status(base_dir, keep as i64, record);
     }
     record.last_attempt_at = Some(Utc::now().to_rfc3339());
@@ -236,14 +273,17 @@ fn run_upgrade_backup_checked(
         if path.exists() {
             return Err("升级快照目标已存在，未覆盖".into());
         }
-        let connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| e.to_string())?;
-        connection
-            .busy_timeout(Duration::from_secs(3))
-            .map_err(|e| e.to_string())?;
+        let connection = open_readonly(&source)?;
         connection
             .execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
             .map_err(|e| format!("生成升级快照失败：{e}"))?;
+        if required_for_schema {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| format!("同步升级快照失败：{e}"))?;
+        }
         verify(&path)?;
         record.snapshots.push(UpgradeBackupFile {
             name,
@@ -256,12 +296,14 @@ fn run_upgrade_backup_checked(
         Ok(()) => {
             record.result = Some("success".into());
             record.message = Some("升级前数据库快照已校验；只含数据库，不含媒体".into());
-            if let Err(error) = backup_directory(base_dir)
-                .and_then(|directory| clean_registered_snapshots(&directory, keep, record))
-            {
-                record.message = Some(format!(
-                    "升级前数据库快照已校验；只含数据库，不含媒体。{error}"
-                ));
+            if !required_for_schema {
+                if let Err(error) = backup_directory(base_dir)
+                    .and_then(|directory| clean_registered_snapshots(&directory, keep, record))
+                {
+                    record.message = Some(format!(
+                        "升级前数据库快照已校验；只含数据库，不含媒体。{error}"
+                    ));
+                }
             }
             status(base_dir, keep as i64, record)
         }
@@ -339,12 +381,15 @@ mod tests {
             last_success_app_version: "0.20.5".into(),
             ..Default::default()
         };
-        assert!(
-            run_upgrade_backup_checked(&path, "0.20.6", 5, &mut record, |_| Err(
-                "模拟校验失败".into()
-            ))
-            .is_err()
-        );
+        assert!(run_upgrade_backup_checked(
+            &path,
+            "0.20.6",
+            5,
+            &mut record,
+            |_| Err("模拟校验失败".into()),
+            false
+        )
+        .is_err());
         assert_eq!(record.last_success_app_version, "0.20.5");
         assert!(record.snapshots.is_empty());
         assert_eq!(record.result.as_deref(), Some("failed"));

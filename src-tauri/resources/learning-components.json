@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "mpvVersion": "20261015-git-492bae0768",
+  "source": "https://github.com/mpv-player/mpv/tree/492bae0768",
+  "archiveSha256": "f9becefe40e2a29d2ce5f3ab231ff094f9cf3e4038ff014cfe4a0c09ad90e79e",
+  "files": [
+    {"path":"media-tools/mpv.exe","sourcePath":"tools/mpv.exe","sha256":"9114ed8100da6b89c5053486392e6c69a8ef6917704a2837b2b81b1f4bd03000"},
+    {"path":"media-tools/mpv/fonts.conf","sourcePath":"tools/mpv/fonts.conf","sha256":"f141c1b89b172d22f213531646c21e288f0ebf3ec46484698896e1b33c626756"},
+    {"path":"media-tools/licenses/MPV-COPYRIGHT.txt","sourcePath":"licenses/mpv-Copyright.txt","sha256":"bfe9ee4cceabcb8ecbfadf208d04156f73d801e6a57369a5606bb8341e204a23"},
+    {"path":"media-tools/licenses/MPV-GPL-2.txt","sourcePath":"licenses/mpv-GPL-2.txt","sha256":"edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"},
+    {"path":"media-tools/licenses/MPV-LGPL-2.1.txt","sourcePath":"licenses/mpv-LGPL-2.1.txt","sha256":"72b672113d642cbb8ef5dcc76938db801983c56e50b1400ab930f1a64d6dc8d9"}
+  ]
+}

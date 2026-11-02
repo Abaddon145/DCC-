@@ -18,6 +18,8 @@ struct Manifest {
     schema_version: u32,
     created_at: String,
     entries: Vec<ManifestEntry>,
+    #[serde(default)]
+    external_originals: ExternalBackupSummary,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +27,25 @@ struct ManifestEntry {
     path: String,
     size: u64,
     sha256: String,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalBackupSummary {
+    pub count: u64,
+    pub bytes: u64,
+}
+pub fn external_media_backup_summary(db: &Connection) -> Result<ExternalBackupSummary, String> {
+    db.query_row(
+        "SELECT count(*),COALESCE(sum(size_bytes),0) FROM media_external_files",
+        [],
+        |r| {
+            Ok(ExternalBackupSummary {
+                count: r.get(0)?,
+                bytes: r.get(1)?,
+            })
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn export_library(
@@ -65,17 +86,28 @@ pub fn export_library_with_progress(
         "media-library",
         "media",
         "note-attachments",
+        "learning-data",
         ".dcc/cache/thumbnails",
     ] {
         let directory = base_dir.join(managed_dir);
         if !directory.exists() {
             continue;
         }
-        for entry in WalkDir::new(&directory)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
+        for entry in WalkDir::new(&directory) {
+            let entry = entry.map_err(|e| e.to_string())?;
+            crate::media_access::reject_links(entry.path())?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if managed_dir == "learning-data" {
+                let relative = entry
+                    .path()
+                    .strip_prefix(base_dir)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                crate::learning::files::learning_file(base_dir, &relative)?;
+            }
             let relative = entry
                 .path()
                 .strip_prefix(base_dir)
@@ -96,6 +128,7 @@ pub fn export_library_with_progress(
         });
     }
     let manifest = Manifest {
+        external_originals: external_media_backup_summary(connection)?,
         format: "dcc-asset-library".into(),
         schema_version: 1,
         created_at: Utc::now().to_rfc3339(),
@@ -133,13 +166,14 @@ pub fn export_library_with_progress(
 }
 
 pub const RESTORE_MARKER: &str = ".restore-pending.json";
-const RESTORE_TARGETS: [&str; 7] = [
+const RESTORE_TARGETS: [&str; 8] = [
     "library.db",
     "images",
     "reference-boards",
     "media-library",
     "media",
     "note-attachments",
+    "learning-data",
     ".dcc/cache/thumbnails",
 ];
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -151,7 +185,7 @@ struct RestoreCheckpoint {
 
 pub fn recover_interrupted_restore(
     active: &mut ActiveLibrary,
-    before_migration: impl FnOnce(&Path),
+    before_migration: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let marker = active.base_dir.join(RESTORE_MARKER);
     let value: RestoreCheckpoint =
@@ -208,8 +242,14 @@ pub fn recover_interrupted_restore(
     if !active.db_path.is_file() {
         return Err("原库数据库缺失，已保留中断记录".into());
     }
-    before_migration(&active.base_dir);
-    active.connection = Some(db::open_database(&active.db_path)?);
+    before_migration(&active.base_dir)?;
+    let restored = db::open_database(&active.db_path)?;
+    crate::media_access::invalidate_external_grants(&restored)?;
+    crate::learning::source_profiles::invalidate_epochs(&restored)?;
+    crate::learning::analysis_store::invalidate_previews(&restored)?;
+    crate::learning::note_preview::invalidate_previews(&restored)?;
+    crate::learning::excerpt_store::invalidate_previews(&restored)?;
+    active.connection = Some(restored);
     fs::remove_file(marker).map_err(|_| "原库已恢复，但中断标记未能清除")?;
     Ok(())
 }
@@ -231,6 +271,31 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
     fs::copy(stage.path().join("library.db"), &prepared_db)
         .map_err(|e| format!("备份数据库缺失：{e}"))?;
     let check = db::open_database(&prepared_db)?;
+    let has_imports: bool = check
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM learning_import_batches)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "无法检查迁入批次，未替换素材库")?;
+    if has_imports {
+        let (library_id, root_hash) =
+            crate::learning::analysis_store::library_identity(&active.base_dir)?;
+        if library_id != active.marker.library_id {
+            return Err("目标素材库身份已变化，未恢复备份".into());
+        }
+        check
+            .execute(
+                "UPDATE learning_import_batches SET library_id=?1,root_hash=?2",
+                rusqlite::params![library_id, root_hash],
+            )
+            .map_err(|_| "无法恢复迁入批次身份，未替换素材库")?;
+    }
+    crate::media_access::invalidate_external_grants(&check)?;
+    crate::learning::source_profiles::invalidate_epochs(&check)?;
+    crate::learning::analysis_store::invalidate_previews(&check)?;
+    crate::learning::note_preview::invalidate_previews(&check)?;
+    crate::learning::excerpt_store::invalidate_previews(&check)?;
     let integrity: String = check
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -249,6 +314,7 @@ pub fn restore_library(active: &mut ActiveLibrary, source: &Path) -> Result<(), 
         "media-library",
         "media",
         "note-attachments",
+        "learning-data",
         ".dcc/cache/thumbnails",
     ];
     for name in directories {
@@ -440,6 +506,12 @@ fn allowed_backup_path(path: &Path, directory: bool) -> bool {
     let Some(parts) = parts else {
         return false;
     };
+    if parts
+        .iter()
+        .any(|part| part.contains(':') || part.chars().any(char::is_control))
+    {
+        return false;
+    }
     let Some(first) = parts.first() else {
         return false;
     };
@@ -448,7 +520,12 @@ fn allowed_backup_path(path: &Path, directory: bool) -> bool {
     }
     if matches!(
         *first,
-        "images" | "reference-boards" | "media-library" | "media" | "note-attachments"
+        "images"
+            | "reference-boards"
+            | "media-library"
+            | "media"
+            | "note-attachments"
+            | "learning-data"
     ) {
         return true;
     }
@@ -474,6 +551,7 @@ fn remove_dir_if_exists(path: &Path) -> Result<(), String> {
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     for entry in WalkDir::new(source) {
         let entry = entry.map_err(|e| e.to_string())?;
+        crate::media_access::reject_links(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(source)
@@ -493,6 +571,249 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learning_data_backup_rejects_unsafe_learning_paths() {
+        assert!(!super::allowed_backup_path(
+            std::path::Path::new("learning-data/archives/note.md:stream"),
+            false
+        ));
+        assert!(!super::allowed_backup_path(
+            std::path::Path::new("learning-data/../secret"),
+            false
+        ));
+    }
+    #[test]
+    fn learning_data_backup_restore_keeps_archives_not_external_originals() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_state = crate::state::test_state(&source.path().join("source"));
+        let target_state = crate::state::test_state(&target.path().join("target"));
+        let archive = source.path().join("learning.dccassetlib");
+        let raw = b"\xef\xbb\xbf# Heading\r\n![[missing.png]]\r\n";
+        source_state
+            .with_library(|db, base| {
+                for (relative, bytes) in [
+                    ("learning-data/archives/note.md", raw.as_slice()),
+                    (
+                        "learning-data/subtitles/captions.srt",
+                        b"1\n00:00:00,100 --> 00:00:00,900\nChinese\n".as_slice(),
+                    ),
+                    ("learning-data/excerpts/frame.png", b"snapshot".as_slice()),
+                    (".dcc/runtime/learning/temp.wav", b"not archived".as_slice()),
+                ] {
+                    let file = base.join(relative);
+                    fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    fs::write(file, bytes).unwrap();
+                }
+                super::export_library(db, base, &archive)
+            })
+            .unwrap();
+        target_state
+            .with_active_mut(|active| super::restore_library(active, &archive))
+            .unwrap();
+        target_state
+            .with_library(|_, base| {
+                assert_eq!(
+                    fs::read(base.join("learning-data/archives/note.md")).unwrap(),
+                    raw
+                );
+                assert!(base.join("learning-data/subtitles/captions.srt").is_file());
+                assert!(base.join("learning-data/excerpts/frame.png").is_file());
+                assert!(!base.join(".dcc/runtime/learning/temp.wav").exists());
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[test]
+    fn learning_baseline_two_libraries_preserve_scoped_identities_and_media_hash() {
+        use crate::{asset, knowledge, knowledge_files, media_library, projects, reference_boards};
+        use serde_json::json;
+
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let source_marker = serde_json::to_vec(&crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: source_id.clone(),
+            name: "来源测试库".into(),
+            created_at: "now".into(),
+        })
+        .unwrap();
+        std::fs::write(source.path().join("library.json"), &source_marker).unwrap();
+        let mut db = crate::db::open_database(&source.path().join("library.db")).unwrap();
+        let image = source.path().join("source.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([1, 2, 3, 255]))
+            .save(&image)
+            .unwrap();
+        let source_hash = crate::file_digest::digest_file(&image).unwrap();
+        eprintln!(
+            "learning baseline source fixture: PNG, bytes={}, sha256={}",
+            source_hash.0, source_hash.1
+        );
+        let imported = media_library::import(
+            &mut db,
+            source.path(),
+            None,
+            crate::models::MediaImportRequest {
+                kind: crate::models::MediaKind::Image,
+                paths: vec![image.to_string_lossy().into_owned()],
+                folder_id: None,
+                tags: vec!["学习".into()],
+                favorite: true,
+            },
+        )
+        .unwrap();
+        let media_id = imported.rows[0].entry_id.clone().unwrap();
+        let core_id = asset::repository::register_origin(
+            &db,
+            &asset::models::CoreOrigin {
+                kind: "media".into(),
+                id: media_id.clone(),
+            },
+        )
+        .unwrap();
+        let project = projects::upsert_project(
+            &mut db,
+            serde_json::from_value(
+                json!({"name":"同名学习项目","projectType":"scene","status":"planning"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        media_library::link_projects(
+            &db,
+            vec![media_id.clone()],
+            vec![project.summary.id.clone()],
+            true,
+        )
+        .unwrap();
+        let note = knowledge::save(&mut db, knowledge::NoteInput {
+            id: None, expected_revision: None, notebook_id: None,
+            title: "学习笔记".into(),
+            document: json!({"type":"doc","content":[
+                {"type":"reference","attrs":{"kind":"media","targetId":media_id,"label":"来源图片"}},
+                {"type":"reference","attrs":{"kind":"project","targetId":project.summary.id,"label":"同名学习项目"}}
+            ]}),
+            tags: vec![], favorite: false, journal_date: None,
+        }).unwrap();
+        let attachment = knowledge_files::import(&db, source.path(), &note.id, &image).unwrap();
+        let board = reference_boards::create(&db, "学习参考").unwrap();
+        reference_boards::import_paths(
+            &mut db,
+            source.path(),
+            &board.id,
+            &[image.to_string_lossy().into_owned()],
+            &crate::models::ReferencePlacement { x: 0.0, y: 0.0 },
+        )
+        .unwrap();
+        let original = asset::repository::get(&db, source.path(), &core_id, "zh-CN")
+            .unwrap()
+            .files
+            .into_iter()
+            .find(|f| f.role == "original")
+            .unwrap();
+        let archive = source.path().join("learning.dccassetlib");
+        super::export_library(&db, source.path(), &archive).unwrap();
+
+        let target_id = uuid::Uuid::new_v4().to_string();
+        assert_ne!(source_id, target_id);
+        let marker = crate::state::LibraryMarker {
+            format_version: 1,
+            library_id: target_id.clone(),
+            name: "恢复测试库".into(),
+            created_at: "now".into(),
+        };
+        let marker_bytes = serde_json::to_vec(&marker).unwrap();
+        std::fs::write(target.path().join("library.json"), &marker_bytes).unwrap();
+        let mut active = crate::state::ActiveLibrary {
+            base_dir: target.path().to_owned(),
+            db_path: target.path().join("library.db"),
+            marker,
+            connection: Some(crate::db::open_database(&target.path().join("library.db")).unwrap()),
+        };
+        assert!(media_library::get(active.connection.as_ref().unwrap(), &media_id).is_err());
+        super::restore_library(&mut active, &archive).unwrap();
+        assert_eq!(active.marker.library_id, target_id);
+        assert_eq!(
+            std::fs::read(target.path().join("library.json")).unwrap(),
+            marker_bytes
+        );
+        let restored = active.connection.as_ref().unwrap();
+        let media = media_library::get(restored, &media_id).unwrap();
+        assert_eq!(media.project_ids, vec![project.summary.id.clone()]);
+        assert_eq!(
+            asset::repository::origin(restored, &core_id).unwrap().id,
+            media_id
+        );
+        let restored_asset =
+            asset::repository::get(restored, target.path(), &core_id, "zh-CN").unwrap();
+        let restored_file = restored_asset
+            .files
+            .iter()
+            .find(|f| f.id == original.id)
+            .unwrap();
+        let restored_path =
+            asset::repository::file_path(restored, target.path(), &restored_file.source_ref)
+                .unwrap();
+        assert_eq!(
+            crate::file_digest::digest_file(&restored_path).unwrap(),
+            source_hash
+        );
+        assert_eq!(
+            knowledge::get(restored, &note.id).unwrap().document,
+            note.document
+        );
+        assert!(knowledge::references(restored, &note.id)
+            .unwrap()
+            .iter()
+            .all(|r| r.available));
+        let (attachment_path, _) =
+            knowledge_files::path(restored, target.path(), &attachment.id).unwrap();
+        assert_eq!(
+            crate::file_digest::digest_file(&attachment_path).unwrap(),
+            source_hash
+        );
+        assert_eq!(
+            reference_boards::get(restored, &board.id)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(
+            restored
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "39"
+        );
+        assert_eq!(
+            restored
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        // Restoring into another library keeps its own library UUID; entity UUIDs alone are not a cross-app identity.
+        assert_eq!(
+            crate::file_digest::digest_file(&image).unwrap(),
+            source_hash
+        );
+        assert_eq!(
+            knowledge::get(&db, &note.id).unwrap().document,
+            note.document
+        );
+        assert_eq!(
+            std::fs::read(source.path().join("library.json")).unwrap(),
+            source_marker
+        );
+    }
+
     #[test]
     fn asset_core_cache_versions_survive_restore_without_runtime_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -589,7 +910,7 @@ mod tests {
             connection: None,
         };
         assert!(base.join("images/new.txt").exists());
-        recover_interrupted_restore(&mut active, |_| {}).unwrap();
+        recover_interrupted_restore(&mut active, |_| Ok(())).unwrap();
         assert_eq!(
             fs::read(base.join("images/original.txt")).unwrap(),
             b"original"

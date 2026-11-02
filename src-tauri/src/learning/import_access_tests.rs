@@ -1,0 +1,1423 @@
+use super::{
+    import_access,
+    import_runner::ImportTaskRequest,
+    note_conversion::{self, AttachmentMap, MediaMap},
+};
+use crate::{
+    knowledge::{self, NoteInput},
+    state::test_state,
+    tasks::TaskRequest,
+};
+use sha2::{Digest, Sha256};
+use std::fs;
+
+fn write_note(root: &std::path::Path, relative: &str, body: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, body).unwrap();
+}
+
+fn write_sqlite_fixture(path: &std::path::Path) {
+    fs::write(
+        path,
+        include_bytes!("fixtures/yingliu-migration-sample.sqlite"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_header_lease_pins_identity_and_blocks_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let renamed = temp.path().join("renamed.sqlite");
+    let original = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&path, original).unwrap();
+
+    let candidate = super::source_sqlite::open_candidate(&path).unwrap();
+    assert!(fs::rename(&path, &renamed).is_err());
+    let lease = super::source_markdown::open_checked_deny_write(&candidate.path).unwrap();
+    assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+    assert!(fs::rename(&path, &renamed).is_err());
+    drop(lease);
+    assert!(fs::rename(&path, &renamed).is_err());
+    drop(candidate);
+    fs::rename(&path, &renamed).unwrap();
+    assert_eq!(fs::read(&renamed).unwrap(), original);
+}
+
+#[test]
+fn learning_import_sqlite_picker_checks_header_before_registering() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let bad = temp.path().join("not-sqlite.db");
+    fs::write(&bad, [0u8; 100]).unwrap();
+    assert!(import_access::select_sqlite_with_picker(&state, &library, || Some(bad)).is_err());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    let good = temp.path().join("synthetic.sqlite");
+    let original = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+    fs::write(&good, original).unwrap();
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || Some(good.clone()))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fs::read(good).unwrap(), original);
+}
+
+#[test]
+fn learning_import_sqlite_picker_rejects_active_writer_without_touching_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "wal");
+    writer
+        .execute_batch("CREATE TABLE test(id INTEGER); INSERT INTO test VALUES(1);")
+        .unwrap();
+    let wal = temp.path().join("synthetic.sqlite-wal");
+    let shm = temp.path().join("synthetic.sqlite-shm");
+    let before = [
+        fs::read(&path).unwrap(),
+        fs::read(&wal).unwrap(),
+        fs::read(&shm).unwrap(),
+    ];
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || Some(path.clone())).is_err()
+    );
+    assert_eq!(
+        before,
+        [
+            fs::read(&path).unwrap(),
+            fs::read(&wal).unwrap(),
+            fs::read(&shm).unwrap()
+        ]
+    );
+    writer.execute("INSERT INTO test VALUES(2)", []).unwrap();
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_picker_is_scoped_revocable_and_does_not_pin_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&path);
+    assert!(
+        import_access::current_sqlite_selection(&state, &uuid::Uuid::new_v4().to_string()).is_err()
+    );
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || None)
+            .unwrap()
+            .is_none()
+    );
+    let chosen = import_access::select_sqlite_with_picker(&state, &library, || Some(path.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.library_id, library);
+    assert_eq!(chosen.file_name, "synthetic.sqlite");
+    assert!(import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_ok());
+    let renamed = temp.path().join("renamed.sqlite");
+    fs::rename(&path, &renamed).unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_err()
+    );
+    fs::write(&path, b"replacement").unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &chosen.selection_id).is_err()
+    );
+    assert!(
+        import_access::release_sqlite_selection(&state, &library, &chosen.selection_id).unwrap()
+    );
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library, &chosen.selection_id).unwrap()
+    );
+}
+
+#[test]
+fn learning_import_sqlite_picker_rejects_stale_choice_without_orphan_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let first = temp.path().join("first.sqlite");
+    let second = temp.path().join("second.sqlite");
+    write_sqlite_fixture(&first);
+    write_sqlite_fixture(&second);
+    let current = std::cell::RefCell::new(None);
+    let stale = import_access::select_sqlite_with_picker(&state, &library, || {
+        *current.borrow_mut() =
+            import_access::select_sqlite_with_picker(&state, &library, || Some(second.clone()))
+                .unwrap();
+        Some(first.clone())
+    });
+    assert!(stale.is_err());
+    let selected = current.into_inner().unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library, &selected.selection_id).is_ok()
+    );
+    assert!(!import_access::release_sqlite_selection(
+        &state,
+        &library,
+        &uuid::Uuid::new_v4().to_string()
+    )
+    .unwrap());
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM learning_source_sqlite_bindings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_sqlite_picker_invalidates_old_scope_after_library_switch() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_library = temp.path().join("library-a");
+    let state = test_state(&first_library);
+    let library_a = state.active_library_id().unwrap();
+    let source = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&source);
+    let selected_a =
+        import_access::select_sqlite_with_picker(&state, &library_a, || Some(source.clone()))
+            .unwrap()
+            .unwrap();
+    let second_library = temp.path().join("library-b");
+    state
+        .change_library(crate::models::StorageChangeRequest {
+            mode: "create".into(),
+            path: second_library.to_string_lossy().into_owned(),
+            name: Some("B".into()),
+        })
+        .unwrap();
+    let library_b = state.active_library_id().unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_a, &selected_a.selection_id)
+            .is_err()
+    );
+    assert!(import_access::current_sqlite_selection(&state, &library_b)
+        .unwrap()
+        .is_none());
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_a.selection_id)
+            .unwrap()
+    );
+    let selected_b =
+        import_access::select_sqlite_with_picker(&state, &library_b, || Some(source.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_a.selection_id)
+            .unwrap()
+    );
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .is_ok()
+    );
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(
+        !import_access::release_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .unwrap()
+    );
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_b, &selected_b.selection_id)
+            .is_err()
+    );
+    state
+        .change_library(crate::models::StorageChangeRequest {
+            mode: "open".into(),
+            path: first_library.to_string_lossy().into_owned(),
+            name: None,
+        })
+        .unwrap();
+    assert!(
+        import_access::verify_sqlite_selection(&state, &library_a, &selected_a.selection_id)
+            .is_err()
+    );
+    assert!(import_access::current_sqlite_selection(&state, &library_a)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn learning_import_sqlite_picker_discards_selection_if_scope_changes_during_dialog() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("synthetic.sqlite");
+    write_sqlite_fixture(&path);
+    assert!(
+        import_access::select_sqlite_with_picker(&state, &library, || {
+            *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+            Some(path.clone())
+        })
+        .is_err()
+    );
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_source_profiles", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn learning_import_access_bind_preview_prepare_without_overwrite_on_conflict() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let vault_root = temp.path().join("vault");
+    fs::create_dir(&vault_root).unwrap();
+    write_note(&vault_root, "notes/hello.md", "# 迁入预检\n\n正文一行。\n");
+    let state = test_state(&library);
+    let library_id = state.active_library_id().unwrap();
+
+    let binding = import_access::bind_in_library(
+        &state,
+        &library_id,
+        "vault-ui",
+        vault_root.to_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding.library_id, library_id);
+    assert!(binding.boundary.contains("不会覆盖"));
+
+    let preview = import_access::preview_in_library(
+        &state,
+        &library_id,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/hello.md",
+    )
+    .unwrap();
+    assert_eq!(preview.conflict, "unmapped");
+    assert!(preview.can_prepare);
+    assert!(!preview.will_overwrite);
+
+    let markdown = fs::read_to_string(vault_root.join("notes/hello.md")).unwrap();
+    let conversion = note_conversion::convert_source_note(
+        markdown.as_bytes(),
+        &AttachmentMap::new(),
+        &MediaMap::new(),
+    )
+    .unwrap();
+    assert!(!conversion.pending);
+    let document = conversion.document.expect("converted document");
+    let request_seed = format!(
+        "{}|{}|{}|{}|{}",
+        preview.profile_id,
+        preview.vault,
+        preview.relative_path,
+        preview.source_sha256,
+        preview.epoch
+    );
+    let prepare = ImportTaskRequest::Prepare {
+        profile_id: preview.profile_id.clone(),
+        epoch: preview.epoch.clone(),
+        request_sha256: format!("{:x}", Sha256::digest(request_seed.as_bytes())),
+        vault: preview.vault.clone(),
+        relative_path: preview.relative_path.clone(),
+        source_sha256: preview.source_sha256.clone(),
+        title: preview.title.clone(),
+        document,
+        markdown,
+        items: Vec::new(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(
+            library_id.clone(),
+            TaskRequest::LearningImport(prepare.clone()),
+        )
+        .unwrap();
+    let prepared = super::import_runner::run_local(&state, &task, &prepare).unwrap();
+    assert_eq!(prepared["status"], "staged");
+    let batch_id = prepared["batchId"].as_str().unwrap().to_string();
+
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (commit_task, _) = state
+        .tasks
+        .submit(
+            library_id.clone(),
+            TaskRequest::LearningImport(commit.clone()),
+        )
+        .unwrap();
+    let committed = super::import_runner::run_local(&state, &commit_task, &commit).unwrap();
+    assert_eq!(committed["status"], "committed");
+
+    let batches = import_access::list_batches_in_library(&state, &library_id).unwrap();
+    assert!(batches
+        .iter()
+        .any(|b| b.id == batch_id && b.status == "committed"));
+    let items = import_access::list_items_in_library(&state, &library_id, &batch_id).unwrap();
+    assert_eq!(items[0].status, "committed");
+    let note_id = items[0].target_id.clone().unwrap();
+
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::get(db, &note_id)?;
+            knowledge::save(
+                db,
+                NoteInput {
+                    id: Some(note.id.clone()),
+                    expected_revision: Some(note.revision),
+                    notebook_id: note.notebook_id.clone(),
+                    title: "用户已改".into(),
+                    document: note.document.clone(),
+                    tags: note.tags.clone(),
+                    favorite: note.favorite,
+                    journal_date: note.journal_date.clone(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let conflict = import_access::preview_in_library(
+        &state,
+        &library_id,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/hello.md",
+    )
+    .unwrap();
+    assert_eq!(conflict.conflict, "target_changed");
+    assert!(!conflict.will_overwrite);
+    assert!(conflict.message.contains("不会静默覆盖"));
+    assert!(conflict.can_prepare);
+}
+
+#[test]
+fn learning_import_access_rejects_pending_conversion_and_wrong_library() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = temp.path().join("library");
+    let vault_root = temp.path().join("vault");
+    fs::create_dir(&vault_root).unwrap();
+    fs::write(vault_root.join("bad.md"), [0xff, 0xfe, b'#', b' ', b'x']).unwrap();
+    let state = test_state(&library);
+    let library_id = state.active_library_id().unwrap();
+    let binding = import_access::bind_in_library(
+        &state,
+        &library_id,
+        "vault-ui",
+        vault_root.to_str().unwrap(),
+    )
+    .unwrap();
+    let preview = import_access::preview_in_library(
+        &state,
+        &library_id,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "bad.md",
+    )
+    .unwrap();
+    assert!(preview.pending_conversion);
+    assert!(!preview.can_prepare);
+    assert!(import_access::bind_in_library(
+        &state,
+        "00000000-0000-4000-8000-000000000099",
+        "vault-ui",
+        vault_root.to_str().unwrap(),
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_requires_current_session_native_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library_id = state.active_library_id().unwrap();
+    let root = vault.to_str().unwrap();
+    let fake = import_access::bind_in_library(&state, &library_id, "vault-ui", root).unwrap();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &fake.profile_id,
+        &fake.epoch,
+        &fake.vault,
+        &fake.root,
+        "note.md"
+    )
+    .is_err());
+    let bound =
+        import_access::bind_with_picker(&state, &library_id, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &bound.profile_id,
+        &bound.epoch,
+        &bound.vault,
+        &bound.root,
+        "note.md"
+    )
+    .is_ok());
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(import_access::preview_authorized(
+        &state,
+        &library_id,
+        &bound.profile_id,
+        &bound.epoch,
+        &bound.vault,
+        &bound.root,
+        "note.md"
+    )
+    .is_err());
+    assert!(
+        import_access::bind_with_picker(&state, &library_id, "vault-ui", || None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn learning_import_access_selection_cancel_and_library_change_do_not_grant_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    assert!(
+        import_access::bind_with_picker(&state, &library, "vault-ui", || None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md"
+    )
+    .is_err());
+    assert!(
+        import_access::bind_with_picker(&state, &library, "vault-ui", || {
+            *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+            Some(vault.clone())
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn learning_import_prepared_payload_keeps_its_original_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    assert!(matches!(
+        payload,
+        TaskRequest::LearningImport(ImportTaskRequest::Prepare { .. })
+    ));
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview.target_token
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_rejects_source_changed_after_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Before\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    write_note(&vault, "note.md", "# After\n");
+    assert!(
+        import_access::prepare_payload(
+            &state,
+            &library,
+            &binding.profile_id,
+            &binding.epoch,
+            &binding.vault,
+            &binding.root,
+            "note.md",
+            &preview.source_sha256,
+            &preview.selection_id,
+            &preview.target_token
+        )
+        .is_err(),
+        "a changed source must require another preview; old hash {}",
+        preview.source_sha256
+    );
+}
+
+#[test]
+fn learning_import_access_superseded_folder_picker_cannot_replace_newer_choice() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("a");
+    let b = temp.path().join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let old = import_access::bind_with_picker(&state, &library, "vault-ui", || {
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(b.clone()))
+            .unwrap()
+            .unwrap();
+        Some(a.clone())
+    });
+    assert!(
+        old.is_err(),
+        "older picker must not replace a newer selection"
+    );
+}
+
+#[test]
+fn learning_import_access_native_note_picker_requires_selected_vault() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/lesson.md", "# Lesson\n");
+    let outside = temp.path().join("outside.md");
+    fs::write(&outside, "# outside\n").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let pick = |file: Option<std::path::PathBuf>| {
+        import_access::pick_note_with_picker(
+            &state,
+            &library,
+            &binding.profile_id,
+            &binding.epoch,
+            &binding.vault,
+            &binding.root,
+            |_| file,
+        )
+    };
+    let result = pick(Some(vault.join("notes/lesson.md"))).unwrap().unwrap();
+    assert_eq!(result.relative_path, "notes/lesson.md");
+    assert!(result.can_prepare);
+    assert!(pick(Some(outside)).is_err());
+    assert!(pick(None).unwrap().is_none());
+}
+
+#[test]
+fn learning_import_access_reselecting_same_vault_invalidates_old_preview_and_enqueue() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    assert!(import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token
+    )
+    .is_err());
+    assert!(crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview.target_token
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_rejects_target_changed_after_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Before\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    assert_eq!(preview.conflict, "unmapped");
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let tx = db.unchecked_transaction().unwrap();
+            let note = knowledge::save_in(
+                &tx,
+                NoteInput {
+                    id: None,
+                    expected_revision: None,
+                    notebook_id: None,
+                    title: "another import".into(),
+                    document: serde_json::json!({"type":"doc","content":[]}),
+                    tags: vec![],
+                    favorite: false,
+                    journal_date: None,
+                },
+                false,
+            )?;
+            let key = super::note_origins::NoteOriginKey::new(
+                &binding.profile_id,
+                &binding.vault,
+                "note.md",
+            )?;
+            super::note_origins::record_note_in(
+                &tx,
+                &key,
+                &note.id,
+                &preview.source_sha256,
+                &binding.epoch,
+            )?;
+            tx.commit().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token
+    )
+    .is_err());
+    assert!(crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview.target_token
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_note_picker_discards_result_when_source_reselected() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let result = import_access::pick_note_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| {
+            import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+                .unwrap()
+                .unwrap();
+            Some(vault.join("note.md"))
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn learning_import_access_restore_epoch_change_blocks_final_enqueue() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    state
+        .with_library(|db, _| super::source_profiles::invalidate_epochs(db))
+        .unwrap();
+    assert!(crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview.target_token
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_current_preview_queues_and_stages() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    let request = match &payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview.target_token,
+    )
+    .unwrap();
+    let result = super::import_runner::run_local(&state, &task, &request).unwrap();
+    assert_eq!(result["status"], "staged");
+}
+
+#[test]
+fn learning_import_request_hash_binds_target_token() {
+    let p = "11111111-1111-4111-8111-111111111111";
+    let e = "22222222-2222-4222-8222-222222222222";
+    let s = format!("{:x}", Sha256::digest(b"body"));
+    let a = import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-a");
+    let b = import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-b");
+    assert_eq!(a.len(), 64);
+    assert_ne!(a, b);
+    assert_eq!(
+        a,
+        import_access::import_request_sha256(p, e, "vault", "note.md", &s, "token-a")
+    );
+}
+
+#[test]
+fn learning_import_request_hash_does_not_collide_on_pipes() {
+    let p = "11111111-1111-4111-8111-111111111111";
+    let e = "22222222-2222-4222-8222-222222222222";
+    let s = format!("{:x}", Sha256::digest(b"body"));
+    let a = import_access::import_request_sha256(p, e, "v|a", "b.md", &s, "t");
+    let b = import_access::import_request_sha256(p, e, "v", "a|b.md", &s, "t");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn learning_import_prepared_request_hash_includes_preview_target_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "note.md", "# Test\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+    )
+    .unwrap();
+    let (payload, _, _) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "note.md",
+        &preview.source_sha256,
+        &preview.selection_id,
+        &preview.target_token,
+    )
+    .unwrap();
+    let TaskRequest::LearningImport(ImportTaskRequest::Prepare { request_sha256, .. }) = payload
+    else {
+        panic!("not a prepare task");
+    };
+    assert_eq!(
+        request_sha256,
+        import_access::import_request_sha256(
+            &preview.profile_id,
+            &preview.epoch,
+            &preview.vault,
+            &preview.relative_path,
+            &preview.source_sha256,
+            &preview.target_token,
+        )
+    );
+}
+
+fn note_input(
+    preview: &import_access::ImportNotePreview,
+) -> super::import_runner::ImportPrepareNote {
+    super::import_runner::ImportPrepareNote {
+        relative_path: preview.relative_path.clone(),
+        source_sha256: preview.source_sha256.clone(),
+        target_token: preview.target_token.clone(),
+    }
+}
+
+#[test]
+fn learning_import_access_multi_pick_rejects_outside_root_and_keeps_single_pick() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let outside = temp.path().join("outside.md");
+    fs::write(&outside, "# outside\n").unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let picked = import_access::pick_notes_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| {
+            Ok(Some(vec![
+                vault.join("notes/b.md"),
+                vault.join("notes/a.md"),
+            ]))
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(picked.len(), 2);
+    assert!(picked
+        .iter()
+        .all(|note| !note.will_overwrite && note.can_prepare));
+    assert_eq!(picked[0].relative_path, "notes/a.md");
+    assert_eq!(picked[1].relative_path, "notes/b.md");
+    assert!(import_access::pick_notes_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| Ok(Some(vec![vault.join("notes/a.md"), outside.clone()])),
+    )
+    .is_err());
+    let single = import_access::pick_note_with_picker(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        |_| Some(vault.join("notes/a.md")),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(single.relative_path, "notes/a.md");
+    assert!(!single.will_overwrite);
+}
+
+#[test]
+fn learning_import_access_prepares_many_notes_in_one_batch_and_refuses_escape() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault.clone()))
+            .unwrap()
+            .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let preview_b = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/b.md",
+    )
+    .unwrap();
+    assert!(!preview_a.will_overwrite && !preview_b.will_overwrite);
+    let prepared = import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[note_input(&preview_b), note_input(&preview_a)],
+        &preview_a.selection_id,
+    )
+    .unwrap();
+    let request = match &prepared.payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        prepared.payload,
+        &prepared.scope,
+        &prepared.selection_id,
+        &prepared.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    assert_eq!(staged["status"], "staged");
+    assert_eq!(staged["count"], 2);
+    let batch_id = staged["batchId"].as_str().unwrap();
+    let items = import_access::list_items_in_library(&state, &library, batch_id).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].relative_path, "notes/a.md");
+    assert_eq!(items[1].relative_path, "notes/b.md");
+    let single = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+        &preview_a.source_sha256,
+        &preview_a.selection_id,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    match single.0 {
+        TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            items,
+            relative_path,
+            ..
+        }) => {
+            assert!(items.is_empty());
+            assert_eq!(relative_path, "notes/a.md");
+        }
+        _ => panic!("single prepare must stay on the legacy shape"),
+    }
+    assert!(import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[
+            note_input(&preview_a),
+            super::import_runner::ImportPrepareNote {
+                relative_path: "../outside.md".into(),
+                source_sha256: preview_b.source_sha256.clone(),
+                target_token: preview_b.target_token.clone(),
+            },
+        ],
+        &preview_a.selection_id,
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_access_batch_conflict_does_not_overwrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    write_note(&vault, "notes/a.md", "# A\n");
+    write_note(&vault, "notes/b.md", "# B\n");
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding = import_access::bind_with_picker(&state, &library, "vault-ui", || Some(vault))
+        .unwrap()
+        .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let (payload, scope, selection) = import_access::prepare_payload(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+        &preview_a.source_sha256,
+        &preview_a.selection_id,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    let request = match &payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        payload,
+        &scope,
+        &selection,
+        &preview_a.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: staged["batchId"].as_str().unwrap().into(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    super::import_runner::run_local(&state, &task, &commit).unwrap();
+    let note_id =
+        import_access::list_items_in_library(&state, &library, staged["batchId"].as_str().unwrap())
+            .unwrap()[0]
+            .target_id
+            .clone()
+            .unwrap();
+    state
+        .with_library_mut(|db, _| {
+            let note = knowledge::get(db, &note_id)?;
+            knowledge::save(
+                db,
+                NoteInput {
+                    id: Some(note.id),
+                    expected_revision: Some(note.revision),
+                    notebook_id: note.notebook_id,
+                    title: "用户已改".into(),
+                    document: note.document,
+                    tags: note.tags,
+                    favorite: note.favorite,
+                    journal_date: note.journal_date,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let preview_a = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/a.md",
+    )
+    .unwrap();
+    let preview_b = import_access::preview_authorized(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        "notes/b.md",
+    )
+    .unwrap();
+    assert_eq!(preview_a.conflict, "target_changed");
+    assert!(!preview_a.will_overwrite);
+    assert!(preview_a.can_prepare);
+    let prepared = import_access::prepare_payload_many(
+        &state,
+        &library,
+        &binding.profile_id,
+        &binding.epoch,
+        &binding.vault,
+        &binding.root,
+        &[note_input(&preview_a), note_input(&preview_b)],
+        &preview_a.selection_id,
+    )
+    .unwrap();
+    let request = match &prepared.payload {
+        TaskRequest::LearningImport(request) => request.clone(),
+        _ => panic!("not an import task"),
+    };
+    let (task, _) = crate::tasks::submit_scoped_learning_import(
+        &state,
+        prepared.payload,
+        &prepared.scope,
+        &prepared.selection_id,
+        &prepared.target_token,
+    )
+    .unwrap();
+    let staged = super::import_runner::run_local(&state, &task, &request).unwrap();
+    let batch_id = staged["batchId"].as_str().unwrap().to_string();
+    let commit = ImportTaskRequest::Commit {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(commit.clone()))
+        .unwrap();
+    assert_eq!(
+        super::import_runner::run_local(&state, &task, &commit).unwrap()["status"],
+        "committed"
+    );
+    let items = import_access::list_items_in_library(&state, &library, &batch_id).unwrap();
+    let conflict = items
+        .iter()
+        .find(|item| item.relative_path == "notes/a.md")
+        .unwrap();
+    assert_eq!(conflict.status, "conflict");
+    let kept = state
+        .with_library(|db, _| Ok(knowledge::get(db, &note_id)?))
+        .unwrap();
+    assert_eq!(kept.title, "用户已改");
+    let cancel = ImportTaskRequest::Cancel {
+        batch_id: batch_id.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(cancel.clone()))
+        .unwrap();
+    assert_eq!(
+        super::import_runner::run_local(&state, &task, &cancel).unwrap()["status"],
+        "committed"
+    );
+    let revert = ImportTaskRequest::Revert {
+        batch_id,
+        expected_epoch: binding.epoch,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library, TaskRequest::LearningImport(revert.clone()))
+        .unwrap();
+    let reverted = super::import_runner::run_local(&state, &task, &revert).unwrap();
+    assert_eq!(reverted["status"], "reverted");
+    assert_eq!(reverted["report"]["archivesKept"], true);
+}

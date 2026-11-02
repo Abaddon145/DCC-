@@ -1,4 +1,5 @@
 const guards = new Set<() => Promise<void>>();
+const leaveGuards = new Set<() => Promise<void>>();
 const listeners = new Set<() => void>();
 let barriers = 0;
 export function registerNoteSaveGuard(guard: () => Promise<void>) { guards.add(guard); return () => { guards.delete(guard); }; }
@@ -6,6 +7,9 @@ export async function flushKnowledgeEdits() {
   // Saving can render and re-register an editor. A live Set iterator would revisit it forever.
   for (const guard of [...guards]) await guard();
 }
+/** Navigation-only guards run after note saves, never during ordinary note autosave. */
+export function registerWorkspaceLeaveGuard(guard:()=>Promise<void>) {leaveGuards.add(guard);return ()=>{leaveGuards.delete(guard);};}
+export async function flushWorkspaceEdits() {await flushKnowledgeEdits();for(const guard of [...leaveGuards])await guard();}
 export const knowledgeChangesPaused = () => barriers > 0;
 export function subscribeKnowledgeBarrier(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; }
 export async function withKnowledgeBarrier<T>(action: () => Promise<T>): Promise<T> {

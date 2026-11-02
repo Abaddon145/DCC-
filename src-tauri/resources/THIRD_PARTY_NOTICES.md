@@ -1,6 +1,11 @@
 # 第三方组件与许可证
 
-栈藏 DCC 素材库 v0.21.0 随安装包或前端产物使用以下第三方组件：
+## 学习播放器（开发接入中，未发布）
+
+- mpv Windows x64 `20261015-git-492bae0768`，独立子进程，固定可执行SHA-256及原归档摘要见 `learning-components.json`；该构建按GPLv2+对待，不标为LGPL-only。版权、GPLv2及LGPLv2.1文本位于 `media-tools/licenses/MPV-*`，字体配置位于 `media-tools/mpv/fonts.conf`。
+- 上游源码定位：https://github.com/mpv-player/mpv/tree/492bae0768 。最终发布前仍须核对该固定Windows构建及静态依赖的完整对应源码/分发材料；本地校验成功不代表已完成分发义务审核。不会替换栈藏现有LGPL FFmpeg/FFprobe，不复制映流整个安装包。
+
+栈藏 DCC 素材库 v0.23.0 随安装包或前端产物使用以下第三方组件：
 
 ## 下载工具（Phase 1）
 
@@ -37,6 +42,10 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 
 ## 产品参考
 
+课程结果 DTO 与来源校验参考本地映流 video_downloader 的已提交修复 c866508（MIT，Copyright 2026 14582），适配到栈藏 learning 模块；完整许可见 `YINGLIU-LICENSE.txt`。未迁入源服务、数据库或凭据。
+
+可选本地转写的 GGML 头/Whisper JSON 边界及组件摘要参考同一冻结提交的 `ai/transcription.rs` 与 `ai-components.json`，按栈藏字幕与文件访问规则独立适配。`whisper-components.json` 仅登记 whisper.cpp 1.9.1 及固定模型 revision 的元数据；当前没有随包分发 Whisper 二进制、依赖或模型，也不自动下载。后续实际分发组件时必须附上该组件及依赖自身的许可证，不能以映流的 MIT 许可替代。
+
 ## Mind Elixir 5.15.1
 
 - 上游：https://github.com/SSShooter/mind-elixir-core
@@ -45,5 +54,9 @@ FFmpeg 作为独立可执行程序由 Rust 后端以固定参数调用，不与�
 - 完整许可证随安装包以 `MIND-ELIXIR-LICENSE.txt` 分发。
 
 Markdown 解析使用 Marked 17.0.6（MIT，MarkedJS / Christopher Jeffrey），许可证见随包 `MARKED-LICENSE.md`。
+
+后台学习笔记迁入的纯转换器使用 pulldown-cmark 0.13.5（MIT，Copyright 2015 Google Inc.），固定上游提交 `48a2767b5b8ab0a4893e80d942e510065889fc6b`：https://github.com/pulldown-cmark/pulldown-cmark/tree/48a2767b5b8ab0a4893e80d942e510065889fc6b 。禁用默认 CLI/HTML 渲染与 SIMD，仅消费带原始字节偏移的解析事件；不替换现有手动导入与编辑器。随包 `PULLDOWN-CMARK-LICENSE.txt` 保留完整许可。
+
+该转换器新增传递依赖 unicase 2.10.0（MIT OR Apache-2.0，本应用选择 MIT），上游 https://github.com/seanmonstar/unicase ，Copyright (c) 2014-2026 Sean McArthur。随包 `UNICASE-LICENSE-MIT.txt` 保留完整许可；版本与摘要由 Cargo.lock 固定。
 
 知识库设计参考 Trilium、Joplin 和 Logseq 的产品交互，独立实现持久化、历史、附件和 AI；未复制其 GPL/AGPL 代码。

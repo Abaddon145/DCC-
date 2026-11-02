@@ -5,6 +5,35 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
+pub async fn read_note_preserved_markdown(
+    app: tauri::AppHandle,
+    library_id: String,
+    id: String,
+    item_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let base = state
+            .with_library_if_id(&library_id, |_, base| Ok(base.to_owned()))?
+            .ok_or("素材库已切换")?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let text = crate::learning::note_nodes::read_preserved(&db, &base, &id, &item_id)?;
+        state
+            .with_library_if_id(&library_id, |_, current| {
+                if current != base {
+                    return Err("素材库位置已变化，请重新打开笔记".into());
+                }
+                Ok(())
+            })?
+            .ok_or("素材库已切换")?;
+        Ok(text)
+    })
+    .await
+    .map_err(|_| "原文读取已中断，请重试".to_owned())?
+}
+
+#[tauri::command]
 pub fn start_note_screenshot() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -497,15 +526,12 @@ pub fn set_knowledge_editing(state: State<AppState>, editing: bool) {
         .store(editing, std::sync::atomic::Ordering::SeqCst);
 }
 #[tauri::command]
-pub fn finish_knowledge_close(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("请先等待正在执行的任务完成".into());
-    }
-    state
-        .knowledge_editing
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    app.exit(0);
-    Ok(())
+pub async fn finish_knowledge_close(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::learning::native_player::exit_application(&app, true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -592,9 +618,11 @@ pub fn search_notes(
     offset: u32,
     limit: u32,
     manual_order: Option<bool>,
+    unfiled_only: Option<bool>,
+    project_id: Option<String>,
 ) -> Result<NotePage, String> {
     active(state.with_library_if_id(&library_id, |db, _| {
-        knowledge::search_ordered(
+        knowledge::search_navigated(
             db,
             &query,
             notebook_id.as_deref(),
@@ -603,6 +631,10 @@ pub fn search_notes(
             offset,
             limit,
             manual_order.unwrap_or(false),
+            knowledge::NoteNavigation {
+                unfiled_only: unfiled_only.unwrap_or(false),
+                project_id: project_id.as_deref(),
+            },
         )
     })?)
 }

@@ -11,7 +11,7 @@ export type NoteInput = Pick<KnowledgeNote, "notebookId" | "title" | "document" 
 export interface KnowledgeNotebook { id: string; parentId: string | null; name: string; sortOrder: number }
 export interface NoteRevision { id: string; noteId: string; snapshot: KnowledgeNote; pinned: boolean; createdAt: string }
 export type NoteRevisionSummary = Omit<NoteRevision,"snapshot"> & {title:string};
-export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean }
+export interface NoteSearch { query: string; notebookId: string | null; trash: boolean; favorite: boolean; offset: number; limit: number; manualOrder?:boolean;unfiledOnly?:boolean;projectId?:string|null }
 export type NoteSummary = Pick<KnowledgeNote,"id"|"title"|"plainText"|"tags"|"favorite"|"updatedAt"|"color">;
 export interface KnowledgeReference {kind:string;targetId:string;label:string;available:boolean}
 export interface RecoveryDraft { input:NoteInput; savedAt:string }
@@ -61,6 +61,7 @@ export function knowledgeApi(libraryId: string) {
     importMarkdown: (path:string,sha256:string,document:JSONContent,notebookId:string|null) => invoke<{note:KnowledgeNote;warnings:string[]}>("import_note_markdown", {libraryId,path,sha256,document,notebookId}),
     exportMarkdown: (note:KnowledgeNote,markdown:string,path:string) => invoke<void>("export_note_markdown",{libraryId,id:note.id,revision:note.revision,markdown,path}),
     openAttachment: (id: string) => invoke<void>("open_note_attachment", {libraryId,id}),
+    readPreserved: (id:string,itemId:string)=>invoke<string>("read_note_preserved_markdown",{libraryId,id,itemId}),
     referenceTargets: (kind: string, query: string) => invoke<KnowledgeReference[]>("search_note_reference_targets", {libraryId,kind,query}),
     backlinks: (id: string) => invoke<NoteSummary[]>("get_note_backlinks", {libraryId,id}),
     references: (id: string) => invoke<Array<{kind:string;targetId:string;label:string;available:boolean}>>("get_note_references", {libraryId,id}),

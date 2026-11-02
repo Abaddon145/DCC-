@@ -5,6 +5,93 @@ use crate::{
 use std::path::Path;
 
 #[tauri::command]
+pub fn get_external_backup_summary(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<crate::backup::ExternalBackupSummary, String> {
+    state
+        .with_library_if_id(&expected_library_id, |db, _| {
+            crate::backup::external_media_backup_summary(db)
+        })?
+        .ok_or_else(|| "素材库已切换".into())
+}
+
+#[tauri::command]
+pub async fn preview_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    path: String,
+) -> Result<crate::media_access::ExternalVideoPreview, String> {
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        crate::media_access::preview_external_video_with_resources(
+            &state,
+            &expected_library_id,
+            Path::new(&path),
+            &|| false,
+            Some(&resources),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn commit_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    preview_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::media_access::commit_external_video(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &preview_id,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn relocate_external_video(
+    app: AppHandle,
+    expected_library_id: String,
+    file_id: String,
+    preview_id: String,
+    expected_source_revision: i64,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::media_access::relocate_external_video(
+            &app.state::<AppState>(),
+            &expected_library_id,
+            &file_id,
+            &preview_id,
+            expected_source_revision,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn archive_external_video(
+    app: AppHandle,
+    state: State<AppState>,
+    expected_library_id: String,
+    entry_id: String,
+    operation_id: String,
+) -> Result<String, String> {
+    let id = crate::media_archive::archive_external_video(
+        &state,
+        &expected_library_id,
+        &entry_id,
+        &operation_id,
+    )?;
+    tauri::async_runtime::spawn(crate::tasks::dispatch(app));
+    Ok(id)
+}
+
+#[tauri::command]
 pub fn get_selection_labels(
     state: State<AppState>,
     ids: Vec<String>,
@@ -629,6 +716,7 @@ fn validate_workspace_module(module_id: &str) -> Result<(), String> {
         "video",
         "projects",
         "knowledge",
+        "learning",
         "browserCapture",
         "downloader",
     ]
@@ -1760,21 +1848,27 @@ pub fn export_backup(state: State<AppState>, path: String) -> Result<(), String>
 }
 
 #[tauri::command]
-pub fn restore_backup(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
-    }
-    if app.get_webview_window("reference-board").is_some()
-        && state.reference_window_board_id()?.is_some()
-    {
-        return Err("请先收回悬浮参考板，再恢复素材库".into());
-    }
-    state.with_active_mut(|active| {
+pub async fn restore_backup(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
         if state.tasks.busy() {
             return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
         }
-        backup::restore_library(active, &PathBuf::from(path))
+        if app.get_webview_window("reference-board").is_some()
+            && state.reference_window_board_id()?.is_some()
+        {
+            return Err("请先收回悬浮参考板，再恢复素材库".into());
+        }
+        let _playback = crate::learning::native_player::quiesce_for_library_change(&state)?;
+        state.with_active_mut(|active| {
+            if state.tasks.busy() {
+                return Err("任务仍在执行，请先等待或安全停止再恢复素材库".into());
+            }
+            state.restore_backup_locked(active, &PathBuf::from(path))
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1783,20 +1877,24 @@ pub fn get_library_locations(state: State<AppState>) -> Result<LibraryLocationSt
 }
 
 #[tauri::command]
-pub fn change_library(
+pub async fn change_library(
     app: AppHandle,
-    state: State<AppState>,
     request: StorageChangeRequest,
 ) -> Result<LibraryLocationState, String> {
-    if state.tasks.busy() {
-        return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
-    }
-    if app.get_webview_window("reference-board").is_some()
-        && state.reference_window_board_id()?.is_some()
-    {
-        return Err("请先收回悬浮参考板，再切换素材库".into());
-    }
-    state.change_library(request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if state.tasks.busy() {
+            return Err("任务仍在执行，请先等待或安全停止再切换素材库".into());
+        }
+        if app.get_webview_window("reference-board").is_some()
+            && state.reference_window_board_id()?.is_some()
+        {
+            return Err("请先收回悬浮参考板，再切换素材库".into());
+        }
+        state.change_library(request)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3120,6 +3218,12 @@ mod tests {
     #[test]
     fn browser_capture_workspace_context_is_a_registered_browsing_module() {
         assert_eq!(validate_workspace_module("browserCapture"), Ok(()));
+    }
+    #[test]
+    fn learning_workspace_context_is_registered_without_replacing_video() {
+        assert_eq!(validate_workspace_module("learning"), Ok(()));
+        assert_eq!(validate_workspace_module("video"), Ok(()));
+        assert!(validate_workspace_module("learning/../../video").is_err());
     }
     #[test]
     fn parses_baidu_share_text() {

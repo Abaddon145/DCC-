@@ -12,6 +12,12 @@ export type ContentLanguage = "zh-CN" | "en";
 export interface SingleAssetSaveOptions { completeBilingual: boolean; autoTranslate: boolean; formatWarning?: string; skipAutoTranslation?: boolean }
 export type LinkCheckStatus = "unknown" | "valid" | "invalid" | "error";
 export type LibraryTaskRequest =
+  | {kind:"courseExcerpt";request:import("./features/learning/types").ExcerptTaskRequest}
+  | {kind:"courseTranscription";request:import("./features/learning/types").CourseTranscriptionRequest}
+  | {kind:"courseAnalysis";request:import("./features/learning/types").CourseAnalysisRequest}
+  | {kind:"learningImport";request:{action:"commit"|"cancel"|"cancelCourse";batchId:string}|{action:"revert"|"revertCourse";batchId:string;expectedEpoch:string}|{action:"commitCourse";selectionId:string;previewId:string}}
+  | {kind:"archiveExternalVideo";request:{entryId:string;operationId:string}}
+  | {kind:"aiAnalyze";request:import("./features/intelligence/types").AnalysisRequest}
   | {kind:"download";request:DownloadRequest}
   | { kind: "ueAssets"; request: unknown }
   | { kind: "browserCapture"; request: { id: string } }
@@ -396,7 +402,7 @@ export interface LinkCheckProgress { checked: number; total: number; valid: numb
 export interface LinkCheckReport { totalAssets: number; uniqueLinks: number; checkedAssets: number; valid: number; invalid: number; error: number; skipped: number; cancelled: boolean; stoppedReason: string | null }
 
 export interface MediaFolder { id: string; kind: MediaKind; parentId: string | null; name: string; sortOrder: number; entryCount: number }
-export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null }
+export interface MediaFile { id: string; entryId: string; role: "main" | "dependency" | "proxy" | "thumbnail" | "waveform"; logicalPath: string; originalName: string; mimeType: string; fileSize: number; checksum: string; width: number | null; height: number | null; durationMs: number | null; storageMode?: "managed" | "external"; sourceRevision?: number | null }
 export interface MediaEntry { id: string; kind: MediaKind; folderId: string | null; name: string; description: string; author: string; sourceUrl: string; license: string; favorite: boolean; processingStatus: string; processingMessage: string; format: string; fileSize: number; tags: string[]; thumbnailFileId: string | null; primaryFileId: string; createdAt: string; updatedAt: string }
 export interface MediaEntryDetail extends MediaEntry { files: MediaFile[]; assetIds: string[]; projectIds: string[] }
 export interface ModelThumbnailJob { id: string; logicalPath: string; originalName: string }
@@ -412,7 +418,7 @@ export interface BrowserCaptureState { libraryId:string; name:string; submitted:
 
 export type TranslationProvider = "baidu" | "deepseek";
 export interface TranslationPreferences { providerOrder: TranslationProvider[]; autoFallback: boolean; cacheEnabled: boolean; deepseekMonthlyLimit: number }
-export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
+export interface TranslationUsage { month: string; deepseekTokens: number; creativeTokens?: number; courseTokens?: number; baiduCharacters: number; cacheEntries: number; cacheHits: number }
 export interface TranslationEstimate { characters: number; estimatedTokens: number }
 export interface FormTranslationCostInput { localizations: Record<string, LocalizedAssetText>; id?: string; sourceUrl: string; completeBilingual: boolean; autoTranslate?: boolean }
 export interface TranslationCostRequest { ids?: string[]; form?: FormTranslationCostInput }

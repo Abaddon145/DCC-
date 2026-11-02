@@ -1,0 +1,75 @@
+import {fireEvent,render,screen,waitFor} from "@testing-library/react";
+import {beforeEach,it,expect,vi} from "vitest";
+import App from "./App";
+import {api} from "./lib/api";
+import {learningApi} from "./features/learning/api";
+import {defaultGlobalPreferences,defaultLibraryPreferences} from "./lib/personalization";
+import type {ExcerptComposerProps} from "./features/learning/ExcerptComposer";
+vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn().mockResolvedValue(()=>{})}));
+vi.mock("./lib/api",async original=>{const module=await original<typeof import("./lib/api")>();return {...module,api:{...module.api,getWorkspaceContext:vi.fn().mockResolvedValue({libraryId:"lib",enabled:false,value:null}),saveWorkspaceContext:vi.fn().mockResolvedValue(true),getPersonalization:vi.fn(),getTranslationSettings:vi.fn().mockResolvedValue({contentLanguage:"zh-CN"}),getMeta:vi.fn().mockResolvedValue({categories:[],filters:{tags:[],dccTools:[],versions:[],formats:[],licenses:[]},totalAssets:0}),listSmartCollections:vi.fn().mockResolvedValue([]),search:vi.fn().mockResolvedValue({items:[],total:0,offset:0,limit:80})}};});
+vi.mock("./features/learning/api",()=>({learningApi:{prepareNoteJump:vi.fn(),prepareBoardExcerptJump:vi.fn(),ensureCourse:vi.fn(),getCourse:vi.fn(),startPlayback:vi.fn(),getPlayback:vi.fn(),setViewport:vi.fn().mockResolvedValue(undefined),controlPlayback:vi.fn(),stopPlayback:vi.fn()}}));
+const noteReference={courseId:"596d257d-3e5c-46c4-a464-187cf180c6bd",mediaId:"b01c829f-de85-4671-8464-5e7db03edf8a",fingerprint:"a".repeat(64),ranges:[{startMs:1000,endMs:3000},{startMs:5000,endMs:6000}],label:"笔记片段"};
+vi.mock("./components/KnowledgeWorkspace",()=>({default:({onLearnReference,initialNoteId}:{onLearnReference?:(reference:typeof noteReference,index:number,noteId:string)=>Promise<void>;initialNoteId?:string})=><section><button onClick={()=>void onLearnReference?.(noteReference,1,"11111111-1111-4111-8111-111111111111")}>学习笔记片段</button>{initialNoteId&&<span>笔记详情 {initialNoteId}</span>}</section>}));
+vi.mock("./components/TaskCenter",()=>({TaskCenter:()=>null}));
+vi.mock("./components/AssetGrid",()=>({AssetGrid:()=>null}));
+vi.mock("./components/ReliabilitySettings",()=>({AutomaticBackupService:()=>null}));
+vi.mock("./components/MediaLibraryView",()=>({MediaLibraryView:({onLearn,initialEntryId}:{onLearn?:(id:string)=>void;initialEntryId?:string})=><section><button onClick={()=>onLearn?.("media")}>学习此视频</button>{initialEntryId&&<span>视频详情 {initialEntryId}</span>}</section>}));
+vi.mock("./components/ProjectHub",()=>({ProjectHub:({onLearn,onOpenNote,initialMediaId,initialProjectId}:{onLearn?:(id:string,projectId:string,context:{tab:string;scroll:number})=>void;onOpenNote?:(id:string)=>void;initialMediaId?:string;initialProjectId?:string})=><section><button onClick={()=>onLearn?.("media","project",{tab:"units",scroll:123})}>学习项目视频</button><button onClick={()=>onOpenNote?.("project-note")}>打开项目笔记</button>{initialMediaId&&<span>项目视频详情 {initialMediaId} · {initialProjectId}</span>}</section>}));
+vi.mock("./features/learning/ExcerptComposer",()=>({ExcerptComposer:({onOpen}:ExcerptComposerProps)=><section role="dialog" aria-modal="true" aria-label="学习摘录"><button onClick={()=>void onOpen({operationId:"operation",excerptId:"preview",noteId:"saved-note",warnings:[]})}>打开测试笔记</button><button onClick={()=>void onOpen({operationId:"operation",excerptId:"preview",boardId:"saved-board",warnings:[]})}>打开测试参考板</button></section>}));
+vi.mock("./components/ReferenceBoardHub",()=>({ReferenceBoardHub:({initialBoardId,initialItemId,onLearnSource}:{initialBoardId:string|null;initialItemId?:string|null;onLearnSource?:(board:string,item:string)=>Promise<void>})=><section><span>参考板详情 {initialBoardId}{initialItemId&&` · ${initialItemId}`}</span><button onClick={()=>void onLearnSource?.("board","item")}>学习参考截图</button></section>}));
+beforeEach(()=>{
+  vi.clearAllMocks();vi.stubGlobal("ResizeObserver",class{observe(){}unobserve(){}disconnect(){}});
+  vi.mocked(api.getPersonalization).mockResolvedValue({global:defaultGlobalPreferences,library:{...defaultLibraryPreferences,startupModule:"videoLibrary",rememberWorkspace:false}});
+  const course={id:"course",mediaId:"media",title:"制作教程",positionMs:0,durationMs:60000,rate:1,completed:false,progressRevision:1};
+  const snapshot={sessionId:"session",libraryId:"lib",courseId:"course",ready:true,positionMs:0,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[],audioId:null,subtitleId:null,fullscreen:false,error:null,saveError:null};
+  vi.mocked(learningApi.ensureCourse).mockResolvedValue(course);vi.mocked(learningApi.getCourse).mockResolvedValue(course);vi.mocked(learningApi.startPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.getPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.controlPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.stopPlayback).mockResolvedValue(undefined);
+});
+it("opens the existing video identity and returns to that exact detail",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));
+  await screen.findByRole("button",{name:"播放"});
+  expect(learningApi.ensureCourse).toHaveBeenCalledWith("lib","media");
+  fireEvent.click(screen.getByRole("button",{name:"返回视频详情"}));
+  expect(await screen.findByText("视频详情 media")).toBeInTheDocument();
+  expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
+});
+it.each([["打开测试笔记","笔记详情 saved-note"],["打开测试参考板","参考板详情 saved-board"]])("opens the precise saved target via %s",async(button,expected)=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));await screen.findByRole("button",{name:"播放"});fireEvent.click(screen.getByRole("button",{name:"创建学习摘录"}));fireEvent.click(screen.getByRole("button",{name:button}));
+  expect(await screen.findByText(expected)).toBeInTheDocument();expect(learningApi.stopPlayback).toHaveBeenCalledWith("lib","session");
+});
+it("opens an associated project note by its exact identity",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"创作项目"}));fireEvent.click(await screen.findByRole("button",{name:"打开项目笔记"}));expect(await screen.findByText("笔记详情 project-note")).toBeInTheDocument();
+});
+it("opens the verified screenshot time and returns to the exact board item",async()=>{
+  vi.mocked(learningApi.prepareBoardExcerptJump).mockResolvedValue({courseId:"course",mediaId:"media",positionMs:400,endMs:401,sourceFingerprint:"a".repeat(64)});
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"参考板"}));fireEvent.click(await screen.findByRole("button",{name:"学习参考截图"}));await screen.findByRole("button",{name:"返回参考板"});
+  expect(learningApi.prepareBoardExcerptJump).toHaveBeenCalledWith("lib","board","item");await waitFor(()=>expect(learningApi.startPlayback).toHaveBeenCalledWith("lib","course","a".repeat(64)));
+  fireEvent.click(screen.getByRole("button",{name:"返回参考板"}));expect(await screen.findByText("参考板详情 board · item")).toBeInTheDocument();
+});
+it("opens a verified note range and returns to the same note identity",async()=>{
+  const snapshot={sessionId:"note-session",libraryId:"lib",courseId:noteReference.courseId,ready:true,positionMs:0,durationMs:60000,paused:true,rate:1,volume:60,muted:false,ended:false,tracks:[],audioId:null,subtitleId:null,fullscreen:false,error:null,saveError:null};
+  vi.mocked(learningApi.prepareNoteJump).mockResolvedValue({courseId:noteReference.courseId,mediaId:noteReference.mediaId,positionMs:5000,endMs:6000});
+  vi.mocked(learningApi.getCourse).mockResolvedValue({id:noteReference.courseId,mediaId:noteReference.mediaId,title:"笔记的课程",positionMs:0,durationMs:60000,rate:1,completed:false,progressRevision:1});
+  vi.mocked(learningApi.startPlayback).mockResolvedValue(snapshot);vi.mocked(learningApi.getPlayback).mockResolvedValue(snapshot);
+  let current=snapshot;
+  vi.mocked(learningApi.controlPlayback).mockImplementation(async(_lib,_session,action)=>{if(action.type==="seek")current={...current,positionMs:action.positionMs};return current;});
+  render(<App/>);
+  fireEvent.click(await screen.findByRole("button",{name:"知识库"}));
+  fireEvent.click(await screen.findByRole("button",{name:"学习笔记片段"}));
+  await screen.findByRole("region",{name:"学习播放器"});
+  await waitFor(()=>expect(screen.getByRole("slider",{name:"播放进度"})).toHaveValue("5000"));
+  expect(learningApi.prepareNoteJump).toHaveBeenCalledWith("lib",noteReference,1);
+  expect(learningApi.startPlayback).toHaveBeenCalledWith("lib",noteReference.courseId,noteReference.fingerprint);
+  fireEvent.click(screen.getByRole("button",{name:"返回笔记"}));
+  expect(await screen.findByText("笔记详情 11111111-1111-4111-8111-111111111111")).toBeInTheDocument();
+});
+it("navigation waits for progress save, failure keeps learning and history unchanged",async()=>{
+  render(<App/>);fireEvent.click(await screen.findByRole("button",{name:"学习此视频"}));await screen.findByRole("button",{name:"播放"});
+  vi.mocked(learningApi.stopPlayback).mockRejectedValueOnce(new Error("进度未保存"));
+  fireEvent.click(screen.getByRole("button",{name:"创作项目"}));
+  await waitFor(()=>expect(learningApi.stopPlayback).toHaveBeenCalled());
+  expect(screen.getByRole("region",{name:"学习播放器"})).toBeInTheDocument();expect(screen.queryByRole("button",{name:"学习项目视频"})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"创作项目"}));
+  fireEvent.click(await screen.findByRole("button",{name:"学习项目视频"}));await screen.findByRole("button",{name:"返回项目"});
+  fireEvent.click(screen.getByRole("button",{name:"返回项目"}));
+  expect(await screen.findByText("项目视频详情 media · project")).toBeInTheDocument();
+});

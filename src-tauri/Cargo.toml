@@ -1,6 +1,6 @@
 [package]
 name = "dcc-asset-library"
-version = "0.22.0"
+version = "0.23.0"
 description = "Local DCC and Unreal Engine asset library"
 authors = ["DCC Asset Library"]
 edition = "2021"
@@ -18,7 +18,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled-full", "backup"] }
+rusqlite = { version = "0.41.1", features = ["bundled-full", "backup", "fallible_uint"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
@@ -35,6 +35,7 @@ walkdir = "2"
 reqwest = { version = "0.13", features = ["json", "form"] }
 regex = "1"
 percent-encoding = "2"
+pulldown-cmark = { version = "=0.13.5", default-features = false }
 md5 = "0.7"
 keyring = { version = "3", features = ["windows-native"] }
 tokio = { version = "1", features = ["time", "macros"] }
@@ -43,4 +44,7 @@ tokio = { version = "1", features = ["time", "macros"] }
 pretty_assertions = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Pipes"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.189"

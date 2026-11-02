@@ -349,10 +349,23 @@ pub(crate) fn inspect_document(
             "reference",
             "attachment",
             "mindMap",
+            "learningReference",
+            "preservedMarkdown",
         ]
         .contains(&kind)
         {
             return Err("笔记含不支持的节点类型".into());
+        }
+        if let Some(learning) = crate::learning::note_nodes::inspect_node(node)? {
+            match learning {
+                crate::learning::note_nodes::LearningNode::Reference(reference) => {
+                    references.push(("media".into(), reference.media_id, reference.label.clone()));
+                    text.push_str(&reference.label);
+                }
+                crate::learning::note_nodes::LearningNode::Preserved(block) => {
+                    text.push_str(&block.label)
+                }
+            }
         }
         if let Some(marks) = node.get("marks").and_then(Value::as_array) {
             for mark in marks {
@@ -525,7 +538,33 @@ pub fn save(db: &mut Connection, input: NoteInput) -> Result<Note> {
     Ok(note)
 }
 pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool) -> Result<Note> {
+    save_note_in(tx, input, force_checkpoint, None)
+}
+// A durable file journal reserves this ID before publishing attachments.
+pub(crate) fn save_reserved_new_in(tx: &Connection, input: NoteInput, id: &str) -> Result<Note> {
+    if input.id.is_some()
+        || input.expected_revision.is_some()
+        || !Uuid::parse_str(id).is_ok_and(|v| v.to_string() == id)
+        || tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_notes WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(error)?
+    {
+        return Err("预分配笔记身份已占用或不是新建请求，未覆盖原笔记".into());
+    }
+    save_note_in(tx, input, false, Some(id))
+}
+fn save_note_in(
+    tx: &Connection,
+    input: NoteInput,
+    force_checkpoint: bool,
+    reserved_id: Option<&str>,
+) -> Result<Note> {
     let (plain, references) = inspect_document(&input.document)?;
+    crate::learning::note_nodes::validate_registered(tx, &input.document)?;
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 300 {
         return Err("笔记标题需为 1–300 个字符".into());
@@ -563,7 +602,10 @@ pub(crate) fn save_in(tx: &Connection, input: NoteInput, force_checkpoint: bool)
     let timestamp = now();
     let note = Note {
         color: previous.as_ref().and_then(|v| v.color.clone()),
-        id: previous.as_ref().map(|v| v.id.clone()).unwrap_or_else(uid),
+        id: previous
+            .as_ref()
+            .map(|v| v.id.clone())
+            .unwrap_or_else(|| reserved_id.map(str::to_owned).unwrap_or_else(uid)),
         notebook_id: input.notebook_id,
         title: title.into(),
         document: input.document,
@@ -633,6 +675,11 @@ pub fn search(
     search_ordered(db, query, notebook, trash, favorite, offset, limit, false)
 }
 
+#[derive(Default)]
+pub struct NoteNavigation<'a> {
+    pub unfiled_only: bool,
+    pub project_id: Option<&'a str>,
+}
 pub fn search_ordered(
     db: &Connection,
     query: &str,
@@ -643,9 +690,51 @@ pub fn search_ordered(
     limit: u32,
     manual: bool,
 ) -> Result<NotePage> {
+    search_navigated(
+        db,
+        query,
+        notebook,
+        trash,
+        favorite,
+        offset,
+        limit,
+        manual,
+        NoteNavigation::default(),
+    )
+}
+
+pub fn search_navigated(
+    db: &Connection,
+    query: &str,
+    notebook: Option<&str>,
+    trash: bool,
+    favorite: bool,
+    offset: u32,
+    limit: u32,
+    manual: bool,
+    navigation: NoteNavigation<'_>,
+) -> Result<NotePage> {
     let query = query.trim();
     if query.len() > 2000 {
         return Err("搜索词过长".into());
+    }
+    if manual && (navigation.unfiled_only || navigation.project_id.is_some()) {
+        return Err("收件箱与项目引用视图仅支持最近更新排序".into());
+    }
+    if let Some(project) = navigation.project_id {
+        if !Uuid::parse_str(project).is_ok_and(|id| id.to_string() == project) {
+            return Err("项目标识无效".into());
+        }
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                [project],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            return Err("项目不存在或不属于当前素材库".into());
+        }
     }
     let use_fts = query.chars().count() >= 3;
     let fts = format!("\"{}\"", query.replace('"', "\"\""));
@@ -662,11 +751,20 @@ pub fn search_ordered(
     } else {
         "(n.title LIKE ?2 ESCAPE '!' OR n.plain_text LIKE ?2 ESCAPE '!' OR n.tags_json LIKE ?2 ESCAPE '!')"
     };
-    let where_sql=format!("(?3 IS NULL OR n.notebook_id=?3) AND (n.deleted_at IS NOT NULL)=?4 AND (?5=0 OR n.favorite=1) AND (?6='' OR {filter})");
+    let where_sql=format!("(?3 IS NULL OR n.notebook_id=?3) AND (n.deleted_at IS NOT NULL)=?4 AND (?5=0 OR n.favorite=1) AND (?6='' OR {filter}) AND (?7=0 OR n.notebook_id IS NULL) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM knowledge_references r WHERE r.note_id=n.id AND r.target_kind='project' AND r.target_id=?8))");
     let total = db
         .query_row(
             &format!("SELECT count(*) FROM knowledge_notes n WHERE {where_sql}"),
-            params![fts, like, notebook, trash, favorite, query],
+            params![
+                fts,
+                like,
+                notebook,
+                trash,
+                favorite,
+                query,
+                navigation.unfiled_only,
+                navigation.project_id
+            ],
             |r| r.get(0),
         )
         .map_err(error)?;
@@ -675,7 +773,7 @@ pub fn search_ordered(
     } else {
         "n.updated_at DESC,n.id"
     };
-    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n WHERE {where_sql} ORDER BY {order} LIMIT ?7 OFFSET ?8")).map_err(error)?;
+    let mut statement=db.prepare(&format!("SELECT n.id,n.title,substr(n.plain_text,1,240),n.tags_json,n.favorite,n.updated_at,n.navigation_color FROM knowledge_notes n WHERE {where_sql} ORDER BY {order} LIMIT ?9 OFFSET ?10")).map_err(error)?;
     let items = statement
         .query_map(
             params![
@@ -685,6 +783,8 @@ pub fn search_ordered(
                 trash,
                 favorite,
                 query,
+                navigation.unfiled_only,
+                navigation.project_id,
                 limit.clamp(1, 100),
                 offset
             ],
@@ -794,6 +894,20 @@ pub fn set_deleted(
     .map_err(error)?;
     index(&tx, &note)?;
     tx.commit().map_err(error)?;
+    Ok(note)
+}
+/// Soft-delete inside a caller transaction (import revert); same effect as `set_deleted(.., true)`.
+pub(crate) fn trash_in(tx: &Connection, id: &str) -> Result<Note> {
+    let mut note = get(tx, id)?;
+    note.deleted_at = Some(now());
+    note.revision += 1;
+    note.updated_at = now();
+    tx.execute(
+        "UPDATE knowledge_notes SET deleted_at=?2,revision=?3,updated_at=?4 WHERE id=?1",
+        params![id, note.deleted_at, note.revision, note.updated_at],
+    )
+    .map_err(error)?;
+    index(tx, &note)?;
     Ok(note)
 }
 #[cfg(test)]
@@ -944,6 +1058,159 @@ mod tests {
             tags: note.tags.clone(),
             favorite: note.favorite,
             journal_date: note.journal_date.clone(),
+        }
+    }
+    #[test]
+    fn knowledge_navigation_inbox_filters_full_results_before_paging_and_keeps_old_search() {
+        let mut db = db();
+        let folder = upsert_notebook(&mut db, None, None, "UE", 0).unwrap();
+        let mut root = input("special root");
+        root.favorite = true;
+        let root = save(&mut db, root).unwrap();
+        let other = save(&mut db, input("other root")).unwrap();
+        let mut assigned = input("special assigned");
+        assigned.notebook_id = Some(folder.id.clone());
+        save(&mut db, assigned).unwrap();
+        assert_eq!(search(&db, "", None, false, false, 0, 40).unwrap().total, 3);
+        let inbox = || NoteNavigation {
+            unfiled_only: true,
+            project_id: None,
+        };
+        let first = search_navigated(&db, "", None, false, false, 0, 1, false, inbox()).unwrap();
+        let second = search_navigated(&db, "", None, false, false, 1, 1, false, inbox()).unwrap();
+        assert_eq!(
+            (
+                first.total,
+                second.total,
+                first.items.len(),
+                second.items.len()
+            ),
+            (2, 2, 1, 1)
+        );
+        assert_ne!(first.items[0].id, second.items[0].id);
+        let ids = [first.items[0].id.clone(), second.items[0].id.clone()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            [root.id.clone(), other.id.clone()].into_iter().collect()
+        );
+        let matched =
+            search_navigated(&db, "special", None, false, true, 0, 40, false, inbox()).unwrap();
+        assert_eq!(matched.total, 1);
+        assert_eq!(matched.items[0].id, root.id);
+        assert_eq!(
+            search_ordered(&db, "special", Some(&folder.id), false, false, 0, 40, true)
+                .unwrap()
+                .total,
+            1
+        );
+        assert!(search_navigated(&db, "", None, false, false, 0, 40, true, inbox()).is_err());
+        set_deleted(&mut db, &other.id, other.revision, true).unwrap();
+        assert_eq!(
+            search_navigated(&db, "", None, false, false, 0, 40, false, inbox())
+                .unwrap()
+                .total,
+            1
+        );
+        let trash = search_navigated(&db, "", None, true, false, 0, 40, false, inbox()).unwrap();
+        assert_eq!(trash.total, 1);
+        assert_eq!(trash.items[0].id, other.id);
+    }
+    #[test]
+    fn knowledge_navigation_projects_use_direct_references_and_reject_unknown_scopes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&root.path().join("navigation.db")).unwrap();
+        let project = crate::projects::upsert_project(
+            &mut db,
+            crate::models::ProjectInput {
+                id: None,
+                name: "UE project".into(),
+                description: String::new(),
+                project_type: "scene".into(),
+                status: "active".into(),
+                target_tools: vec![],
+                versions: vec![],
+                resolution_width: None,
+                resolution_height: None,
+                frame_rate: None,
+                cover_asset_id: None,
+                cover_media_entry_id: None,
+            },
+        )
+        .unwrap()
+        .summary
+        .id;
+        let folder = upsert_notebook(&mut db, None, None, "assigned", 0).unwrap();
+        let reference = |kind: &str| json!({"type":"reference","attrs":{"kind":kind,"targetId":project,"label":"pipeline"}});
+        let mut first = input("special root");
+        first.document = json!({"type":"doc","content":[{"type":"paragraph","content":[reference("project"),reference("project")]}]});
+        let first = save(&mut db, first).unwrap();
+        let mut assigned = input("assigned");
+        assigned.document = first.document.clone();
+        assigned.notebook_id = Some(folder.id);
+        assigned.favorite = true;
+        let assigned = save(&mut db, assigned).unwrap();
+        let mut unrelated = input("special unrelated");
+        unrelated.document =
+            json!({"type":"doc","content":[{"type":"paragraph","content":[reference("asset")]}]});
+        save(&mut db, unrelated).unwrap();
+        let scope = || NoteNavigation {
+            unfiled_only: false,
+            project_id: Some(&project),
+        };
+        let page = search_navigated(&db, "", None, false, false, 0, 40, false, scope()).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            [first.id.clone(), assigned.id.clone()]
+                .into_iter()
+                .collect()
+        );
+        let matched =
+            search_navigated(&db, "special", None, false, false, 0, 1, false, scope()).unwrap();
+        assert_eq!(matched.total, 1);
+        assert_eq!(matched.items[0].id, first.id);
+        let favorite = search_navigated(&db, "", None, false, true, 0, 40, false, scope()).unwrap();
+        assert_eq!(favorite.total, 1);
+        assert_eq!(favorite.items[0].id, assigned.id);
+        let inbox = search_navigated(
+            &db,
+            "",
+            None,
+            false,
+            false,
+            0,
+            40,
+            false,
+            NoteNavigation {
+                unfiled_only: true,
+                project_id: Some(&project),
+            },
+        )
+        .unwrap();
+        assert_eq!(inbox.total, 1);
+        assert_eq!(inbox.items[0].id, first.id);
+        assert!(search_navigated(&db, "", None, false, false, 0, 40, true, scope()).is_err());
+        for id in ["../project".to_string(), uuid::Uuid::new_v4().to_string()] {
+            assert!(search_navigated(
+                &db,
+                "",
+                None,
+                false,
+                false,
+                0,
+                40,
+                false,
+                NoteNavigation {
+                    unfiled_only: false,
+                    project_id: Some(&id)
+                }
+            )
+            .is_err());
         }
     }
     #[test]

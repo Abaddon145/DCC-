@@ -234,7 +234,7 @@ fn database_open_installs_compatible_asset_registry() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "21");
+    assert_eq!(version, "39");
 }
 
 #[test]
@@ -376,6 +376,7 @@ fn request() -> CoreSearchRequest {
 fn mixed_search_is_bounded_and_reads_live_names_and_soft_deletion() {
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     let mut query = request();
     query.limit = 1;
     let page = repository::search(&db, &query).unwrap();
@@ -478,6 +479,7 @@ fn purge_blocks_external_version_and_allows_both_owners_in_same_batch() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = old_fixture();
     super::migrate(&db).unwrap();
+    crate::learning::migrate(&db).unwrap();
     let legacy = repository::register_origin(
         &db,
         &CoreOrigin {
@@ -1107,6 +1109,7 @@ fn local_audio_video_metadata_and_short_clip_thumbnail_use_bundled_tools() {
 fn shared_tags_keep_ids_languages_colors_and_media_only_usage() {
     let mut db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     let a = repository::register_origin(
         &db,
         &CoreOrigin {
@@ -1139,6 +1142,7 @@ fn shared_tags_keep_ids_languages_colors_and_media_only_usage() {
                 query: "森林".into(),
                 asset_type: None,
                 source: None,
+                project_id: None,
                 locale: "zh-CN".into(),
                 offset: 0,
                 limit: 80
@@ -1304,6 +1308,7 @@ fn versions_attach_only_active_originals_and_deletion_preserves_files() {
     let dir = tempfile::tempdir().unwrap();
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    crate::learning::migrate(&db).unwrap();
     let m = repository::register_origin(
         &db,
         &CoreOrigin {
@@ -1418,6 +1423,7 @@ fn sources_aggregate_old_values_validate_urls_and_preserve_old_edits() {
 fn source_search_uses_the_same_host_rules_and_download_sources_as_details() {
     let db = old_fixture();
     super::migrate(&db).unwrap();
+    super::intelligence_migration::migrate(&db).unwrap();
     crate::downloader::service::migrate(&db).unwrap();
     db.execute(
         "UPDATE assets SET source_url='https://evil.example/fab.com/fake'",
@@ -1438,6 +1444,7 @@ fn source_search_uses_the_same_host_rules_and_download_sources_as_details() {
                 query: String::new(),
                 asset_type: None,
                 source: Some(source.into()),
+                project_id: None,
                 locale: "zh-CN".into(),
                 offset: 0,
                 limit: 80,

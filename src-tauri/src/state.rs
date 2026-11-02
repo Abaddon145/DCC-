@@ -22,6 +22,7 @@ use walkdir::WalkDir;
 
 const SETTINGS_FILE: &str = "app-settings.json";
 const MARKER_FILE: &str = "library.json";
+const SCHEMA_PROTECTION_PREFIX: &str = "素材库升级保护未完成：";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +104,8 @@ pub struct ActiveLibrary {
 }
 
 pub struct AppState {
+    pub learning_runtime: crate::learning::native_player::NativeRuntime,
+    pub external_videos: Mutex<crate::media_access::ExternalVideoRegistry>,
     pub knowledge_editing: AtomicBool,
     pub tasks: crate::tasks::TaskRegistry,
     pub translation_service: crate::translation_service::TranslationService,
@@ -110,6 +113,16 @@ pub struct AppState {
     settings: Mutex<AppSettings>,
     startup_warning: Mutex<Option<String>>,
     pub active: Mutex<ActiveLibrary>,
+    pub(crate) source_scope_nonce: Mutex<Uuid>,
+    #[cfg(windows)]
+    pub(crate) learning_import_selection: Mutex<crate::learning::import_access::ImportSelection>,
+    #[cfg(windows)]
+    pub(crate) sqlite_import_gate: Mutex<()>,
+    #[cfg(windows)]
+    pub(crate) sqlite_import_selection:
+        Mutex<crate::learning::import_access::SqliteAccessSelection>,
+    pub(crate) synthetic_course_source:
+        Mutex<crate::learning::course_source_readonly::SyntheticCourseSession>,
     link_check_job: Mutex<Option<Arc<AtomicBool>>>,
     pending_move_undo: Mutex<Option<PendingMoveUndo>>,
     reference_window_board: Mutex<Option<String>>,
@@ -131,19 +144,45 @@ struct PendingMoveUndo {
 }
 
 impl AppState {
+    pub(crate) fn restore_backup_locked(
+        &self,
+        active: &mut ActiveLibrary,
+        path: &Path,
+    ) -> Result<(), String> {
+        let mut nonce = self
+            .source_scope_nonce
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        let result = crate::backup::restore_library(active, path);
+        *nonce = Uuid::new_v4();
+        result
+    }
+
+    pub(crate) fn restore_backup_for_task(&self, path: &Path) -> Result<(), String> {
+        self.with_active_mut(|active| self.restore_backup_locked(active, path))
+    }
+
     pub fn recover_interrupted_restore(&self) -> Result<(), String> {
+        let _playback = crate::learning::native_player::quiesce_for_library_change(self)?;
         self.with_active_mut(|active| {
             if self.tasks.busy() {
                 return Err("请先等待当前任务结束".into());
             }
+            let mut nonce = self
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?;
             let mut settings = self.settings.lock().map_err(|_| "设置锁已损坏")?;
             let mut warning = self
                 .startup_warning
                 .lock()
                 .map_err(|_| "启动提示锁已损坏")?;
-            crate::backup::recover_interrupted_restore(active, |path| {
-                protect_existing_library(path, &self.settings_path, &mut settings, &mut warning);
-            })
+            let result = crate::backup::recover_interrupted_restore(active, |path| {
+                protect_existing_library(path, &self.settings_path, &mut settings, &mut warning)
+                    .map(|_| ())
+            });
+            *nonce = Uuid::new_v4();
+            result
         })
     }
 
@@ -238,6 +277,10 @@ impl AppState {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .ok_or("无法定位 LOCALAPPDATA")?;
+        Self::initialize_in(&local)
+    }
+
+    fn initialize_in(local: &Path) -> Result<Self, String> {
         let config_dir = local.join("DCCAssetLibrary");
         fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
         let settings_path = config_dir.join(SETTINGS_FILE);
@@ -263,6 +306,12 @@ impl AppState {
             .and_then(|_| open_library(&desired, &settings_path, &mut settings, &mut warning))
         {
             Ok(active) => active,
+            Err(error)
+                if error.starts_with(SCHEMA_PROTECTION_PREFIX)
+                    || error == db::FUTURE_SCHEMA_ERROR =>
+            {
+                return Err(error);
+            }
             Err(error) if desired != default_path => {
                 merge_warning(
                     &mut warning,
@@ -285,6 +334,8 @@ impl AppState {
             );
         }
         Ok(Self {
+            learning_runtime: Default::default(),
+            external_videos: Mutex::default(),
             tasks: crate::tasks::TaskRegistry::load(config_dir.join("task-journal.json")),
             knowledge_editing: AtomicBool::new(false),
             translation_service: crate::translation_service::TranslationService::open(
@@ -294,6 +345,14 @@ impl AppState {
             settings: Mutex::new(settings),
             startup_warning: Mutex::new(warning),
             active: Mutex::new(active),
+            source_scope_nonce: Mutex::new(Uuid::new_v4()),
+            #[cfg(windows)]
+            learning_import_selection: Mutex::default(),
+            #[cfg(windows)]
+            sqlite_import_gate: Mutex::default(),
+            #[cfg(windows)]
+            sqlite_import_selection: Mutex::default(),
+            synthetic_course_source: Mutex::default(),
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
@@ -739,6 +798,26 @@ impl AppState {
     ) -> Result<LibraryLocationState, String> {
         let target = absolute_clean_path(&request.path)?;
         validate_not_root(&target)?;
+        // Reject an invalid/cancelled selection before stopping a usable session.
+        // The checks below are repeated under the final active lock for races.
+        {
+            let active = self.active.lock().map_err(|_| "素材库锁已损坏")?;
+            self.tasks
+                .ensure_library_change_allowed(&active.marker.library_id, migration_task)?;
+            let current = absolute_clean_path(&path_text(&active.base_dir))?;
+            if target == current {
+                return Err("所选目录已经是当前素材库".into());
+            }
+            if target.starts_with(&current) || current.starts_with(&target) {
+                return Err("素材库目录之间不能互相嵌套".into());
+            }
+            match request.mode.as_str() {
+                "create" | "migrate" => require_empty_directory(&target)?,
+                "open" => validate_library(&target)?,
+                _ => return Err("未知的素材库切换方式".into()),
+            }
+        }
+        let _playback = crate::learning::native_player::quiesce_for_library_change(self)?;
         let mut active = self
             .active
             .lock()
@@ -746,6 +825,11 @@ impl AppState {
         // Enqueue takes this same lock: a switch cannot pass an idle check while a task submits.
         self.tasks
             .ensure_library_change_allowed(&active.marker.library_id, migration_task)?;
+        // Lock order: active library first, then the source-session nonce.
+        let mut source_scope_nonce = self
+            .source_scope_nonce
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
         self.cancel_link_check()?;
         if let Ok(mut pending) = self.pending_move_undo.lock() {
             *pending = None;
@@ -793,6 +877,8 @@ impl AppState {
         touch_recent(&mut settings, &target);
         write_settings(&self.settings_path, &settings)?;
         *active = next;
+        *source_scope_nonce = Uuid::new_v4();
+        drop(source_scope_nonce);
         crate::note_moves::clear_undo();
         drop(settings);
         drop(active);
@@ -955,7 +1041,7 @@ fn validate_library(path: &Path) -> Result<(), String> {
     if marker.format_version != 1 {
         return Err("素材库格式版本不受支持".into());
     }
-    let connection = Connection::open(path.join("library.db")).map_err(|e| e.to_string())?;
+    let connection = upgrade_backup::open_readonly(&path.join("library.db"))?;
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -984,11 +1070,20 @@ fn open_library(
         return Err("素材库格式版本不受支持".into());
     }
     let db_path = path.join("library.db");
-    if db_path.exists() {
+    let upgrading = if db_path.exists() {
         validate_library(path)?;
-        protect_existing_library(path, settings_path, settings, warning);
-    }
-    let connection = db::open_database(&db_path)?;
+        protect_existing_library(path, settings_path, settings, warning)
+            .map_err(|error| format!("{SCHEMA_PROTECTION_PREFIX}{error}"))?
+    } else {
+        false
+    };
+    let connection = db::open_database(&db_path).map_err(|error| {
+        if upgrading || error == db::FUTURE_SCHEMA_ERROR {
+            format!("{SCHEMA_PROTECTION_PREFIX}{error}")
+        } else {
+            error
+        }
+    })?;
     Ok(ActiveLibrary {
         base_dir: path.to_path_buf(),
         db_path,
@@ -1013,12 +1108,16 @@ fn protect_existing_library(
     settings_path: &Path,
     settings: &mut AppSettings,
     warning: &mut Option<String>,
-) {
+) -> Result<bool, String> {
+    let schema_upgrade = upgrade_backup::schema_needs_upgrade(path)?;
     let key = match upgrade_backup::library_key(path) {
         Ok(key) => key,
         Err(error) => {
+            if schema_upgrade {
+                return Err(format!("升级前保护未完成，已停止升级：{error}"));
+            }
             merge_warning(warning, format!("升级前数据库保护未完成：{error}"));
-            return;
+            return Ok(false);
         }
     };
     let version = env!("CARGO_PKG_VERSION");
@@ -1027,16 +1126,16 @@ fn protect_existing_library(
         .get(&key)
         .cloned()
         .unwrap_or_default();
-    if previous.last_success_app_version == version {
-        return;
+    if !schema_upgrade && previous.last_success_app_version == version {
+        return Ok(false);
     }
     let mut record = previous.clone();
-    let result = upgrade_backup::run_upgrade_backup(
-        path,
-        version,
-        settings.auto_backup_keep.clamp(1, 20) as usize,
-        &mut record,
-    );
+    let keep = settings.auto_backup_keep.clamp(1, 20) as usize;
+    let result = if schema_upgrade {
+        upgrade_backup::run_schema_upgrade_backup(path, version, keep, &mut record)
+    } else {
+        upgrade_backup::run_upgrade_backup(path, version, keep, &mut record)
+    };
     match &result {
         Ok(status)
             if status
@@ -1048,7 +1147,11 @@ fn protect_existing_library(
         }
         Err(error) => merge_warning(
             warning,
-            format!("升级前数据库保护未完成，已继续打开；请检查目录权限和磁盘空间：{error}"),
+            if schema_upgrade {
+                format!("升级前数据库保护未完成，已停止升级：{error}")
+            } else {
+                format!("升级前数据库保护未完成，已继续打开；请检查目录权限和磁盘空间：{error}")
+            },
         ),
         _ => {}
     }
@@ -1064,13 +1167,23 @@ fn protect_existing_library(
             record.last_success_app_version = previous.last_success_app_version;
             record.snapshots = previous.snapshots;
             record.result = Some("failed".into());
-            let message =
-                format!("升级前保护记录未能保存到设置，下次打开会重试；已生成的文件保留：{error}");
+            let message = if result.is_ok() {
+                format!("升级前保护记录未能保存到设置，下次打开会重试；已生成的文件保留：{error}")
+            } else {
+                format!("升级前保护结果未能保存到设置，下次打开会重试：{error}")
+            };
             record.message = Some(message.clone());
             settings.upgrade_backups.insert(key, record);
-            merge_warning(warning, message);
+            merge_warning(warning, message.clone());
+            if schema_upgrade {
+                return Err(format!("升级前保护记录未保存，已停止升级：{message}"));
+            }
         }
     }
+    if schema_upgrade {
+        result.map_err(|error| format!("升级前保护未完成，已停止升级：{error}"))?;
+    }
+    Ok(schema_upgrade)
 }
 
 fn migrate_library(
@@ -1105,6 +1218,10 @@ fn migrate_library(
             &stage.join("note-attachments"),
         )?;
         copy_tree_verified(
+            &active.base_dir.join("learning-data"),
+            &stage.join("learning-data"),
+        )?;
+        copy_tree_verified(
             &active.base_dir.join(".dcc/cache/thumbnails"),
             &stage.join(".dcc/cache/thumbnails"),
         )?;
@@ -1135,12 +1252,15 @@ fn migrate_library(
 }
 
 fn copy_tree_verified(source: &Path, destination: &Path) -> Result<(), String> {
+    crate::media_access::reject_links(source)?;
+    crate::media_access::reject_links(destination)?;
     if !source.exists() {
         fs::create_dir_all(destination).map_err(|e| e.to_string())?;
         return Ok(());
     }
     for entry in WalkDir::new(source) {
         let entry = entry.map_err(|e| e.to_string())?;
+        crate::media_access::reject_links(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(source)
@@ -1294,6 +1414,8 @@ pub(crate) fn test_state(path: &Path) -> AppState {
     )
     .unwrap();
     AppState {
+        learning_runtime: Default::default(),
+        external_videos: Mutex::default(),
         knowledge_editing: AtomicBool::new(false),
         tasks: crate::tasks::TaskRegistry::load(path.join("task-journal.json")),
         translation_service: crate::translation_service::TranslationService::for_test(
@@ -1304,12 +1426,24 @@ pub(crate) fn test_state(path: &Path) -> AppState {
         settings: Mutex::new(settings),
         startup_warning: Mutex::new(warning),
         active: Mutex::new(active),
+        source_scope_nonce: Mutex::new(Uuid::new_v4()),
+        #[cfg(windows)]
+        learning_import_selection: Mutex::default(),
+        #[cfg(windows)]
+        sqlite_import_gate: Mutex::default(),
+        #[cfg(windows)]
+        sqlite_import_selection: Mutex::default(),
+        synthetic_course_source: Mutex::default(),
         link_check_job: Mutex::new(None),
         pending_move_undo: Mutex::new(None),
         reference_window_board: Mutex::new(None),
         glossary: Mutex::new(GlossaryStore::load(path.join("translation-glossary.json"))),
     }
 }
+
+#[cfg(test)]
+#[path = "state_upgrade_guard_tests.rs"]
+mod schema_guard_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1321,6 +1455,11 @@ mod tests {
         let path = dir.path().join("old-library");
         ensure_library(&path, "旧测试库", false).unwrap();
         let connection = db::open_database(&path.join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles;",
+            )
+            .unwrap();
         connection
             .execute(
                 "UPDATE schema_meta SET value='12' WHERE key='schema_version'",
@@ -1461,6 +1600,8 @@ mod tests {
         let id = state.active_library_id().unwrap();
         state
             .with_library(|db, _| {
+                db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles;")
+                    .map_err(|e| e.to_string())?;
                 db.execute(
                     "UPDATE schema_meta SET value='12' WHERE key='schema_version'",
                     [],

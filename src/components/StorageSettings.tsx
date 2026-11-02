@@ -13,6 +13,18 @@ import { TranslationServiceOptions } from "./TranslationServiceOptions";
 import {DownloadSettingsPanel} from "../features/download/DownloadSettingsPanel";
 
 type SettingsTab = "appearance" | "view" | "modules" | "shortcuts" | "startup" | "online" | "download" | "data";
+export function ExternalOriginalsNotice({libraryId}:{libraryId:string}) {
+  const [summary,setSummary]=useState<{count:number;bytes:number}|null>(null);
+  const [error,setError]=useState(false);
+  useEffect(()=>{
+    let active=true;setSummary(null);setError(false);
+    void api.getExternalBackupSummary(libraryId).then(value=>{if(active)setSummary(value)}).catch(()=>{if(active)setError(true)});
+    return()=>{active=false};
+  },[libraryId]);
+  return <section aria-label="外部视频备份范围"><div role="status" aria-atomic="true" className={summary?.count||error?"settings-warning":"empty-mini"}>
+    {error?<p>无法核对外部原件，请重新打开设置核对；不要据此认为所有视频已备份。</p>:!summary?<p>正在核对外部原件…</p>:summary.count>0?<><strong>外部原件未归档：{summary.count} 个 · {formatBytes(summary.bytes)}</strong><p>备份仅包含登记信息，不含这些视频原件；恢复后需重新确认访问。请另外保留原视频。可在视频详情中把原件归档复制进本库，源文件不会被删除。</p></>:<p>当前库没有外部视频引用。</p>}
+  </div></section>;
+}
 interface Props { onClose: () => void; onLibraryChanged: () => Promise<void>; notify: (message: string, error?: boolean) => void; libraryLocked?: boolean; initialTab?: SettingsTab; onPersonalizationChanged?: (value: PersonalizationState) => void }
 
 const tabs: Array<{ id: SettingsTab; label: string; icon: typeof Eye }> = [
@@ -112,6 +124,7 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
           <TranslationServiceOptions settings={translation} reload={loadTranslation} notify={notify} />
           <section><TranslationGlossaryManager notify={notify} /></section>
         </>}
+        {tab === "data" && state && <ExternalOriginalsNotice key={state.current.libraryId} libraryId={state.current.libraryId}/>}
         {tab === "data" && <>{state&&<ReliabilitySettings key={state.current.libraryId} libraryId={state.current.libraryId} notify={notify}/>}<SettingsTitle title="数据与素材库" text="管理当前素材库位置、迁移与最近库。" />{state?.startupWarning && <div className="settings-warning">{state.startupWarning}</div>}{state && <section><h3>当前素材库</h3><div className="current-library"><div className="library-icon"><Database size={24} /></div><div><strong>{state.current.name}</strong><span title={state.current.path}>{state.current.path}</span><small>{formatBytes(state.current.sizeBytes)} · 库 ID {state.current.libraryId.slice(0, 8)}</small></div></div></section>}<section><h3>更改存储位置</h3>{libraryLocked && <div className="settings-warning">参考板正在悬浮窗口中，请先收回后再切换或迁移素材库。</div>}<div className="storage-actions"><button onClick={() => void choose("migrate")} disabled={busy || libraryLocked}><FolderInput size={18} /><strong>复制并迁移</strong><span>完整复制当前库，保留旧目录</span></button><button onClick={() => void choose("create")} disabled={busy || libraryLocked}><Plus size={18} /><strong>创建新库</strong><span>在空目录创建独立素材库</span></button><button onClick={() => void choose("open")} disabled={busy || libraryLocked}><FolderOpen size={18} /><strong>打开已有库</strong><span>验证后切换到已有素材库</span></button></div></section><section><h3>最近使用</h3><div className="recent-libraries">{state?.recent.length ? state.recent.map(item => <div key={item.path} className={!item.available ? "unavailable" : ""}><LibraryBig size={17} /><div><strong>{item.name}{item.retainedCopy && <em>旧库副本</em>}</strong><span title={item.path}>{item.path}</span></div><button disabled={!item.available || busy || libraryLocked} onClick={() => void choose("open", item.path)}>打开</button><button className="icon-button subtle" onClick={() => void forget(item.path)} title="从列表移除"><Trash2 size={14} /></button></div>) : <p className="empty-mini">暂无其他素材库</p>}</div></section></>}
       </div>
     </div>

@@ -1,6 +1,6 @@
 use super::{models::*, repository, scanner, service};
 use crate::state::AppState;
-use tauri::State;
+use tauri::{Manager, State};
 fn uuid(id: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(id)
         .map(|_| ())
@@ -8,6 +8,168 @@ fn uuid(id: &str) -> Result<(), String> {
 }
 fn current<T>(result: Result<Option<T>, String>) -> Result<T, String> {
     result?.ok_or("素材库已切换，未读取或修改旧库".into())
+}
+#[tauri::command]
+pub fn upsert_shot_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::ShotInput,
+) -> Result<super::intelligence_models::ShotAsset, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::shot::upsert(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn get_shot_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+) -> Result<super::intelligence_models::ShotAsset, String> {
+    uuid(&asset_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::shot::get(db, &asset_id)
+    }))
+}
+#[tauri::command]
+pub fn list_project_shot_assets(
+    state: State<AppState>,
+    expected_library_id: String,
+    project_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<Page<super::intelligence_models::ShotAsset>, String> {
+    uuid(&project_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::shot::list(db, &project_id, offset, limit)
+    }))
+}
+#[tauri::command]
+pub fn upsert_prompt_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::PromptInput,
+) -> Result<super::intelligence_models::PromptAsset, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::prompt::upsert(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn get_prompt_asset(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+) -> Result<super::intelligence_models::PromptAsset, String> {
+    uuid(&asset_id)?;
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::prompt::get(db, &asset_id)
+    }))
+}
+#[tauri::command]
+pub fn trash_text_assets(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_ids: Vec<String>,
+) -> Result<crate::models::DeleteResult, String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::entities::trash(db, &asset_ids)
+    }))
+}
+#[tauri::command]
+pub async fn prepare_asset_analysis(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    asset_id: String,
+    mode: super::intelligence_models::AnalysisMode,
+) -> Result<super::intelligence_models::AnalysisInputPreview, String> {
+    uuid(&asset_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base =
+            current(state.with_library_if_id(&expected_library_id, |_, base| Ok(base.to_owned())))?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let resource = app.path().resource_dir().ok();
+        let stop =
+            || state.active_library_id().ok().as_deref() != Some(expected_library_id.as_str());
+        let preview =
+            crate::ai::analyzer::prepare(&db, &base, resource.as_deref(), &asset_id, mode, &stop)?;
+        if stop() {
+            return Err("素材库已切换，请在当前库重新预览".into());
+        }
+        Ok(preview)
+    })
+    .await
+    .map_err(|_| "分析资料准备中断，请重试".to_string())?
+}
+#[tauri::command]
+pub async fn get_asset_analysis(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    asset_id: String,
+    analysis_id: Option<String>,
+) -> Result<Option<super::intelligence_models::AssetAnalysis>, String> {
+    uuid(&asset_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let base =
+            current(state.with_library_if_id(&expected_library_id, |_, base| Ok(base.to_owned())))?;
+        let db = crate::tasks::open_media_worker_connection(&base.join("library.db"))?;
+        let stop =
+            || state.active_library_id().ok().as_deref() != Some(expected_library_id.as_str());
+        let result =
+            super::analysis::get_checked(&db, &base, &asset_id, analysis_id.as_deref(), &stop)?;
+        if stop() {
+            return Err("素材库已切换，未返回旧库分析".into());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "分析核验中断，请重试".to_string())?
+}
+#[tauri::command]
+pub fn apply_asset_analysis_tags(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+    analysis_id: String,
+    locale: String,
+    selected: Vec<String>,
+) -> Result<(), String> {
+    uuid(&asset_id)?;
+    uuid(&analysis_id)?;
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        super::analysis::apply_keywords(db, &asset_id, &analysis_id, &locale, &selected)
+    }))
+}
+#[tauri::command]
+pub fn create_asset_relation(
+    state: State<AppState>,
+    expected_library_id: String,
+    input: super::intelligence_models::RelationInput,
+) -> Result<super::intelligence_models::AssetRelation, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::create(db, &input)
+    }))
+}
+#[tauri::command]
+pub fn delete_asset_relation(
+    state: State<AppState>,
+    expected_library_id: String,
+    asset_id: String,
+    relation_id: String,
+) -> Result<(), String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::delete(db, &asset_id, &relation_id)
+    }))
+}
+#[tauri::command]
+pub fn get_asset_graph(
+    state: State<AppState>,
+    expected_library_id: String,
+    request: super::intelligence_models::GraphRequest,
+) -> Result<super::intelligence_models::AssetGraph, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        super::relations::graph(db, &request)
+    }))
 }
 #[tauri::command]
 pub fn search_core_assets(

@@ -18,6 +18,18 @@ const UE_TASK_HISTORY_ONLY: &str =
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "camelCase")]
 pub enum TaskRequest {
+    CourseExcerpt(crate::learning::excerpt_runner::ExcerptTaskRequest),
+    LearningImport(crate::learning::import_runner::ImportTaskRequest),
+    ArchiveExternalVideo {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
+    CourseTranscription(crate::learning::transcription::CourseTranscriptionRequest),
+    CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest),
+    #[serde(rename = "aiAnalyze")]
+    AIAnalyze(crate::asset::intelligence_models::AnalysisRequest),
     Download(crate::downloader::models::DownloadRequest),
     AssetMediaImport {
         #[serde(rename = "assetId")]
@@ -68,6 +80,18 @@ pub enum TaskRequest {
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
+            Self::CourseExcerpt(request) => request.label(),
+            Self::LearningImport(request) => request.label(),
+            Self::ArchiveExternalVideo { .. } => "归档外部视频",
+            Self::CourseTranscription(_) => "本地课程转写",
+            Self::CourseAnalysis(r) => {
+                if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
+                    "课程汇总分析"
+                } else {
+                    "课程分段分析"
+                }
+            }
+            Self::AIAnalyze(_) => "资产 AI 分析",
             Self::Download(_) => "下载",
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
@@ -94,6 +118,26 @@ impl TaskRequest {
     }
     fn validate(&self) -> Result<(), String> {
         match self {
+            Self::CourseExcerpt(request) => request.validate(),
+            Self::LearningImport(request) => request.validate(),
+            Self::CourseTranscription(r) => {
+                Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
+                if !matches!(r.model_id.as_str(), "base" | "small") {
+                    return Err("模型选项无效".into());
+                }
+                Ok(())
+            }
+            Self::CourseAnalysis(r) => {
+                Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
+                Uuid::parse_str(&r.preview_id).map_err(|_| "课程预览标识无效")?;
+                Ok(())
+            }
+            Self::AIAnalyze(r) => {
+                Uuid::parse_str(&r.asset_id).map_err(|_| "分析资产标识无效")?;
+                Uuid::parse_str(&r.preview_id)
+                    .map(|_| ())
+                    .map_err(|_| "分析资料标识无效".into())
+            }
             Self::Download(request) => crate::downloader::domain::validate_request(request),
             Self::AssetImport(request) => crate::asset::service::validate_import(request),
             Self::AssetProcess { asset_id, .. } => Uuid::parse_str(asset_id)
@@ -109,6 +153,28 @@ impl TaskRequest {
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
             Self::Translation { ids } if ids.len() > 5000 => Err("单次翻译最多 5000 项".into()),
             Self::Migration(r) if r.mode != "migrate" => Err("任务中心只接受复制迁移操作".into()),
+            Self::ArchiveExternalVideo {
+                entry_id,
+                operation_id,
+            } => {
+                Uuid::parse_str(entry_id).map_err(|_| "媒体条目无效")?;
+                Uuid::parse_str(operation_id).map_err(|_| "归档操作无效")?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    fn ensure_retryable(&self) -> Result<(), String> {
+        match self {
+            Self::CourseAnalysis(_) => Err("课程分析必须重新预览并确认费用，不能重放旧批准".into()),
+            Self::LearningImport(
+                crate::learning::import_runner::ImportTaskRequest::Revert { .. }
+                | crate::learning::import_runner::ImportTaskRequest::RevertCourse { .. },
+            ) => Err("请返回迁入页面重新检查并确认撤回".into()),
+            Self::LearningImport(
+                crate::learning::import_runner::ImportTaskRequest::CommitCourse { .. },
+            ) => Err("请返回迁入页面重新预检并确认课程提交".into()),
+            Self::UeAssets(_) => Err(UE_TASK_HISTORY_ONLY.into()),
             _ => Ok(()),
         }
     }
@@ -173,6 +239,7 @@ impl TaskRegistry {
         let task = &mut store.entries[index];
         task.status = "running".into();
         task.phase = "开始处理".into();
+        task.updated_at = Utc::now().to_rfc3339();
         let task = task.clone();
         if self.persist(&store).is_err() {
             for (position, task) in store
@@ -215,6 +282,7 @@ impl TaskRegistry {
             }
             _ => return Err("任务当前不能暂停".into()),
         }
+        task.updated_at = Utc::now().to_rfc3339();
         self.persist(&store)
     }
     pub fn resume_download(&self, id: &str) -> Result<bool, String> {
@@ -397,7 +465,12 @@ impl TaskRegistry {
             .filter(|t| t.library_id == library_id)
             .rev()
             .scan(0usize, |history, task| {
-                if active(&task.status) {
+                if active(&task.status)
+                    || matches!(
+                        task.status.as_str(),
+                        "failed" | "interrupted" | "stopped" | "paused"
+                    )
+                {
                     Some(Some(task))
                 } else {
                     *history += 1;
@@ -518,6 +591,50 @@ impl TaskRegistry {
             pause_requested: false,
         };
         let mut store = self.store.lock().map_err(|_| "任务状态锁已损坏")?;
+        if let TaskRequest::CourseExcerpt(request) = &task.payload {
+            if let Some(existing) = store.entries.iter().find(|t| {
+                t.library_id == task.library_id
+                    && active(&t.status)
+                    && matches!(&t.payload,TaskRequest::CourseExcerpt(saved) if saved==request)
+            }) {
+                return Ok((existing.clone(), false));
+            }
+        }
+        if let TaskRequest::LearningImport(request) = &task.payload {
+            if let Some(existing) = store.entries.iter().find(|t| {
+                t.library_id == task.library_id
+                    && active(&t.status)
+                    && matches!(&t.payload,TaskRequest::LearningImport(saved) if saved==request)
+            }) {
+                return Ok((existing.clone(), false));
+            }
+        }
+        if let TaskRequest::ArchiveExternalVideo {
+            entry_id,
+            operation_id,
+        } = &task.payload
+        {
+            if let Some(existing) = store.entries.iter().find(|t| {
+                t.library_id == task.library_id
+                    && active(&t.status)
+                    && matches!(&t.payload, TaskRequest::ArchiveExternalVideo { entry_id: saved, .. } if saved == entry_id)
+            }) {
+                if matches!(&existing.payload, TaskRequest::ArchiveExternalVideo { operation_id: saved, .. } if saved == operation_id)
+                {
+                    return Ok((existing.clone(), false));
+                }
+                return Err("该视频已有进行中的归档，请重试原操作".into());
+            }
+        }
+        if let TaskRequest::AIAnalyze(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::AIAnalyze(r) if r.asset_id==request.asset_id&&r.preview_id==request.preview_id&&r.force==request.force)){return Ok((existing.clone(),false));}
+        }
+        if let TaskRequest::CourseTranscription(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id&&active(&t.status)&&matches!(&t.payload,TaskRequest::CourseTranscription(r)if r.course_id==request.course_id&&r.model_id==request.model_id)){return Ok((existing.clone(),false));}
+        }
+        if let TaskRequest::CourseAnalysis(request) = &task.payload {
+            if let Some(existing)=store.entries.iter().find(|t|t.library_id==task.library_id && active(&t.status) && matches!(&t.payload,TaskRequest::CourseAnalysis(r) if r.course_id==request.course_id && r.preview_id==request.preview_id && r.stage==request.stage)) { return Ok((existing.clone(),false)); }
+        }
         if let TaskRequest::ModelThumbnail { entry_id } = &task.payload {
             if let Some(existing)=store.entries.iter().find(|value|active(&value.status)&&matches!(&value.payload,TaskRequest::ModelThumbnail{entry_id:id} if id==entry_id)){return Ok((existing.clone(),false))}
         }
@@ -597,12 +714,34 @@ impl TaskRegistry {
                 .find(|t| t.status == "running" && t.label == label)
             {
                 task.result = Some(result);
+                task.updated_at = Utc::now().to_rfc3339();
             }
             self.persist_checked(&mut store);
         }
     }
     pub fn should_stop(&self, id: &str) -> bool {
-        self.get(id).map(|t| t.stop_requested).unwrap_or(true)
+        self.store
+            .lock()
+            .map(|store| {
+                store
+                    .entries
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.stop_requested)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true)
+    }
+    pub fn is_active_task(&self, id: &str) -> bool {
+        self.store
+            .lock()
+            .map(|store| {
+                store
+                    .entries
+                    .iter()
+                    .any(|task| task.id == id && active(&task.status) && !task.stop_requested)
+            })
+            .unwrap_or(false)
     }
     pub fn stop_label(&self, label: &str) -> bool {
         self.store
@@ -630,6 +769,7 @@ impl TaskRegistry {
             }
             .into();
             task.message = "尚未开始，已停止".into();
+            task.updated_at = Utc::now().to_rfc3339();
         } else if task.status == "running" {
             if !task.cancellable {
                 return Err("此任务处于数据维护阶段，请等待安全完成".into());
@@ -637,9 +777,11 @@ impl TaskRegistry {
             task.stop_requested = true;
             task.pause_requested = false;
             task.phase = "正在安全停止，当前步骤完成后生效".into();
+            task.updated_at = Utc::now().to_rfc3339();
         } else if task.status == "paused" && matches!(task.payload, TaskRequest::Download(_)) {
             task.status = "cancelled".into();
             task.pause_requested = false;
+            task.updated_at = Utc::now().to_rfc3339();
         }
         self.persist(&store)
     }
@@ -648,7 +790,55 @@ impl TaskRegistry {
             store.external.remove(id);
             if let Some(task) = store.entries.iter_mut().find(|t| t.id == id) {
                 task.updated_at = Utc::now().to_rfc3339();
-                task.status = if task.stop_requested {
+                let committed_excerpt = result.is_ok()
+                    && matches!(
+                        &task.payload,
+                        TaskRequest::CourseExcerpt(
+                            crate::learning::excerpt_runner::ExcerptTaskRequest::Commit { .. }
+                        )
+                    );
+                let committed_import = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Commit { batch_id }), Ok(value))
+                        if value["status"] == "committed" && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
+                let committed_import = committed_import
+                    || matches!((&task.payload,&result),(TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::CommitCourse{..}),Ok(value)) if value["status"]=="committed" && value["batchId"].as_str().is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
+                let reverted_import = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::Revert { batch_id, .. } | crate::learning::import_runner::ImportTaskRequest::RevertCourse { batch_id, .. }), Ok(value))
+                        if value["status"] == "reverted" && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
+                let cancelled_course = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::LearningImport(crate::learning::import_runner::ImportTaskRequest::CancelCourse { batch_id }), Ok(value))
+                        if matches!(value["status"].as_str(), Some("cancelled" | "committed")) && value["batchId"].as_str() == Some(batch_id.as_str())
+                );
+                let archived_external = matches!(
+                    (&task.payload, &result),
+                    (TaskRequest::ArchiveExternalVideo { .. }, Ok(value))
+                        if matches!(value["status"].as_str(), Some("archived" | "alreadyManaged"))
+                );
+                if committed_excerpt && task.stop_requested {
+                    task.message = "摘录已提交，停止请求晚于保存；目标内容保留".into();
+                }
+                if committed_import && task.stop_requested {
+                    task.message = "迁入已提交，停止请求晚于保存；目标内容保留".into();
+                }
+                if reverted_import && task.stop_requested {
+                    task.message = "撤回已完成，停止请求晚于保存；请查看撤回报告".into();
+                }
+                if archived_external && task.stop_requested {
+                    task.message = "归档已完成，停止请求晚于保存；源文件仍保留".into();
+                }
+                task.status = if committed_excerpt
+                    || committed_import
+                    || reverted_import
+                    || cancelled_course
+                    || archived_external
+                {
+                    "completed"
+                } else if task.stop_requested {
                     if matches!(task.payload, TaskRequest::Download(_)) {
                         if task.pause_requested {
                             "paused"
@@ -675,6 +865,294 @@ impl TaskRegistry {
     }
 }
 
+#[cfg(test)]
+mod task_timestamp_tests {
+    use super::*;
+
+    const OLD: &str = "2000-01-01T00:00:00+00:00";
+
+    fn backdate(registry: &TaskRegistry, id: &str) {
+        let mut store = registry.store.lock().unwrap();
+        store
+            .entries
+            .iter_mut()
+            .find(|task| task.id == id)
+            .unwrap()
+            .updated_at = OLD.into();
+        registry.persist(&store).unwrap();
+    }
+
+    #[test]
+    fn task_timestamp_changes_on_claim_checkpoint_and_running_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let registry = TaskRegistry::load(path.clone());
+        let (task, _) = registry
+            .submit("library".into(), TaskRequest::Links)
+            .unwrap();
+        backdate(&registry, &task.id);
+        assert_ne!(registry.claim().unwrap().updated_at, OLD);
+        backdate(&registry, &task.id);
+        registry.checkpoint(&task.label, serde_json::json!({"step":1}));
+        let checkpoint = registry.get(&task.id).unwrap();
+        assert_ne!(checkpoint.updated_at, OLD);
+        assert_eq!(checkpoint.result, Some(serde_json::json!({"step":1})));
+        let persisted: Vec<LibraryTask> =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted[0].updated_at, checkpoint.updated_at);
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        let stopping = registry.get(&task.id).unwrap();
+        assert!(stopping.stop_requested);
+        assert_ne!(stopping.updated_at, OLD);
+    }
+
+    #[test]
+    fn task_timestamp_changes_on_queued_stop_but_not_a_terminal_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (task, _) = registry
+            .submit("library".into(), TaskRequest::Links)
+            .unwrap();
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        let stopped = registry.get(&task.id).unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert_ne!(stopped.updated_at, OLD);
+        backdate(&registry, &task.id);
+        registry.cancel(&task.id).unwrap();
+        assert_eq!(registry.get(&task.id).unwrap().updated_at, OLD);
+    }
+
+    #[test]
+    fn task_timestamp_changes_for_queued_and_running_download_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request = TaskRequest::Download(crate::downloader::models::DownloadRequest {
+            url: "https://example.com/video".into(),
+            format: "best".into(),
+            quality: "best".into(),
+            audio_only: false,
+            subtitles: false,
+            output_mode: "library".into(),
+        });
+        let (first, _) = registry.submit("library".into(), request.clone()).unwrap();
+        backdate(&registry, &first.id);
+        registry.pause_download(&first.id).unwrap();
+        assert_ne!(registry.get(&first.id).unwrap().updated_at, OLD);
+        backdate(&registry, &first.id);
+        registry.cancel(&first.id).unwrap();
+        assert_ne!(registry.get(&first.id).unwrap().updated_at, OLD);
+        let (second, _) = registry.submit("library".into(), request).unwrap();
+        registry.claim().unwrap();
+        backdate(&registry, &second.id);
+        registry.pause_download(&second.id).unwrap();
+        assert_ne!(registry.get(&second.id).unwrap().updated_at, OLD);
+        assert!(registry.get(&second.id).unwrap().pause_requested);
+    }
+}
+
+#[cfg(test)]
+mod excerpt_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn learning_excerpt_task_late_cancel_preserves_committed_success_but_not_a_cancelled_prepare() {
+        use crate::learning::{
+            excerpt_publish::{CommitRequest, Destination},
+            excerpt_runner::ExcerptTaskRequest,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let payload = TaskRequest::CourseExcerpt(ExcerptTaskRequest::Commit {
+            request: CommitRequest {
+                operation_id: Uuid::new_v4().to_string(),
+                excerpt_id: Uuid::new_v4().to_string(),
+                destination: Destination::New {
+                    title: "已保存".into(),
+                    notebook_id: None,
+                },
+                include_frame: false,
+            },
+        });
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        // Lifecycle-only success fixture. Real target/receipt persistence has runner tests.
+        registry.finish(&task.id,Ok(serde_json::json!({"receipt":{"noteId":Uuid::new_v4().to_string()},"targetAvailable":true})));
+        assert_eq!(registry.get(&task.id).unwrap().status, "completed");
+        let selection = crate::learning::excerpts::ExcerptSelection {
+            ranges: vec![crate::learning::note_nodes::TimeRange {
+                start_ms: 0,
+                end_ms: 1,
+            }],
+            ..Default::default()
+        };
+        let (prepare, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::CourseExcerpt(ExcerptTaskRequest::Prepare {
+                    course_id: Uuid::new_v4().to_string(),
+                    selection,
+                }),
+            )
+            .unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&prepare.id).unwrap();
+        registry.finish(
+            &prepare.id,
+            Ok(serde_json::json!({"previewId":Uuid::new_v4().to_string()})),
+        );
+        assert_eq!(registry.get(&prepare.id).unwrap().status, "stopped");
+    }
+}
+
+#[cfg(test)]
+mod import_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn learning_import_course_revert_late_stop_requires_fresh_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({"kind":"learningImport","request":{"action":"revertCourse","batchId":batch,"expectedEpoch":Uuid::new_v4().to_string()}})).unwrap();
+        assert!(payload.ensure_retryable().is_err());
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"reverted"})),
+        );
+        assert_eq!(registry.get(&task.id).unwrap().status, "completed");
+    }
+
+    #[test]
+    fn learning_import_course_cancel_late_stop_only_accepts_matching_terminal_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({"kind":"learningImport","request":{"action":"cancelCourse","batchId":batch}})).unwrap();
+        let (first, _) = registry.submit("library".into(), payload.clone()).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&first.id).unwrap();
+        registry.finish(
+            &first.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"cancelled"})),
+        );
+        assert_eq!(registry.get(&first.id).unwrap().status, "completed");
+        let (second, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&second.id).unwrap();
+        registry.finish(
+            &second.id,
+            Ok(serde_json::json!({"batchId":Uuid::new_v4().to_string(),"status":"cancelled"})),
+        );
+        assert_eq!(registry.get(&second.id).unwrap().status, "stopped");
+    }
+    #[test]
+    fn learning_import_generic_ipc_rejects_prepare_but_allows_commit_cancel() {
+        use crate::learning::import_runner::ImportTaskRequest;
+        let prepare = TaskRequest::LearningImport(ImportTaskRequest::Prepare {
+            profile_id: Uuid::new_v4().to_string(),
+            epoch: Uuid::new_v4().to_string(),
+            request_sha256: "a".repeat(64),
+            vault: "vault".into(),
+            relative_path: "notes/a.md".into(),
+            source_sha256: "b".repeat(64),
+            title: "t".into(),
+            document: serde_json::json!({"type":"doc","content":[]}),
+            markdown: "forged".into(),
+            items: Vec::new(),
+        });
+        assert!(ensure_generic_ipc_payload(&prepare)
+            .unwrap_err()
+            .contains("预检入口"));
+        for payload in [
+            TaskRequest::LearningImport(ImportTaskRequest::Commit {
+                batch_id: Uuid::new_v4().to_string(),
+            }),
+            TaskRequest::LearningImport(ImportTaskRequest::Cancel {
+                batch_id: Uuid::new_v4().to_string(),
+            }),
+        ] {
+            ensure_generic_ipc_payload(&payload).unwrap();
+        }
+        let course = TaskRequest::LearningImport(ImportTaskRequest::CommitCourse {
+            selection_id: Uuid::new_v4().to_string(),
+            preview_id: Uuid::new_v4().to_string(),
+        });
+        assert!(ensure_generic_ipc_payload(&course)
+            .unwrap_err()
+            .contains("预检"));
+        assert!(course.ensure_retryable().unwrap_err().contains("重新预检"));
+    }
+    #[test]
+    fn learning_import_task_late_cancel_preserves_committed_success() {
+        use crate::learning::import_runner::ImportTaskRequest;
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch_id = Uuid::new_v4().to_string();
+        let payload = TaskRequest::LearningImport(ImportTaskRequest::Commit {
+            batch_id: batch_id.clone(),
+        });
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch_id,"status":"committed"})),
+        );
+        let finished = registry.get(&task.id).unwrap();
+        assert_eq!(finished.status, "completed");
+        assert!(finished.message.contains("迁入已提交"));
+    }
+
+    #[test]
+    fn learning_import_task_does_not_report_cancelled_batch_as_committed() {
+        use crate::learning::import_runner::ImportTaskRequest;
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch_id = Uuid::new_v4().to_string();
+        let (task, _) = registry
+            .submit(
+                "library".into(),
+                TaskRequest::LearningImport(ImportTaskRequest::Commit {
+                    batch_id: batch_id.clone(),
+                }),
+            )
+            .unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch_id,"status":"cancelled"})),
+        );
+        let finished = registry.get(&task.id).unwrap();
+        assert_eq!(finished.status, "stopped");
+        assert!(!finished.message.contains("迁入已提交"));
+    }
+
+    #[test]
+    fn learning_import_revert_late_stop_preserves_success_and_retry_needs_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(root.path().join("tasks.json"));
+        let batch = Uuid::new_v4().to_string();
+        let payload: TaskRequest = serde_json::from_value(serde_json::json!({
+            "kind":"learningImport","request":{"action":"revert","batchId":batch,"expectedEpoch":Uuid::new_v4().to_string()}
+        })).unwrap();
+        assert!(payload.ensure_retryable().is_err());
+        let (task, _) = registry.submit("library".into(), payload).unwrap();
+        registry.claim().unwrap();
+        registry.cancel(&task.id).unwrap();
+        registry.finish(
+            &task.id,
+            Ok(serde_json::json!({"batchId":batch,"status":"reverted"})),
+        );
+        let finished = registry.get(&task.id).unwrap();
+        assert_eq!(finished.status, "completed");
+        assert!(finished.message.contains("撤回已完成"));
+    }
+}
 #[cfg(test)]
 mod download_lifecycle_tests {
     use super::*;
@@ -767,12 +1245,12 @@ pub fn list_library_tasks(state: tauri::State<AppState>) -> Result<Vec<LibraryTa
     state.tasks.list(&id)
 }
 #[tauri::command]
-pub fn exit_when_tasks_idle(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    if state.tasks.busy() {
-        return Err("仍有任务执行，请先等待或安全停止".into());
-    }
-    app.exit(0);
-    Ok(())
+pub async fn exit_when_tasks_idle(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::learning::native_player::exit_application(&app, false)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn get_library_task(state: tauri::State<AppState>, id: String) -> Result<LibraryTask, String> {
@@ -921,7 +1399,25 @@ pub fn start_library_task(
     payload: TaskRequest,
     expected_library_id: Option<String>,
 ) -> Result<LibraryTask, String> {
+    ensure_generic_ipc_payload(&payload)?;
     start_library_task_for_library(app, state, payload, expected_library_id.as_deref())
+}
+/// Generic IPC must not enqueue learning-import Prepare: its markdown/digest would be
+/// caller-asserted. Prepare is only built by `import_access` after a user-bound source preflight.
+pub(crate) fn ensure_generic_ipc_payload(payload: &TaskRequest) -> Result<(), String> {
+    if matches!(
+        payload,
+        TaskRequest::LearningImport(
+            crate::learning::import_runner::ImportTaskRequest::Prepare { .. }
+                | crate::learning::import_runner::ImportTaskRequest::CommitCourse { .. }
+        )
+    ) {
+        return Err("学习资料迁入准备只能经来源绑定与预检入口排队".into());
+    }
+    if matches!(payload, TaskRequest::ArchiveExternalVideo { .. }) {
+        return Err("外部视频归档只能经归档入口排队".into());
+    }
+    Ok(())
 }
 pub fn start_library_task_for_library(
     app: AppHandle,
@@ -934,6 +1430,11 @@ pub fn start_library_task_for_library(
         TaskRequest::AssetScan { .. }
             | TaskRequest::AssetImport(_)
             | TaskRequest::AssetProcess { .. }
+            | TaskRequest::AIAnalyze(_)
+            | TaskRequest::CourseAnalysis(_)
+            | TaskRequest::CourseTranscription(_)
+            | TaskRequest::LearningImport(_)
+            | TaskRequest::ArchiveExternalVideo { .. }
     ) && expected_library.is_none()
     {
         return Err("资产任务必须指定目标素材库".into());
@@ -978,9 +1479,7 @@ pub fn retry_library_task(
     id: String,
 ) -> Result<LibraryTask, String> {
     let previous = state.tasks.get(&id)?;
-    if matches!(previous.payload, TaskRequest::UeAssets(_)) {
-        return Err(UE_TASK_HISTORY_ONLY.into());
-    }
+    previous.payload.ensure_retryable()?;
     if previous.library_id != state.active_library_id()? {
         return Err("请先打开任务所属的素材库".into());
     }
@@ -1045,7 +1544,7 @@ fn retain_incomplete_core_import(
         request.scan_task_id = None;
     }
 }
-async fn dispatch(app: AppHandle) {
+pub(crate) async fn dispatch(app: AppHandle) {
     loop {
         let limit = app
             .state::<AppState>()
@@ -1106,6 +1605,19 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
         return Err("任务所属素材库已改变，未执行".into());
     }
     match task.payload.clone() {
+        TaskRequest::CourseExcerpt(request) => {
+            crate::learning::excerpt_runner::run(app, task, request).await
+        }
+        TaskRequest::LearningImport(request) => {
+            crate::learning::import_runner::run(app, task, request).await
+        }
+        TaskRequest::CourseTranscription(request) => {
+            crate::learning::transcription_runner::run(app, task, request).await
+        }
+        TaskRequest::CourseAnalysis(request) => {
+            crate::learning::analysis_runner::run(app, task, request).await
+        }
+        TaskRequest::AIAnalyze(request) => crate::asset::analysis::run(app, task, request).await,
         TaskRequest::AssetProcess { asset_id, force } => {
             tauri::async_runtime::spawn_blocking(move || {
                 let state = app.state::<AppState>();
@@ -1380,6 +1892,47 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
+        TaskRequest::ArchiveExternalVideo {
+            entry_id,
+            operation_id,
+        } => {
+            let worker_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = worker_app.state::<AppState>();
+                let stop_app = worker_app.clone();
+                let stop_id = task.id.clone();
+                let _control = crate::media::ProcessControl::new(move || {
+                    stop_app.state::<AppState>().tasks.should_stop(&stop_id)
+                });
+                state.tasks.update(
+                    &task.id,
+                    0,
+                    1,
+                    String::new(),
+                    "复制并校验外部视频".into(),
+                    None,
+                );
+                let report = crate::media_archive::perform(
+                    &state,
+                    &task.library_id,
+                    &entry_id,
+                    &operation_id,
+                    &crate::media_archive::ArchiveOptions::default(),
+                )?;
+                let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    String::new(),
+                    "归档完成".into(),
+                    Some(value.clone()),
+                );
+                Ok(value)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
         TaskRequest::MediaImport(request) => {
             let worker_app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -1467,9 +2020,9 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                         Ok(serde_json::json!({"outputPath":path}))
                     }
                     TaskRequest::Restore { path } => {
-                        state.with_active_mut(|active| {
-                            crate::backup::restore_library(active, Path::new(&path))
-                        })?;
+                        let _playback =
+                            crate::learning::native_player::quiesce_for_library_change(&state)?;
+                        state.restore_backup_for_task(Path::new(&path))?;
                         let safety = state.with_active_mut(|active| {
                             Ok(active
                                 .base_dir
@@ -1494,6 +2047,27 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learning_transcription_task_is_typed_and_deduplicated() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request = TaskRequest::CourseTranscription(
+            crate::learning::transcription::CourseTranscriptionRequest {
+                course_id: Uuid::new_v4().to_string(),
+                model_id: "base".into(),
+            },
+        );
+        let (first, _) = tasks.submit("library".into(), request.clone()).unwrap();
+        let (second, launch) = tasks.submit("library".into(), request.clone()).unwrap();
+        assert_eq!(first.id, second.id);
+        assert!(!launch);
+        let mut bad = request;
+        if let TaskRequest::CourseTranscription(r) = &mut bad {
+            r.model_id = "../model".into();
+        }
+        assert!(tasks.submit("library".into(), bad).is_err());
+    }
     use super::*;
     #[test]
     fn core_import_retry_keeps_only_incomplete_paths_and_scan_rows() {
@@ -1814,6 +2388,55 @@ mod tests {
         assert!(!registry.has_manual_thumbnail_task("other", "first"));
     }
     #[test]
+    fn course_task_queue_deduplicates_approval_and_refuses_generic_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let request =
+            TaskRequest::CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest {
+                course_id: Uuid::new_v4().to_string(),
+                preview_id: Uuid::new_v4().to_string(),
+                stage: crate::learning::analysis_models::CourseAnalysisPhase::Segments,
+            });
+        let (first, _) = registry.submit("library".into(), request.clone()).unwrap();
+        let (second, launch) = registry.submit("library".into(), request.clone()).unwrap();
+        assert_eq!(
+            first.id, second.id,
+            "double click must not queue the same approval twice"
+        );
+        assert!(!launch);
+        assert!(request.ensure_retryable().unwrap_err().contains("重新预览"));
+        assert!(TaskRequest::Links.ensure_retryable().is_ok());
+        let mut invalid = request.clone();
+        if let TaskRequest::CourseAnalysis(r) = &mut invalid {
+            r.course_id = "bad".into();
+        }
+        assert!(registry.submit("library".into(), invalid).is_err());
+    }
+    #[test]
+    fn task_history_keeps_old_action_items_but_bounds_completed_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TaskRegistry::load(dir.path().join("tasks.json"));
+        let (failed, _) = registry.submit("lib".into(), TaskRequest::Links).unwrap();
+        registry.finish(&failed.id, Err("需要处理".into()));
+        for _ in 0..205 {
+            let (task, _) = registry.submit("lib".into(), TaskRequest::Links).unwrap();
+            registry.finish(&task.id, Ok(serde_json::json!({})));
+        }
+        let visible = registry.list("lib").unwrap();
+        assert!(
+            visible.iter().any(|t| t.id == failed.id),
+            "old failed task cannot disappear behind completed history"
+        );
+        assert_eq!(
+            visible.iter().filter(|t| t.status == "completed").count(),
+            200
+        );
+        assert!(
+            visible.iter().all(|t| t.result.is_none()),
+            "summary does not include full results"
+        );
+    }
+    #[test]
     fn journal_recovers_as_interrupted_and_does_not_autorun() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.json");
@@ -1959,4 +2582,68 @@ mod tests {
         registry.claim().unwrap();
         assert!(registry.cancel(&backup.id).is_err());
     }
+}
+
+/// Enqueue a verified learning import only while its original library session is active.
+#[cfg(windows)]
+pub(crate) fn submit_scoped_learning_import(
+    state: &crate::state::AppState,
+    payload: TaskRequest,
+    scope: &crate::learning::source_profiles::LibraryScope,
+    selection_id: &str,
+    target_token: &str,
+) -> Result<(LibraryTask, bool), String> {
+    if !matches!(
+        payload,
+        TaskRequest::LearningImport(
+            crate::learning::import_runner::ImportTaskRequest::Prepare { .. }
+        )
+    ) {
+        return Err("迁入任务类型无效".into());
+    }
+    state.with_active_mut(|active| {
+        let current = crate::learning::analysis_store::library_identity(&active.base_dir)?;
+        if current
+            != (
+                scope.library_id().to_string(),
+                scope.root_hash().to_string(),
+            )
+            || *state
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?
+                != scope.session_nonce()
+        {
+            return Err("素材库会话已变化，未提交迁入任务".into());
+        }
+        let selected = state
+            .learning_import_selection
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if !selected.permits(selection_id, &payload) {
+            return Err("来源选择已变化，未提交迁入任务".into());
+        }
+        let db = active.connection.as_ref().ok_or("素材库数据库不可用")?;
+        crate::learning::import_access::verify_prepared_target(db, &payload, target_token)?;
+        state
+            .tasks
+            .submit(active.marker.library_id.clone(), payload)
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn start_scoped_learning_import(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    payload: TaskRequest,
+    scope: &crate::learning::source_profiles::LibraryScope,
+    selection_id: &str,
+    target_token: &str,
+) -> Result<LibraryTask, String> {
+    let (task, launch) =
+        submit_scoped_learning_import(&state, payload, scope, selection_id, target_token)?;
+    if launch {
+        tauri::async_runtime::spawn(dispatch(app));
+    }
+    Ok(task)
 }

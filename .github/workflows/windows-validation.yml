@@ -16,7 +16,9 @@ concurrency:
 jobs:
   test-and-package:
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Run 41426677314 finished the release compile, then the 45m job cap
+    # cancelled makensis. The last green job was 39m; 60m covers a slow compile.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

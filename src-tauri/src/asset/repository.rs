@@ -1,12 +1,13 @@
 use super::models::*;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
 pub fn register_origin(db: &Connection, origin: &CoreOrigin) -> Result<String, String> {
     let column = match origin.kind.as_str() {
         "legacy" => "legacy_asset_id",
         "media" => "media_entry_id",
+        "entity" => "entity_id",
         _ => return Err("未知资产来源类别".into()),
     };
     if let Some(id) = db
@@ -31,7 +32,7 @@ pub fn register_origin(db: &Connection, origin: &CoreOrigin) -> Result<String, S
 
 pub fn origin(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
     db.query_row(
-        "SELECT legacy_asset_id,media_entry_id FROM asset_core WHERE id=?1",
+        "SELECT legacy_asset_id,media_entry_id,entity_id FROM asset_core WHERE id=?1",
         [id],
         |r| {
             let legacy: Option<String> = r.get(0)?;
@@ -40,10 +41,15 @@ pub fn origin(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
                     kind: "legacy".into(),
                     id,
                 }
-            } else {
+            } else if let Some(id) = r.get::<_, Option<String>>(1)? {
                 CoreOrigin {
                     kind: "media".into(),
-                    id: r.get(1)?,
+                    id,
+                }
+            } else {
+                CoreOrigin {
+                    kind: "entity".into(),
+                    id: r.get(2)?,
                 }
             })
         },
@@ -55,6 +61,9 @@ pub fn origin(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
 
 pub fn register_files(db: &Connection, core_id: &str) -> Result<(), String> {
     let owner = origin(db, core_id)?;
+    if owner.kind == "entity" {
+        return Ok(());
+    }
     let sql = if owner.kind == "legacy" {
         "SELECT 'image',id,'original',original_name,0,'',created_at FROM images WHERE asset_id=?1
          UNION ALL SELECT 'image',id,'thumbnail',thumbnail_rel_path,0,'',created_at FROM images WHERE asset_id=?1
@@ -95,7 +104,37 @@ pub fn register_files(db: &Connection, core_id: &str) -> Result<(), String> {
 }
 
 // Resolve only database-owned files, never a path supplied by the frontend.
-pub fn file_path(db: &Connection, base: &Path, source: &SourceFileRef) -> Result<PathBuf, String> {
+pub fn file_path(
+    db: &Connection,
+    base: &Path,
+    source: &SourceFileRef,
+) -> Result<crate::media_access::CheckedMediaFile, String> {
+    if source.kind == "mediaFile" {
+        let expected = match source.role.as_str() {
+            "original" => "main",
+            "dependency" => "dependency",
+            "proxy" => "proxy",
+            "thumbnail" => "thumbnail",
+            "waveform" => "waveform",
+            _ => return Err("文件用途无效".into()),
+        };
+        let valid: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_files WHERE id=?1 AND role=?2)",
+                params![source.id, expected],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !valid {
+            return Err("文件用途与登记不符".into());
+        }
+        return crate::media_access::resolve_media_file(
+            db,
+            base,
+            &source.id,
+            &crate::media_access::LocalMediaGrants::local()?,
+        );
+    }
     let sql = match (source.kind.as_str(), source.role.as_str()) {
         ("image", "original") => "SELECT original_rel_path FROM images WHERE id=?1",
         ("image", "thumbnail") => "SELECT thumbnail_rel_path FROM images WHERE id=?1",
@@ -128,7 +167,7 @@ pub fn file_path(db: &Connection, base: &Path, source: &SourceFileRef) -> Result
     if !path.starts_with(&library) || !path.is_file() {
         return Err("文件不在当前素材库内".into());
     }
-    Ok(path)
+    Ok(crate::media_access::CheckedMediaFile::managed(path))
 }
 
 pub fn protect_file_removal(
@@ -180,9 +219,10 @@ pub fn prepare_trash_purge(db: &Connection, batch_id: &str) -> Result<Vec<String
 
 const VIEW: &str = "WITH unified AS (
  SELECT c.id,c.legacy_asset_id AS owner_id,'legacy' AS kind,'asset' AS asset_type,
- COALESCE(NULLIF(l.name,''),a.name) AS name,COALESCE(NULLIF(l.description,''),a.description) AS description,a.created_at,a.updated_at,a.deleted_at,a.source_url
+ COALESCE(NULLIF(l.name,''),a.name) AS name,COALESCE(NULLIF(l.description,''),a.description) AS description,a.created_at,a.updated_at,a.deleted_at,a.source_url,a.author
  FROM asset_core c JOIN assets a ON a.id=c.legacy_asset_id LEFT JOIN asset_localizations l ON l.asset_id=a.id AND l.locale=?1
- UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id)
+ UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url,m.author FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id
+ UNION ALL SELECT c.id,c.entity_id,'entity',e.kind,e.name,e.description,e.created_at,e.updated_at,e.deleted_at,'','' FROM asset_core c JOIN asset_entities e ON e.id=c.entity_id)
 ";
 
 pub fn source_type(raw: &str) -> String {
@@ -212,14 +252,19 @@ pub fn sources(
     core_id: &str,
     origin: &CoreOrigin,
 ) -> Result<Vec<AssetSource>, String> {
-    let table = if origin.kind == "legacy" {
-        "assets"
-    } else {
-        "media_entries"
+    let table = match origin.kind.as_str() {
+        "legacy" => "assets",
+        "media" => "media_entries",
+        "entity" => "asset_entities",
+        _ => return Err("未知资产来源".into()),
     };
     let (url, author, created): (String, String, String) = db
         .query_row(
-            &format!("SELECT source_url,author,created_at FROM {table} WHERE id=?1"),
+            &if origin.kind == "entity" {
+                format!("SELECT '','',created_at FROM {table} WHERE id=?1")
+            } else {
+                format!("SELECT source_url,author,created_at FROM {table} WHERE id=?1")
+            },
             [&origin.id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -280,6 +325,8 @@ pub fn sources(
 fn tags(db: &Connection, owner: &CoreOrigin, locale: &str) -> Result<Vec<String>, String> {
     let sql = if owner.kind == "legacy" {
         "SELECT t.name FROM localized_tags t JOIN asset_localized_tags a ON a.tag_id=t.id WHERE a.asset_id=?1 AND t.locale=?2 ORDER BY t.name"
+    } else if owner.kind == "entity" {
+        "SELECT t.name FROM localized_tags t JOIN asset_entity_tags a ON a.tag_id=t.id WHERE a.entity_id=?1 AND t.locale=?2 ORDER BY t.name"
     } else {
         "SELECT t.name FROM localized_tags t JOIN media_entry_tags m ON m.tag_id=t.id WHERE m.entry_id=?1 AND ?2 IN ('zh-CN','en') ORDER BY t.name"
     };
@@ -291,6 +338,9 @@ fn tags(db: &Connection, owner: &CoreOrigin, locale: &str) -> Result<Vec<String>
 }
 
 fn thumbnail(db: &Connection, owner: &CoreOrigin) -> Result<Option<SourceFileRef>, String> {
+    if owner.kind == "entity" {
+        return Ok(None);
+    }
     let sql = if owner.kind == "legacy" {
         "SELECT kind,id,role FROM (SELECT 'image' AS kind,id,'thumbnail' AS role,is_cover,sort_order,0 AS priority FROM images WHERE asset_id=?1 UNION ALL SELECT 'assetMedia',id,'thumbnail',is_cover,sort_order,1 FROM asset_media WHERE asset_id=?1 AND thumbnail_rel_path IS NOT NULL) ORDER BY is_cover DESC,priority,sort_order LIMIT 1"
     } else {
@@ -307,7 +357,7 @@ fn thumbnail(db: &Connection, owner: &CoreOrigin) -> Result<Option<SourceFileRef
     .map_err(|e| e.to_string())
 }
 
-fn read_asset(db: &Connection, id: &str, locale: &str) -> Result<Asset, String> {
+pub(crate) fn read_asset(db: &Connection, id: &str, locale: &str) -> Result<Asset, String> {
     let mut asset = db.query_row(&format!("{VIEW} SELECT id,owner_id,kind,asset_type,name,description,created_at,updated_at,deleted_at IS NOT NULL FROM unified WHERE id=?2"), params![locale,id], |r| Ok(Asset{id:r.get(0)?,origin:CoreOrigin{id:r.get(1)?,kind:r.get(2)?},asset_type:r.get(3)?,name:r.get(4)?,description:r.get(5)?,created_at:r.get(6)?,updated_at:r.get(7)?,deleted:r.get(8)?,tags:vec![],thumbnail:None})).optional().map_err(|e| e.to_string())?.ok_or("资产不存在或不属于当前素材库")?;
     asset.tags = tags(db, &asset.origin, locale)?;
     asset.thumbnail = thumbnail(db, &asset.origin)?;
@@ -321,7 +371,7 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
     if let Some(kind) = &request.asset_type {
         if !matches!(
             kind.as_str(),
-            "asset" | "image" | "audio" | "video" | "model"
+            "asset" | "image" | "audio" | "video" | "model" | "prompt" | "shot"
         ) {
             return Err("未知资产类型".into());
         }
@@ -338,6 +388,9 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
         return Err("资产查询超出限制".into());
     }
     let limit = request.limit.clamp(1, 200);
+    if let Some(id) = &request.project_id {
+        uuid::Uuid::parse_str(id).map_err(|_| "项目标识无效")?;
+    }
     // Reuse the detail classifier instead of maintaining a second URL/domain parser in SQL.
     db.create_scalar_function(
         "dcc_asset_source_type",
@@ -352,20 +405,38 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
     } else {
         ""
     };
+    let project_links = "((u.kind='legacy' AND EXISTS(SELECT 1 FROM project_assets l WHERE l.project_id=p.id AND l.asset_id=u.owner_id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM project_media_entries l WHERE l.project_id=p.id AND l.entry_id=u.owner_id)) OR (u.kind='entity' AND EXISTS(SELECT 1 FROM asset_entity_projects l WHERE l.project_id=p.id AND l.entity_id=u.owner_id)))";
+    let projects = format!("EXISTS(SELECT 1 FROM projects p WHERE p.id=?5 AND {project_links})");
+    let download_text = if downloads {
+        " OR EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND (instr(lower(d.url),?3)>0 OR instr(lower(d.author),?3)>0))"
+    } else {
+        ""
+    };
     let filter = format!("FROM unified u WHERE u.deleted_at IS NULL AND (?2 IS NULL OR u.asset_type=?2)
-      AND (?3='' OR instr(lower(u.name),?3)>0 OR EXISTS(SELECT 1 FROM localized_tags t WHERE instr(lower(t.name),?3)>0 AND ((u.kind='legacy' AND t.locale=?1 AND EXISTS(SELECT 1 FROM asset_localized_tags a WHERE a.asset_id=u.owner_id AND a.tag_id=t.id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM media_entry_tags m WHERE m.entry_id=u.owner_id AND m.tag_id=t.id)))))
-      AND (?4 IS NULL OR (dcc_asset_source_type(u.source_url)=?4 AND (trim(u.source_url)<>'' OR (NOT EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.url<>''){local_download_filter}))) OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.source_type=?4){download_filter})",local_download_filter=if downloads {" AND NOT EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND d.url<>'')"}else{""});
+      AND (?3='' OR instr(lower(u.name),?3)>0 OR instr(lower(u.description),?3)>0 OR instr(lower(u.source_url),?3)>0 OR instr(lower(u.author),?3)>0
+       OR EXISTS(SELECT 1 FROM localized_tags t WHERE instr(lower(t.name),?3)>0 AND ((u.kind='legacy' AND EXISTS(SELECT 1 FROM asset_localized_tags a WHERE a.asset_id=u.owner_id AND a.tag_id=t.id)) OR (u.kind='media' AND EXISTS(SELECT 1 FROM media_entry_tags m WHERE m.entry_id=u.owner_id AND m.tag_id=t.id)) OR (u.kind='entity' AND EXISTS(SELECT 1 FROM asset_entity_tags e WHERE e.entity_id=u.owner_id AND e.tag_id=t.id))))
+       OR EXISTS(SELECT 1 FROM asset_ai_analysis a WHERE a.asset_id=u.id AND (instr(lower(a.description),?3)>0 OR EXISTS(SELECT 1 FROM json_each(a.keywords) k WHERE instr(lower(k.value),?3)>0)))
+       OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND (instr(lower(s.url),?3)>0 OR instr(lower(s.author),?3)>0))
+       OR EXISTS(SELECT 1 FROM projects p WHERE instr(lower(p.name),?3)>0 AND {project_links}){download_text})
+      AND (?4 IS NULL OR (dcc_asset_source_type(u.source_url)=?4 AND (trim(u.source_url)<>'' OR (NOT EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.url<>''){local_download_filter}))) OR EXISTS(SELECT 1 FROM asset_sources s WHERE s.asset_id=u.id AND s.source_type=?4){download_filter})
+      AND (?5 IS NULL OR {projects})",local_download_filter=if downloads {" AND NOT EXISTS(SELECT 1 FROM media_sources d WHERE u.kind='media' AND d.media_id=u.owner_id AND d.url<>'')"}else{""});
     let query = request.query.trim().to_lowercase();
     let total: usize = db
         .query_row(
             &format!("{VIEW} SELECT count(*) {filter}"),
-            params![request.locale, request.asset_type, query, request.source],
+            params![
+                request.locale,
+                request.asset_type,
+                query,
+                request.source,
+                request.project_id
+            ],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(&format!(
-            "{VIEW} SELECT id {filter} ORDER BY u.updated_at DESC,u.id LIMIT ?5 OFFSET ?6"
+            "{VIEW} SELECT id {filter} ORDER BY u.updated_at DESC,u.id LIMIT ?6 OFFSET ?7"
         ))
         .map_err(|e| e.to_string())?;
     let ids = stmt
@@ -375,6 +446,7 @@ pub fn search(db: &Connection, request: &CoreSearchRequest) -> Result<Page<Asset
                 request.asset_type,
                 query,
                 request.source,
+                request.project_id,
                 limit as i64,
                 request.offset as i64
             ],
@@ -434,9 +506,17 @@ pub fn get(
     let mut files = vec![];
     for row in rows {
         let mut file = row.map_err(|e| e.to_string())?;
-        file.available = file_path(db, base, &file.source_ref)
-            .map(|p| p.is_file())
-            .unwrap_or(false);
+        file.available = if file.source_ref.kind == "mediaFile" {
+            crate::media_access::LocalMediaGrants::local()
+                .and_then(|grants| {
+                    crate::media_access::prepare_media_file(db, base, &file.source_ref.id, &grants)
+                })
+                .is_ok_and(|prepared| prepared.available())
+        } else {
+            file_path(db, base, &file.source_ref)
+                .map(|p| p.is_file())
+                .unwrap_or(false)
+        };
         if file.source_ref.kind == "mediaFile" {
             let (entry, logical): (String, String) = db
                 .query_row(
@@ -516,7 +596,7 @@ pub fn get(
         .map_err(|e| e.to_string())?
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
-    let mut project_stmt=db.prepare(if asset.origin.kind=="legacy" {"SELECT p.id,p.name FROM projects p JOIN project_assets l ON l.project_id=p.id WHERE l.asset_id=?1 ORDER BY p.name"}else {"SELECT p.id,p.name FROM projects p JOIN project_media_entries l ON l.project_id=p.id WHERE l.entry_id=?1 ORDER BY p.name"}).map_err(|e|e.to_string())?;
+    let mut project_stmt=db.prepare(if asset.origin.kind=="legacy" {"SELECT p.id,p.name FROM projects p JOIN project_assets l ON l.project_id=p.id WHERE l.asset_id=?1 ORDER BY p.name"}else if asset.origin.kind=="entity" {"SELECT p.id,p.name FROM projects p JOIN asset_entity_projects l ON l.project_id=p.id WHERE l.entity_id=?1 ORDER BY p.name"}else {"SELECT p.id,p.name FROM projects p JOIN project_media_entries l ON l.project_id=p.id WHERE l.entry_id=?1 ORDER BY p.name"}).map_err(|e|e.to_string())?;
     let projects = project_stmt
         .query_map([&asset.origin.id], |r| {
             Ok(AssetLink {
@@ -534,6 +614,8 @@ pub fn get(
             params![
                 if asset.origin.kind == "legacy" {
                     "asset"
+                } else if asset.origin.kind == "entity" {
+                    "coreAsset"
                 } else {
                     "media"
                 },
@@ -551,6 +633,8 @@ pub fn get(
         .map_err(|e| e.to_string())?;
     let related_sql = if asset.origin.kind == "legacy" {
         "SELECT c.id,e.name FROM media_entry_assets l JOIN media_entries e ON e.id=l.entry_id JOIN asset_core c ON c.media_entry_id=e.id WHERE l.asset_id=?1 AND e.deleted_at IS NULL"
+    } else if asset.origin.kind == "entity" {
+        "SELECT id,name FROM asset_entities WHERE id=?1 AND 0"
     } else {
         "SELECT c.id,a.name FROM media_entry_assets l JOIN assets a ON a.id=l.asset_id JOIN asset_core c ON c.legacy_asset_id=a.id WHERE l.entry_id=?1 AND a.deleted_at IS NULL"
     };
@@ -565,7 +649,7 @@ pub fn get(
         .map_err(|e| e.to_string())?
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
-    let mut tag_stmt=db.prepare(if asset.origin.kind=="legacy" {"SELECT t.id,t.name,t.color,t.created_at FROM localized_tags t JOIN asset_localized_tags l ON l.tag_id=t.id WHERE l.asset_id=?1 AND t.locale=?2 ORDER BY t.name"}else {"SELECT t.id,t.name,t.color,t.created_at FROM localized_tags t JOIN media_entry_tags l ON l.tag_id=t.id WHERE l.entry_id=?1 AND ?2 IN ('zh-CN','en') ORDER BY t.name"}).map_err(|e|e.to_string())?;
+    let mut tag_stmt=db.prepare(if asset.origin.kind=="legacy" {"SELECT t.id,t.name,t.color,t.created_at FROM localized_tags t JOIN asset_localized_tags l ON l.tag_id=t.id WHERE l.asset_id=?1 AND t.locale=?2 ORDER BY t.name"}else if asset.origin.kind=="entity" {"SELECT t.id,t.name,t.color,t.created_at FROM localized_tags t JOIN asset_entity_tags l ON l.tag_id=t.id WHERE l.entity_id=?1 AND t.locale=?2 ORDER BY t.name"}else {"SELECT t.id,t.name,t.color,t.created_at FROM localized_tags t JOIN media_entry_tags l ON l.tag_id=t.id WHERE l.entry_id=?1 AND ?2 IN ('zh-CN','en') ORDER BY t.name"}).map_err(|e|e.to_string())?;
     let tag_details = tag_stmt
         .query_map(params![asset.origin.id, locale], |r| {
             Ok(CoreTag {

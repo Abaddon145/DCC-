@@ -200,10 +200,11 @@ pub fn remove_source(db: &Connection, core_id: &str, id: &str) -> Result<(), Str
 
 pub fn active_origin(db: &Connection, core_id: &str) -> Result<CoreOrigin, String> {
     let origin = repository::origin(db, core_id)?;
-    let table = if origin.kind == "legacy" {
-        "assets"
-    } else {
-        "media_entries"
+    let table = match origin.kind.as_str() {
+        "legacy" => "assets",
+        "media" => "media_entries",
+        "entity" => "asset_entities",
+        _ => return Err("未知资产来源".into()),
     };
     let active: bool = db
         .query_row(
@@ -223,15 +224,35 @@ pub fn set_tags(
     locale: &str,
     tags: &[String],
 ) -> Result<(), String> {
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    set_tags_in_tx(&tx, core_id, locale, tags)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+pub(crate) fn set_tags_in_tx(
+    tx: &Connection,
+    core_id: &str,
+    locale: &str,
+    tags: &[String],
+) -> Result<(), String> {
     if !matches!(locale, "zh-CN" | "en")
         || tags.len() > 200
         || tags.iter().any(|t| t.chars().count() > 100)
     {
         return Err("标签语言、数量或长度无效".into());
     }
-    let origin = active_origin(db, core_id)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if origin.kind == "media" {
+    let origin = active_origin(tx, core_id)?;
+    if origin.kind == "entity" {
+        tx.execute("DELETE FROM asset_entity_tags WHERE entity_id=?1 AND tag_id IN (SELECT id FROM localized_tags WHERE locale=?2)",rusqlite::params![origin.id,locale]).map_err(|e|e.to_string())?;
+        for tag in tags.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            tx.execute("INSERT OR IGNORE INTO localized_tags(id,locale,name,normalized_name) VALUES(?1,?2,?3,?4)",rusqlite::params![uuid::Uuid::new_v4().to_string(),locale,tag,tag.to_lowercase()]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT OR IGNORE INTO asset_entity_tags(entity_id,tag_id) SELECT ?1,id FROM localized_tags WHERE locale=?2 AND normalized_name=?3",rusqlite::params![origin.id,locale,tag.to_lowercase()]).map_err(|e|e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE asset_entities SET updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), origin.id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else if origin.kind == "media" {
         crate::media_library::upsert_tags(&tx, &origin.id, tags)?;
         crate::media_library::reindex(&tx, &origin.id)?;
         tx.execute(
@@ -263,7 +284,7 @@ pub fn set_tags(
         )
         .map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 pub fn set_tag_color(db: &Connection, tag_id: &str, color: &str) -> Result<(), String> {
     if color.len() != 7
@@ -295,7 +316,32 @@ pub fn link_project(
     if !active {
         return Err("目标项目不存在或已归档".into());
     }
-    if origin.kind == "legacy" {
+    if origin.kind == "entity" {
+        if !link
+            && db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM shots WHERE asset_id=?1 AND project_id=?2)",
+                    rusqlite::params![core_id, project_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Shot 的所属项目由镜头记录管理，不能在通用关联中解除".into());
+        }
+        if link {
+            db.execute(
+                "INSERT OR IGNORE INTO asset_entity_projects(entity_id,project_id) VALUES(?1,?2)",
+                rusqlite::params![origin.id, project_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            db.execute(
+                "DELETE FROM asset_entity_projects WHERE entity_id=?1 AND project_id=?2",
+                rusqlite::params![origin.id, project_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    } else if origin.kind == "legacy" {
         if link {
             crate::projects::add_project_assets(db, project_id, vec![origin.id])?;
         } else {
