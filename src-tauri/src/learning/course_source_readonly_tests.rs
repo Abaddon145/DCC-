@@ -211,10 +211,29 @@ fn synthetic_course_gate_rejects_bad_header_non_schema8_timeout_and_torn_reread(
     assert_eq!(fs::read(&path).unwrap(), FIXTURE);
     assert_no_sidecars(&path);
     let torn = open_isolated_readonly(&path, Duration::from_secs(2), || {
-        fs::write(&path, b"torn").unwrap();
+        let write = fs::write(&path, b"torn");
+        if cfg!(windows) {
+            assert!(
+                write.is_err(),
+                "deny-write lease must block an in-window database writer"
+            );
+        } else {
+            write.expect("linux has no deny-write lease; the torn write must land");
+        }
     });
-    assert!(torn.is_err());
-    assert_eq!(fs::read(&path).unwrap(), b"torn");
+    if cfg!(windows) {
+        let snapshot = torn.expect("unchanged bytes stay readable while the writer is blocked");
+        let version: i64 = snapshot
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        drop(snapshot);
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert_no_sidecars(&path);
+    } else {
+        assert!(torn.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"torn");
+    }
 }
 
 #[test]
@@ -711,11 +730,30 @@ fn synthetic_course_commit_rejects_torn_copy_and_source_or_target_changes() {
         &preview_id,
         &task.id,
         || false,
-        || fs::write(&path, b"torn").unwrap(),
+        || {
+            let write = fs::write(&path, b"torn");
+            if cfg!(windows) {
+                assert!(
+                    write.is_err(),
+                    "deny-write lease must block an in-window database writer"
+                );
+            } else {
+                write.expect("linux has no deny-write lease; the torn write must land");
+            }
+        },
     );
-    assert!(torn.is_err(), "{torn:?}");
-    assert_eq!(courses(&state), 0);
-    assert_eq!(fs::read(&path).unwrap(), b"torn");
+    if cfg!(windows) {
+        assert!(
+            torn.is_ok(),
+            "unchanged bytes can still commit while the writer is blocked: {torn:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert_no_sidecars(&path);
+    } else {
+        assert!(torn.is_err(), "{torn:?}");
+        assert_eq!(courses(&state), 0);
+        assert_eq!(fs::read(&path).unwrap(), b"torn");
+    }
     assert!(run_task(&state, &task).is_err());
 
     let fresh = tempfile::tempdir().unwrap();
