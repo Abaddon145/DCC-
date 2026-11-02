@@ -7,7 +7,9 @@
 //! for write fails that lease. Missing sidecars are not created. Non-Windows builds do
 //! not take the lease. The two reads also compare marker and sidecar presence, file
 //! identity, and the parent directory stamp, so a name that appears and disappears
-//! between them fails closed.
+//! between them fails closed. Linux `inotify` and Windows `ReadDirectoryChangesW` watch
+//! the parent for the whole lease window, so a watched name that changes and then has
+//! its timestamps restored still fails closed.
 //! `open` is the older unmarked copy helper and is compiled only into Windows tests.
 use rusqlite::{
     backup::{Backup, StepResult},
@@ -809,9 +811,10 @@ fn require_same_window(path: &Path, anchor: &SourceWindow) -> Result<(), String>
 
 /// Copy a marked synthetic database and open SQLite only on that copy.
 /// `interfere` runs between the two source reads, while the Windows deny-write
-/// lease is still held. A content digest change, a marker/sidecar that appears
-/// and disappears, or a database / `-wal` / `-shm` that is already open for
-/// write on Windows, fails closed before the copy is kept.
+/// lease and the parent-directory watch are still held. A content digest change,
+/// a marker or sidecar that appears and disappears, a watched name whose bytes
+/// are restored along with its mtime, or a database / `-wal` / `-shm` that is
+/// already open for write on Windows, fails closed before the copy is kept.
 pub(super) fn open_isolated_readonly(
     path: &Path,
     timeout: Duration,
@@ -831,16 +834,21 @@ fn open_isolated_readonly_leased(
     }
     require_synthetic_marker(path)?;
     let held = lease(path)?;
+    let mut activity =
+        super::course_directory_watch::DirectoryWatch::arm(path, SYNTHETIC_COURSE_MARKER)
+            .map_err(|_| isolate_failed())?;
     let started = Instant::now();
     let anchor = source_window(path)?;
     let first = read_bundle(path, started, timeout)?;
     require_same_window(path, &anchor)?;
+    activity.check_quiet().map_err(|_| isolate_failed())?;
     interfere();
     let second = read_bundle(path, started, timeout)?;
     if second.digest != first.digest {
         return Err(isolate_failed());
     }
     require_same_window(path, &anchor)?;
+    activity.check_quiet().map_err(|_| isolate_failed())?;
     let temp = tempfile::tempdir().map_err(|_| isolate_failed())?;
     let copied = temp.path().join("snapshot.db");
     write_copy(&copied, &second.database, started, timeout)?;
@@ -865,6 +873,8 @@ fn open_isolated_readonly_leased(
         return Err(isolate_failed());
     }
     require_same_window(path, &anchor)?;
+    activity.check_quiet().map_err(|_| isolate_failed())?;
+    drop(activity);
     drop(held);
     Ok(snapshot)
 }

@@ -704,6 +704,7 @@ dependencies = [
  "csv",
  "image",
  "keyring",
+ "libc",
  "md5",
  "open",
  "percent-encoding",
