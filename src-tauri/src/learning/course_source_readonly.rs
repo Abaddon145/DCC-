@@ -2,12 +2,14 @@
 //!
 //! Selection, isolated copy, preflight, and commit run only when the sibling marker
 //! `dcc-synthetic-course-source.ok` is present. An unmarked file, including a real
-//! Yingliu Vault database, is refused before SQLite is opened. This is not a Tauri
-//! command and does not accept a path from the frontend.
+//! Yingliu Vault database, is refused before SQLite is opened. Product commands on
+//! non-Windows call this module after a native file dialog. Those commands do not
+//! take a path from the frontend.
 //!
 //! `preview_synthetic_course_source` is a read and is not a commit grant. Only
-//! `approve_synthetic_course_preflight` stores the process-local approval that
-//! `queue_synthetic_course_commit` can hand to the commitCourse worker.
+//! `approve_marked_course_preflight` stores the process-local approval that
+//! `queue_synthetic_course_commit` can hand to the commitCourse worker. A later
+//! preflight replaces that approval, including when the media binding changes.
 use super::course_origins::CourseOriginState;
 use super::import_course_preview::{
     ConflictKind, CourseImportPreview, CourseMediaBinding, Progress,
@@ -67,6 +69,16 @@ pub(super) struct SyntheticCourseTicket {
     pub selection_id: String,
     pub profile_id: String,
     pub epoch: String,
+}
+
+/// What the course screen may display. The absolute source path stays in the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MarkedCourseBinding {
+    pub selection_id: String,
+    pub library_id: String,
+    pub profile_id: String,
+    pub epoch: String,
+    pub file_name: String,
 }
 
 fn session(state: &AppState) -> Result<std::sync::MutexGuard<'_, SyntheticCourseSession>, String> {
@@ -309,6 +321,204 @@ pub(super) fn release_synthetic_course_source(
     Ok(true)
 }
 
+fn marked_file_name(path: &Path) -> Result<String, String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 255
+                && !name.contains(['/', '\\', '\0'])
+                && !name.contains("..")
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "来源文件无效".into())
+}
+
+fn binding_from(selected: &SelectedSynthetic) -> Result<MarkedCourseBinding, String> {
+    Ok(MarkedCourseBinding {
+        selection_id: selected.selection_id.clone(),
+        library_id: selected.scope.library_id().to_string(),
+        profile_id: selected.profile_id.clone(),
+        epoch: selected.epoch.clone(),
+        file_name: marked_file_name(&selected.path)?,
+    })
+}
+
+fn clear_matching_selection(state: &AppState, selection_id: &str) -> Result<(), String> {
+    let mut current = session(state)?;
+    if current
+        .selected
+        .as_ref()
+        .is_some_and(|item| item.selection_id == selection_id)
+    {
+        current.generation = uuid::Uuid::new_v4().to_string();
+        current.selected = None;
+        current.approved = None;
+    }
+    Ok(())
+}
+
+/// Dialog-shaped selection. `picker` is the only path source; cancel clears the session.
+/// An unmarked database is refused before SQLite is opened.
+pub(super) fn select_marked_course_with_picker(
+    state: &AppState,
+    library: &str,
+    picker: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<MarkedCourseBinding>, String> {
+    let scope = source_profiles::scope(state, library)?;
+    let ticket = uuid::Uuid::new_v4().to_string();
+    {
+        let mut current = session(state)?;
+        current.generation = ticket.clone();
+        current.selected = None;
+        current.approved = None;
+    }
+    let picked = picker();
+    {
+        let current = session(state)?;
+        if current.generation != ticket {
+            return Err(STALE_SELECTION.into());
+        }
+    }
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let digest = super::course_snapshot::fingerprint_synthetic(&path)?;
+    let file_name = marked_file_name(&path)?;
+    let mut current = session(state)?;
+    if current.generation != ticket {
+        return Err(STALE_SELECTION.into());
+    }
+    let profile = source_profiles::create(state, &scope)?;
+    current.selected = Some(SelectedSynthetic {
+        scope: scope.clone(),
+        profile_id: profile.id.clone(),
+        epoch: profile.access_epoch.clone(),
+        selection_id: ticket.clone(),
+        path,
+        digest,
+    });
+    Ok(Some(MarkedCourseBinding {
+        selection_id: ticket,
+        library_id: scope.library_id().to_string(),
+        profile_id: profile.id,
+        epoch: profile.access_epoch,
+        file_name,
+    }))
+}
+
+/// Restore the in-memory selection. Re-reads the marked bytes and drops the session if they differ.
+pub(super) fn current_marked_course_source(
+    state: &AppState,
+    library: &str,
+) -> Result<Option<MarkedCourseBinding>, String> {
+    let scope = source_profiles::scope(state, library)?;
+    let selected = {
+        let current = session(state)?;
+        let Some(selected) = current.selected.clone() else {
+            return Ok(None);
+        };
+        if selected.scope != scope {
+            return Ok(None);
+        }
+        selected
+    };
+    if let Err(error) = confirm_epoch(state, &selected) {
+        clear_matching_selection(state, &selected.selection_id)?;
+        return Err(error);
+    }
+    match super::course_snapshot::fingerprint_synthetic(&selected.path) {
+        Ok(digest) if digest == selected.digest => {}
+        Ok(_) => {
+            clear_matching_selection(state, &selected.selection_id)?;
+            return Err("课程来源已变化，请重新选择".into());
+        }
+        Err(error) => {
+            clear_matching_selection(state, &selected.selection_id)?;
+            return Err(error);
+        }
+    }
+    let current = session(state)?;
+    let Some(live) = current.selected.as_ref() else {
+        return Ok(None);
+    };
+    if live.selection_id != selected.selection_id || live.digest != selected.digest {
+        return Ok(None);
+    }
+    binding_from(live).map(Some)
+}
+
+/// Read series titles from an isolated copy. Does not grant a commit.
+pub(super) fn list_marked_course_series(
+    state: &AppState,
+    library: &str,
+    ticket: &str,
+) -> Result<Value, String> {
+    if !source_profiles::valid_uuid(ticket) {
+        return Err("课程来源选择无效".into());
+    }
+    let scope = source_profiles::scope(state, library)?;
+    let selected = {
+        let current = session(state)?;
+        matched(&current, &scope, ticket)?.clone()
+    };
+    confirm_epoch(state, &selected)?;
+    let snapshot = super::course_snapshot::open_isolated_readonly(
+        &selected.path,
+        Duration::from_secs(15),
+        || {},
+    )?;
+    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    if digest != selected.digest {
+        return Err("合成课程来源无法只读隔离，请重试".into());
+    }
+    {
+        let current = session(state)?;
+        matched(&current, &scope, ticket)?;
+    }
+    confirm_epoch(state, &selected)?;
+    super::import_course_preview::check_source_schema(&snapshot)?;
+    let mut stmt = snapshot
+        .prepare("SELECT s.id,s.title,count(i.id) FROM main.series s LEFT JOIN main.series_items i ON i.series_id COLLATE BINARY=s.id COLLATE BINARY GROUP BY s.id COLLATE BINARY,s.title,s.sort_order ORDER BY s.sort_order,s.id COLLATE BINARY LIMIT 10001")
+        .map_err(|_| "无法读取来源系列")?;
+    let mut bytes = 0usize;
+    let mut series = Vec::new();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|_| "无法读取来源系列")?;
+    for row in rows {
+        let (id, title, count) = row.map_err(|_| "无法读取来源系列")?;
+        bytes = bytes
+            .checked_add(id.len() + title.len())
+            .ok_or("来源系列过大")?;
+        if id.is_empty()
+            || id.len() > 1024
+            || count < 0
+            || bytes > 2 * 1024 * 1024
+            || series.len() >= 10000
+        {
+            return Err("来源系列过多或格式无效".into());
+        }
+        series.push(json!({"id":id,"title":title,"courseCount":count}));
+    }
+    drop(stmt);
+    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    if digest != selected.digest {
+        return Err(SOURCE_CHANGED.into());
+    }
+    {
+        let current = session(state)?;
+        matched(&current, &scope, ticket)?;
+    }
+    Ok(json!(series))
+}
+
 /// Isolated snapshot plus course preview. The returned preview is not a commit grant.
 pub(super) fn preview_synthetic_course_source(
     state: &AppState,
@@ -341,13 +551,25 @@ pub(super) fn preview_synthetic_course_source(
     )
 }
 
-/// One-shot, 15-minute, process-local preflight. Copies the marked source, then
-/// previews the copy. Does not write courses, batches, or media files.
+/// One-shot, 15-minute, process-local preflight for every series in the marked source.
 pub(super) fn approve_synthetic_course_preflight(
     state: &AppState,
     library: &str,
     selection_id: &str,
     bindings: Vec<CourseMediaBinding>,
+) -> Result<Value, String> {
+    approve_marked_course_preflight(state, library, selection_id, bindings, None)
+}
+
+/// One-shot, 15-minute, process-local preflight. Copies the marked source, then
+/// previews the copy. Does not write courses, batches, or media files.
+/// Passing a new binding or series set replaces the previous approval.
+pub(super) fn approve_marked_course_preflight(
+    state: &AppState,
+    library: &str,
+    selection_id: &str,
+    bindings: Vec<CourseMediaBinding>,
+    series_ids: Option<Vec<String>>,
 ) -> Result<Value, String> {
     validate_bindings(&bindings)?;
     let scope = source_profiles::scope(state, library)?;
@@ -368,12 +590,13 @@ pub(super) fn approve_synthetic_course_preflight(
         return Err(STALE_SELECTION.into());
     }
     confirm_epoch(state, &selected)?;
-    let decision = super::course_apply::preview_course_batch(
+    let decision = super::course_apply::preview_course_batch_selected(
         state,
         &selected.scope,
         &selected.profile_id,
         &snapshot,
         &bindings,
+        series_ids,
     )?;
     super::course_apply::validate_preview_capacity(decision.preview(), &bindings)?;
     bindings_resolved(decision.preview(), &bindings)?;
