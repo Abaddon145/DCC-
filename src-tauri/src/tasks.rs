@@ -1077,6 +1077,14 @@ mod import_lifecycle_tests {
         ] {
             ensure_generic_ipc_payload(&payload).unwrap();
         }
+        let course = TaskRequest::LearningImport(ImportTaskRequest::CommitCourse {
+            selection_id: Uuid::new_v4().to_string(),
+            preview_id: Uuid::new_v4().to_string(),
+        });
+        assert!(ensure_generic_ipc_payload(&course)
+            .unwrap_err()
+            .contains("预检"));
+        assert!(course.ensure_retryable().unwrap_err().contains("重新预检"));
     }
     #[test]
     fn learning_import_task_late_cancel_preserves_committed_success() {

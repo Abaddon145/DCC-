@@ -2,10 +2,15 @@ use super::course_snapshot::{
     open_isolated_readonly, SYNTHETIC_COURSE_MARKER, SYNTHETIC_COURSE_MARKER_BODY,
 };
 use super::course_source_readonly::{
-    preview_synthetic_course_source, release_synthetic_course_source,
-    select_synthetic_course_source,
+    approve_synthetic_course_preflight, commit_synthetic_course_while_copying,
+    expire_synthetic_course_preflight, forget_synthetic_course_process_memory,
+    preview_synthetic_course_source, queue_synthetic_course_commit,
+    release_synthetic_course_source, select_synthetic_course_source,
 };
+use super::import_course_preview::CourseMediaBinding;
+use super::import_runner::ImportTaskRequest;
 use crate::state::test_state;
+use crate::tasks::TaskRequest;
 use rusqlite::{config::DbConfig, Connection, OpenFlags};
 use std::{
     fs,
@@ -326,6 +331,548 @@ fn synthetic_course_preview_drops_revoked_epoch_and_replaced_selection() {
     let current = select_synthetic_course_source(&state, &library, &path).unwrap();
     *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
     assert!(preview_synthetic_course_source(&state, &library, &current.selection_id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+    assert_no_sidecars(&path);
+}
+
+fn courses(state: &crate::state::AppState) -> i64 {
+    state
+        .with_library(|db, _| {
+            db.query_row("SELECT count(*) FROM learning_courses", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())
+        })
+        .unwrap()
+}
+
+fn batches(state: &crate::state::AppState) -> i64 {
+    state
+        .with_library(|db, _| {
+            db.query_row("SELECT count(*) FROM learning_import_batches", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())
+        })
+        .unwrap()
+}
+
+fn insert_video(state: &crate::state::AppState) -> String {
+    let media = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','synthetic',?2,'now','now')",
+                rusqlite::params![media, file],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'main',?3,'synthetic.mp4',?3,'now')",
+                rusqlite::params![file, media, format!("media-library/video/{media}/video.mp4")],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    media
+}
+
+fn bind(item: &str, media: &str) -> CourseMediaBinding {
+    CourseMediaBinding {
+        source_item_id: item.into(),
+        media_id: media.into(),
+    }
+}
+
+fn run_task(
+    state: &crate::state::AppState,
+    task: &crate::tasks::LibraryTask,
+) -> Result<serde_json::Value, String> {
+    let TaskRequest::LearningImport(request) = &task.payload else {
+        return Err("任务类型无效".into());
+    };
+    super::import_runner::run_local(state, task, request)
+}
+
+#[test]
+fn synthetic_course_preflight_does_not_write_targets_and_rejects_path_media() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    assert_eq!(
+        preview_synthetic_course_source(&state, &library, &ticket.selection_id)
+            .unwrap()
+            .preview()
+            .series[0]
+            .id,
+        "series-1"
+    );
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        &uuid::Uuid::new_v4().to_string()
+    )
+    .is_err());
+    let path_media = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", "C:/videos/lesson.mp4")],
+    )
+    .unwrap_err();
+    assert!(path_media.contains("绑定"), "{path_media}");
+    let missing = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &uuid::Uuid::new_v4().to_string())],
+    )
+    .unwrap_err();
+    assert!(missing.contains("目标媒体"), "{missing}");
+    assert_eq!(courses(&state), 0);
+    assert_eq!(batches(&state), 0);
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    assert_eq!(preview["selectionId"], ticket.selection_id);
+    assert_eq!(preview["series"][0]["title"], "合成系列");
+    let course = preview["series"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "course-1")
+        .unwrap();
+    assert_eq!(course["mediaId"], media);
+    assert_eq!(course["sourceProgress"]["positionMs"], 11000);
+    assert!(course["targetProgress"].is_null());
+    let other = preview["series"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "course-2")
+        .unwrap();
+    let codes = other["conflictCodes"].as_array().unwrap();
+    assert!(codes.iter().any(|code| code == "unresolved"));
+    assert!(codes.iter().any(|code| code == "progress_absent"));
+    let expires = preview["expiresAt"].as_i64().unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert!(expires > now && expires - now <= 900);
+    assert_eq!(courses(&state), 0);
+    assert_eq!(batches(&state), 0);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+    let stale = preview["previewId"].as_str().unwrap().to_string();
+    assert!(approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &uuid::Uuid::new_v4().to_string())]
+    )
+    .is_err());
+    assert!(queue_synthetic_course_commit(&state, &library, &ticket.selection_id, &stale).is_err());
+    assert_eq!(courses(&state), 0);
+}
+
+#[test]
+fn synthetic_course_commit_keeps_source_bytes_and_reuses_revert() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (task, launch) =
+        queue_synthetic_course_commit(&state, &library, &ticket.selection_id, preview_id).unwrap();
+    assert!(launch);
+    assert!(crate::tasks::ensure_generic_ipc_payload(&task.payload).is_err());
+    let (duplicate, again) =
+        queue_synthetic_course_commit(&state, &library, &ticket.selection_id, preview_id).unwrap();
+    assert_eq!(task.id, duplicate.id);
+    assert!(!again);
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["receipt"]["coursesCommitted"], 1);
+    assert_eq!(result["receipt"]["courseConflicts"], 1);
+    let stored = state.tasks.get(&task.id).unwrap();
+    assert_eq!(stored.result.unwrap()["batchId"], result["batchId"]);
+    let position: i64 = state
+        .with_library(|db, _| {
+            db.query_row(
+                "SELECT position_ms FROM learning_courses WHERE media_entry_id=?1",
+                [&media],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(position, 11000);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+    assert!(run_task(&state, &task).is_err());
+    assert!(
+        queue_synthetic_course_commit(&state, &library, &ticket.selection_id, preview_id).is_err()
+    );
+    assert_eq!(courses(&state), 1);
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let report = super::course_apply::revert_course_batch(
+        &state,
+        &scope,
+        &ticket.epoch,
+        result["batchId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!report["reverted"].as_array().unwrap().is_empty());
+    assert_eq!(courses(&state), 0);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+}
+
+#[test]
+fn synthetic_course_commit_reads_wal_without_changing_source_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    mark(temp.path());
+    let path = temp.path().join("wal.sqlite");
+    let db = Connection::open(&path).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.execute_batch(
+        "CREATE TABLE schema_version(version INTEGER NOT NULL);
+         INSERT INTO schema_version VALUES(8);
+         PRAGMA user_version=8;
+         CREATE TABLE series(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, sort_order INTEGER NOT NULL);
+         CREATE TABLE series_items(id TEXT PRIMARY KEY, series_id TEXT NOT NULL, title TEXT NOT NULL, duration_ms INTEGER, sort_order INTEGER NOT NULL);
+         CREATE TABLE playback_progress(item_id TEXT PRIMARY KEY, position_ms INTEGER NOT NULL, duration_ms INTEGER, playback_rate REAL NOT NULL, completed INTEGER NOT NULL, last_played_at INTEGER, updated_at INTEGER NOT NULL, last_sequence INTEGER NOT NULL);",
+    )
+    .unwrap();
+    let _: (i64, i64, i64) = db
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    db.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    db.execute(
+        "INSERT INTO series(id,title,description,sort_order) VALUES('wal-series','仅 WAL','',1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO series_items(id,series_id,title,duration_ms,sort_order) VALUES('wal-course','wal-series','WAL 课程',1000,1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO playback_progress(item_id,position_ms,duration_ms,playback_rate,completed,updated_at,last_sequence) VALUES('wal-course',4242,1000,1,0,1,1)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let [wal, shm, _] = sidecars(&path);
+    let db_before = fs::read(&path).unwrap();
+    let wal_before = fs::read(&wal).unwrap();
+    let shm_before = fs::read(&shm).unwrap();
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("wal-course", &media)],
+    )
+    .unwrap();
+    assert_eq!(
+        preview["series"][0]["items"][0]["sourceProgress"]["positionMs"],
+        4242
+    );
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["receipt"]["coursesCommitted"], 1);
+    let position: i64 = state
+        .with_library(|db, _| {
+            db.query_row(
+                "SELECT position_ms FROM learning_courses WHERE media_entry_id=?1",
+                [&media],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(position, 4242);
+    assert_eq!(fs::read(&path).unwrap(), db_before);
+    assert_eq!(fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(fs::read(&shm).unwrap(), shm_before);
+}
+
+#[test]
+fn synthetic_course_commit_rejects_torn_copy_and_source_or_target_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap().to_string();
+    let (task, _) =
+        queue_synthetic_course_commit(&state, &library, &ticket.selection_id, &preview_id).unwrap();
+    let torn = commit_synthetic_course_while_copying(
+        &state,
+        &library,
+        &ticket.selection_id,
+        &preview_id,
+        &task.id,
+        || false,
+        || fs::write(&path, b"torn").unwrap(),
+    );
+    assert!(torn.is_err(), "{torn:?}");
+    assert_eq!(courses(&state), 0);
+    assert_eq!(fs::read(&path).unwrap(), b"torn");
+    assert!(run_task(&state, &task).is_err());
+
+    let fresh = tempfile::tempdir().unwrap();
+    let state = test_state(&fresh.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(fresh.path(), "synthetic.sqlite");
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    {
+        let source = Connection::open(&path).unwrap();
+        source
+            .execute("UPDATE series SET title='changed' WHERE id='series-1'", [])
+            .unwrap();
+    }
+    let changed = run_task(&state, &task).unwrap_err();
+    assert!(changed.contains("来源"), "{changed}");
+    assert_eq!(courses(&state), 0);
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "UPDATE media_entries SET deleted_at='gone' WHERE id=?1",
+                [&media],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let target = run_task(&state, &task).unwrap_err();
+    assert!(target.contains("目标"), "{target}");
+    assert_eq!(courses(&state), 0);
+    assert_eq!(batches(&state), 0);
+}
+
+#[test]
+fn synthetic_course_commit_requires_fresh_preflight_after_revoke_switch_restart_expiry_and_cancel()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let media = insert_video(&state);
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap().to_string();
+    let stray = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(ImportTaskRequest::CommitCourse {
+                selection_id: ticket.selection_id.clone(),
+                preview_id: preview_id.clone(),
+            }),
+        )
+        .unwrap();
+    let rejected = run_task(&state, &stray.0).unwrap_err();
+    assert!(rejected.contains("预检"), "{rejected}");
+    assert_eq!(courses(&state), 0);
+    state.tasks.cancel(&stray.0.id).unwrap();
+    let (queued, _) =
+        queue_synthetic_course_commit(&state, &library, &ticket.selection_id, &preview_id).unwrap();
+    assert_ne!(queued.id, stray.0.id);
+    state.tasks.cancel(&queued.id).unwrap();
+    assert!(run_task(&state, &queued).is_err());
+    assert_eq!(courses(&state), 0);
+
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    expire_synthetic_course_preflight(&state, &library, preview["previewId"].as_str().unwrap())
+        .unwrap();
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap()
+    )
+    .is_err());
+
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    state.tasks.cancel(&task.id).unwrap();
+    assert!(run_task(&state, &task).is_err());
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap()
+    )
+    .is_err());
+    assert_eq!(courses(&state), 0);
+
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    assert!(release_synthetic_course_source(&state, &library, &ticket.selection_id).unwrap());
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap()
+    )
+    .is_err());
+
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let replaced = select_synthetic_course_source(&state, &library, &path).unwrap();
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap()
+    )
+    .is_err());
+    assert_ne!(replaced.selection_id, ticket.selection_id);
+
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &replaced.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &replaced.selection_id,
+        preview["previewId"].as_str().unwrap()
+    )
+    .is_err());
+
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    let ticket = select_synthetic_course_source(&state, &library, &path).unwrap();
+    let preview = approve_synthetic_course_preflight(
+        &state,
+        &library,
+        &ticket.selection_id,
+        vec![bind("course-1", &media)],
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &ticket.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    forget_synthetic_course_process_memory(&state).unwrap();
+    assert!(run_task(&state, &task).unwrap_err().contains("预检"));
+    assert_eq!(courses(&state), 0);
     assert_eq!(fs::read(&path).unwrap(), FIXTURE);
     assert_no_sidecars(&path);
 }
