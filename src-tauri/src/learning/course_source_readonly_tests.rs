@@ -2,10 +2,12 @@ use super::course_snapshot::{
     open_isolated_readonly, SYNTHETIC_COURSE_MARKER, SYNTHETIC_COURSE_MARKER_BODY,
 };
 use super::course_source_readonly::{
-    approve_synthetic_course_preflight, commit_synthetic_course_while_copying,
+    approve_marked_course_preflight, approve_synthetic_course_preflight,
+    commit_synthetic_course_while_copying, current_marked_course_source,
     expire_synthetic_course_preflight, forget_synthetic_course_process_memory,
-    preview_synthetic_course_source, queue_synthetic_course_commit,
-    release_synthetic_course_source, select_synthetic_course_source,
+    list_marked_course_series, preview_synthetic_course_source, queue_synthetic_course_commit,
+    release_synthetic_course_source, select_marked_course_with_picker,
+    select_synthetic_course_source,
 };
 use super::import_course_preview::CourseMediaBinding;
 use super::import_runner::ImportTaskRequest;
@@ -874,5 +876,195 @@ fn synthetic_course_commit_requires_fresh_preflight_after_revoke_switch_restart_
     assert!(run_task(&state, &task).unwrap_err().contains("预检"));
     assert_eq!(courses(&state), 0);
     assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+    assert_no_sidecars(&path);
+}
+
+#[test]
+fn marked_course_picker_wires_preflight_queue_and_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let selected = select_marked_course_with_picker(&state, &library, || Some(path.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.file_name, "synthetic.sqlite");
+    assert!(!selected.file_name.contains('/'));
+    assert_eq!(selected.library_id, library);
+    assert!(super::source_profiles::valid_uuid(&selected.selection_id));
+    let cancelled = select_marked_course_with_picker(&state, &library, || None).unwrap();
+    assert!(cancelled.is_none());
+    assert!(current_marked_course_source(&state, &library)
+        .unwrap()
+        .is_none());
+
+    let unmarked_dir = temp.path().join("unmarked");
+    fs::create_dir(&unmarked_dir).unwrap();
+    let unmarked = unmarked_dir.join("vault.sqlite");
+    fs::write(&unmarked, FIXTURE).unwrap();
+    let refused =
+        select_marked_course_with_picker(&state, &library, || Some(unmarked.clone())).unwrap_err();
+    assert!(refused.contains("合成标记"), "{refused}");
+    assert!(current_marked_course_source(&state, &library)
+        .unwrap()
+        .is_none());
+    assert_no_sidecars(&unmarked);
+    let relative = select_marked_course_with_picker(&state, &library, || {
+        Some(PathBuf::from("synthetic.sqlite"))
+    })
+    .unwrap_err();
+    assert!(relative.contains("合成标记"), "{relative}");
+
+    let binding = select_marked_course_with_picker(&state, &library, || Some(path.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current_marked_course_source(&state, &library)
+            .unwrap()
+            .unwrap(),
+        binding
+    );
+    let catalog = list_marked_course_series(&state, &library, &binding.selection_id).unwrap();
+    assert_eq!(catalog[0]["id"], "series-1");
+    assert_eq!(catalog[0]["title"], "合成系列");
+    assert_eq!(catalog[0]["courseCount"], 2_i64);
+    assert_eq!(courses(&state), 0);
+    assert_no_sidecars(&path);
+
+    let missing = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        Vec::new(),
+        Some(vec!["missing-series".into()]),
+    )
+    .unwrap_err();
+    assert!(missing.contains("系列"), "{missing}");
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        &uuid::Uuid::new_v4().to_string()
+    )
+    .is_err());
+
+    let media = insert_video(&state);
+    let first = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        vec![bind("course-1", &media)],
+        Some(vec!["series-1".into()]),
+    )
+    .unwrap();
+    let bound = first["series"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "course-1")
+        .unwrap();
+    assert_eq!(bound["mediaId"], media);
+    let listed_again = list_marked_course_series(&state, &library, &binding.selection_id).unwrap();
+    assert_eq!(listed_again[0]["courseCount"], 2_i64);
+    let rebound = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        Vec::new(),
+        Some(vec!["series-1".into()]),
+    )
+    .unwrap();
+    assert_ne!(first["previewId"], rebound["previewId"]);
+    let cleared = rebound["series"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "course-1")
+        .unwrap();
+    assert!(cleared["mediaId"].is_null());
+    assert!(queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        first["previewId"].as_str().unwrap()
+    )
+    .is_err());
+
+    let preview = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        vec![bind("course-1", &media)],
+        Some(vec!["series-1".into()]),
+    )
+    .unwrap();
+    let (task, launch) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(launch);
+    match &task.payload {
+        TaskRequest::LearningImport(ImportTaskRequest::CommitCourse {
+            selection_id,
+            preview_id,
+        }) => {
+            assert_eq!(selection_id, &binding.selection_id);
+            assert_eq!(preview_id, preview["previewId"].as_str().unwrap());
+        }
+        _ => panic!("expected commitCourse"),
+    }
+    assert!(crate::tasks::ensure_generic_ipc_payload(&task.payload).is_err());
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["receipt"]["coursesCommitted"], 1);
+    assert_eq!(result["receipt"]["courseConflicts"], 1);
+    let series_total = result["receipt"]["seriesCommitted"].as_i64().unwrap()
+        + result["receipt"]["seriesConflicts"].as_i64().unwrap();
+    assert_eq!(series_total, 1);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let report = super::course_apply::revert_course_batch(
+        &state,
+        &scope,
+        &binding.epoch,
+        result["batchId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!report["reverted"].as_array().unwrap().is_empty());
+    assert_eq!(courses(&state), 0);
+    assert!(release_synthetic_course_source(&state, &library, &binding.selection_id).unwrap());
+    assert!(current_marked_course_source(&state, &library)
+        .unwrap()
+        .is_none());
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn marked_course_picker_keeps_the_newer_selection_when_an_older_dialog_returns() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let newer = std::sync::Mutex::new(None);
+    let error = select_marked_course_with_picker(&state, &library, || {
+        let binding = select_marked_course_with_picker(&state, &library, || Some(path.clone()))
+            .unwrap()
+            .unwrap();
+        *newer.lock().unwrap() = Some(binding);
+        Some(path.clone())
+    })
+    .unwrap_err();
+    assert!(error.contains("已变化"), "{error}");
+    assert_eq!(
+        current_marked_course_source(&state, &library)
+            .unwrap()
+            .unwrap(),
+        newer.lock().unwrap().clone().unwrap()
+    );
     assert_no_sidecars(&path);
 }
