@@ -1,7 +1,9 @@
 //! Offline copy-only source access. SQLite never opens the source path.
 //!
-//! `open_isolated_readonly` is the portable synthetic gate: a sibling marker file is
-//! required, sidecars are fail-closed, and SQLite is opened only on a temporary copy.
+//! `open_isolated_readonly` is the synthetic gate used by course UI commands: a sibling
+//! marker file is required, sidecars are fail-closed, and SQLite is opened only on a
+//! temporary copy. On Windows, an existing `-shm` is held deny-write before that open.
+//! `open` remains the older Windows lease helper for tests and is not the course UI path.
 use rusqlite::{
     backup::{Backup, StepResult},
     config::DbConfig,
@@ -522,6 +524,48 @@ fn open_copied(path: &Path, has_wal: bool) -> Result<Connection, String> {
     Ok(connection)
 }
 
+/// Windows deny-write hold on an existing `-shm`. Dropping it releases the share mode.
+/// Non-Windows builds do not take this lease. Missing `-shm` is not an error and is not created.
+struct ShmDenyWriteLease {
+    #[cfg(windows)]
+    _file: Option<fs::File>,
+}
+
+impl ShmDenyWriteLease {
+    fn none() -> Self {
+        Self {
+            #[cfg(windows)]
+            _file: None,
+        }
+    }
+}
+
+/// When `-shm` already exists, hold it with `FILE_SHARE_READ` before any SQLite open.
+/// A writer that already has the file open for write makes this fail closed.
+/// The marker check happens first, so an unmarked database is not opened here.
+fn acquire_product_shm_lease(database: &Path) -> Result<ShmDenyWriteLease, String> {
+    #[cfg(windows)]
+    {
+        let shm = sidecar_name(database, "-shm");
+        match fs::symlink_metadata(&shm) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(ShmDenyWriteLease::none())
+            }
+            Ok(meta) if meta.file_type().is_file() && single_link(&meta) => {
+                let file = super::source_markdown::open_checked_deny_write(&shm)
+                    .map_err(|_| isolate_failed())?;
+                Ok(ShmDenyWriteLease { _file: Some(file) })
+            }
+            _ => Err(isolate_failed()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = database;
+        Ok(ShmDenyWriteLease::none())
+    }
+}
+
 /// Copy a marked synthetic database and open SQLite only on that copy.
 /// `interfere` runs between the two source reads so a torn sidecar fails closed.
 pub(super) fn open_isolated_readonly(
@@ -529,9 +573,20 @@ pub(super) fn open_isolated_readonly(
     timeout: Duration,
     interfere: impl FnOnce(),
 ) -> Result<Connection, String> {
+    open_isolated_readonly_leased(path, timeout, interfere, acquire_product_shm_lease)
+}
+
+fn open_isolated_readonly_leased(
+    path: &Path,
+    timeout: Duration,
+    interfere: impl FnOnce(),
+    lease: impl FnOnce(&Path) -> Result<ShmDenyWriteLease, String>,
+) -> Result<Connection, String> {
     if timeout.is_zero() {
         return Err(isolate_failed());
     }
+    require_synthetic_marker(path)?;
+    let held = lease(path)?;
     let started = Instant::now();
     let first = read_bundle(path, started, timeout)?;
     interfere();
@@ -562,5 +617,88 @@ pub(super) fn open_isolated_readonly(
     if after.digest != first.digest {
         return Err(isolate_failed());
     }
+    drop(held);
     Ok(snapshot)
+}
+
+#[cfg(test)]
+mod lease_gate_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const FIXTURE: &[u8] = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+
+    #[test]
+    fn unmarked_database_is_refused_before_shm_lease_or_sqlite() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let called = Cell::new(false);
+        let error = open_isolated_readonly_leased(
+            &path,
+            Duration::from_secs(2),
+            || {},
+            |_| {
+                called.set(true);
+                Ok(ShmDenyWriteLease::none())
+            },
+        )
+        .unwrap_err();
+        assert!(!called.get(), "lease ran on an unmarked database");
+        assert!(error.contains("尚未授权"), "{error}");
+        assert!(!temp.path().join("vault.sqlite-wal").exists());
+        assert!(!temp.path().join("vault.sqlite-shm").exists());
+    }
+
+    #[test]
+    fn denied_shm_lease_stops_before_sqlite_opens_a_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let error = open_isolated_readonly_leased(
+            &path,
+            Duration::from_secs(2),
+            || {},
+            |_| Err("拒绝写入租约失败".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "拒绝写入租约失败");
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!temp.path().join("synthetic.sqlite-wal").exists());
+        assert!(!temp.path().join("synthetic.sqlite-shm").exists());
+    }
+
+    /// Not executed on Linux CI. Proves the share mode used by the product lease:
+    /// a later write-sharing open fails, and a plain read still succeeds.
+    #[cfg(windows)]
+    #[test]
+    fn windows_shm_deny_write_lease_blocks_share_write_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(SYNTHETIC_COURSE_MARKER),
+            SYNTHETIC_COURSE_MARKER_BODY,
+        )
+        .unwrap();
+        let path = temp.path().join("synthetic.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let shm = sidecar_name(&path, "-shm");
+        fs::write(&shm, b"shm-bytes").unwrap();
+        let lease = acquire_product_shm_lease(&path).unwrap();
+        assert_eq!(fs::read(&shm).unwrap(), b"shm-bytes");
+        let mut contested = fs::OpenOptions::new();
+        contested
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        assert!(contested.open(&shm).is_err());
+        drop(lease);
+        assert!(contested.open(&shm).is_ok());
+    }
 }

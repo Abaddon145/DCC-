@@ -378,7 +378,7 @@ function ImportPanel({libraryId,onClose}:Props){
       {error&&<p className="learning-import-error" role="alert">{error}<button type="button" onClick={()=>{setError("");setStatus(s=>s+"（已清除错误，可重试）");}}>清除并重试</button></p>}
       <section aria-label="课程来源数据库">
         <h3>课程来源数据库</h3>
-        <p>通过系统文件对话框选择数据库副本，页面不能提交路径。非 Windows 只接受带合成标记的只读样本，未标记数据库会在打开 SQLite 之前被拒绝。只有点击课程预检才读取所选副本。</p>
+        <p>通过系统文件对话框选择数据库副本，页面不能提交路径。Windows 与非 Windows 都只接受带合成标记的只读样本，未标记数据库会在打开 SQLite 之前被拒绝。只有点击课程预检才读取所选副本。</p>
         <button type="button" disabled={busy} onClick={()=>void pickCourseSource()}>选择课程数据库…</button>
         {courseSource&&<><p>已选择：{courseSource.fileName}</p><button type="button" disabled={busy} onClick={()=>void releaseCourseSource()}>撤销课程来源选择</button></>}
         {courseSource&&<CourseSqliteImport key={courseSource.selectionId} libraryId={libraryId} source={courseSource}/>}

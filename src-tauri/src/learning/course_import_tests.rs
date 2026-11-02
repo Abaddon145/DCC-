@@ -1,5 +1,6 @@
 use super::{
-    course_import, import_access, import_course_preview::CourseMediaBinding, source_profiles,
+    course_import_legacy as course_import, import_access,
+    import_course_preview::CourseMediaBinding, source_profiles,
 };
 use crate::state::test_state;
 use rusqlite::params;
@@ -497,10 +498,22 @@ fn learning_import_production_sqlite_preview_commit_revert_loop() {
             .unwrap();
     assert_eq!(task.id, duplicate.id);
     assert!(crate::tasks::ensure_generic_ipc_payload(&task.payload).is_err());
-    let crate::tasks::TaskRequest::LearningImport(request) = &task.payload else {
+    let crate::tasks::TaskRequest::LearningImport(
+        super::import_runner::ImportTaskRequest::CommitCourse { .. },
+    ) = &task.payload
+    else {
         panic!("wrong task")
     };
-    let result = super::import_runner::run_local(&state, &task, request).unwrap();
+    // The product worker only commits a marked synthetic approval. This test
+    // still exercises the older offline helper directly.
+    let result = course_import::commit_selected(
+        &state,
+        &library,
+        &selected.selection_id,
+        preview_id,
+        || false,
+    )
+    .unwrap();
     assert_eq!(result["status"], "committed");
     assert_eq!(result["receipt"]["coursesCommitted"], 2);
     assert!(course_import::commit_selected(

@@ -3,8 +3,8 @@
 //! Selection, isolated copy, preflight, and commit run only when the sibling marker
 //! `dcc-synthetic-course-source.ok` is present. An unmarked file, including a real
 //! Yingliu Vault database, is refused before SQLite is opened. Product commands on
-//! non-Windows call this module after a native file dialog. Those commands do not
-//! take a path from the frontend.
+//! Windows and non-Windows call this module after a native file dialog. Those
+//! commands do not take a path from the frontend.
 //!
 //! `preview_synthetic_course_source` is a read and is not a commit grant. Only
 //! `approve_marked_course_preflight` stores the process-local approval that

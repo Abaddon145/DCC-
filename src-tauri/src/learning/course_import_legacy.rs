@@ -1,4 +1,8 @@
-//! Product course migration uses a locked offline copy and one-use in-memory approval.
+//! Windows lease tests for the older offline copy.
+//!
+//! Course UI commands and the commitCourse worker do not call this module.
+//! They use the marked synthetic session. These helpers can still copy a database
+//! chosen by a test, including one without the synthetic marker.
 use super::{
     course_apply, course_snapshot,
     import_access::SqliteAccessGrant,
@@ -339,57 +343,4 @@ pub(super) fn commit_selected(
     Ok(
         json!({"batchId":r.batch_id,"status":r.status,"receipt":{"coursesCommitted":r.courses_committed,"courseConflicts":r.course_conflicts,"seriesCommitted":r.series_committed,"seriesConflicts":r.series_conflicts}}),
     )
-}
-#[tauri::command]
-pub async fn list_learning_course_source_series(
-    app: tauri::AppHandle,
-    expected_library_id: String,
-    selection_id: String,
-) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Manager;
-        list_series(
-            &app.state::<AppState>(),
-            &expected_library_id,
-            &selection_id,
-        )
-    })
-    .await
-    .map_err(|_| "读取来源系列已中断".to_string())?
-}
-
-#[tauri::command]
-pub async fn preview_learning_course_import(
-    app: tauri::AppHandle,
-    expected_library_id: String,
-    selection_id: String,
-    bindings: Vec<CourseMediaBinding>,
-    series_ids: Option<Vec<String>>,
-) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Manager;
-        preview_selected_subset(
-            &app.state::<AppState>(),
-            &expected_library_id,
-            &selection_id,
-            bindings,
-            series_ids,
-        )
-    })
-    .await
-    .map_err(|_| "课程预检已中断".to_string())?
-}
-#[tauri::command]
-pub fn queue_learning_course_import(
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-    expected_library_id: String,
-    selection_id: String,
-    preview_id: String,
-) -> Result<LibraryTask, String> {
-    let (task, launch) = queue_selected(&state, &expected_library_id, &selection_id, &preview_id)?;
-    if launch {
-        tauri::async_runtime::spawn(crate::tasks::dispatch(app));
-    }
-    Ok(task)
 }
