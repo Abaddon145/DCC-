@@ -55,7 +55,7 @@ pub(super) struct SqliteAccessGrant {
 pub(crate) struct SqliteAccessSelection {
     pub(super) generation: String,
     pub(super) selected: Option<SqliteAccessGrant>,
-    pub(super) approved: Option<super::course_import::ApprovedCourse>,
+    pub(super) approved: Option<super::course_import_legacy::ApprovedCourse>,
 }
 
 impl ImportSelection {
@@ -202,6 +202,9 @@ fn scope_for(state: &AppState, library: &str) -> Result<source_profiles::Library
     Ok(scope)
 }
 
+/// Older offline selection used by Windows lease tests.
+/// Course UI commands do not call this, and it can still open a database that has no synthetic marker.
+#[allow(dead_code)]
 pub(super) fn select_sqlite_with_picker(
     state: &AppState,
     library: &str,
@@ -284,6 +287,7 @@ pub(super) fn select_sqlite_with_picker(
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn verify_sqlite_selection(
     state: &AppState,
     library: &str,
@@ -324,6 +328,7 @@ pub(super) fn verify_sqlite_selection(
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn release_sqlite_selection(
     state: &AppState,
     library: &str,
@@ -353,6 +358,7 @@ pub(super) fn release_sqlite_selection(
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn current_sqlite_selection(
     state: &AppState,
     library: &str,
@@ -1059,49 +1065,6 @@ where
     })
     .await
     .map_err(|_| "学习资料迁入操作中断，请重新核对来源与批次".to_owned())?
-}
-
-#[tauri::command]
-pub async fn select_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-) -> Result<Option<SqliteSourceBinding>, String> {
-    let picker_app = app.clone();
-    job(app, move |state| {
-        select_sqlite_with_picker(state, &expected_library_id, || {
-            picker_app
-                .dialog()
-                .file()
-                .set_title("选择映流课程数据库")
-                .add_filter("SQLite 数据库", &["sqlite", "sqlite3", "db"])
-                .blocking_pick_file()
-                .and_then(|path| path.into_path().ok())
-        })
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn current_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-) -> Result<Option<SqliteSourceBinding>, String> {
-    job(app, move |state| {
-        current_sqlite_selection(state, &expected_library_id)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn release_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-    selection_id: String,
-) -> Result<bool, String> {
-    job(app, move |state| {
-        release_sqlite_selection(state, &expected_library_id, &selection_id)
-    })
-    .await
 }
 
 #[tauri::command]

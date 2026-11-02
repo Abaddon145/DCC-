@@ -299,45 +299,23 @@ pub(crate) fn run_local(
             selection_id,
             preview_id,
         } => {
-            #[cfg(windows)]
-            {
-                let value = super::course_import::commit_selected(
-                    state,
-                    &task.library_id,
-                    selection_id,
-                    preview_id,
-                    stopped,
-                )?;
-                state.tasks.update(
-                    &task.id,
-                    1,
-                    1,
-                    String::new(),
-                    "课程迁入提交已完成".into(),
-                    Some(value.clone()),
-                );
-                Ok(value)
-            }
-            #[cfg(not(windows))]
-            {
-                let value = super::course_source_readonly::commit_synthetic_course(
-                    state,
-                    &task.library_id,
-                    selection_id,
-                    preview_id,
-                    &task.id,
-                    stopped,
-                )?;
-                state.tasks.update(
-                    &task.id,
-                    1,
-                    1,
-                    String::new(),
-                    "课程迁入提交已完成".into(),
-                    Some(value.clone()),
-                );
-                Ok(value)
-            }
+            let value = super::course_source_readonly::commit_synthetic_course(
+                state,
+                &task.library_id,
+                selection_id,
+                preview_id,
+                &task.id,
+                stopped,
+            )?;
+            state.tasks.update(
+                &task.id,
+                1,
+                1,
+                String::new(),
+                "课程迁入提交已完成".into(),
+                Some(value.clone()),
+            );
+            Ok(value)
         }
         ImportTaskRequest::Prepare {
             profile_id,

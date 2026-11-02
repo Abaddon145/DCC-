@@ -104,6 +104,7 @@ afterEach(()=>vi.restoreAllMocks());
 it("selects and releases a course database without automatically reading it",async()=>{
   vi.mocked(learningApi.selectCourseSource).mockResolvedValue({selectionId:"token",libraryId:"lib",profileId:"profile",epoch:"epoch",fileName:"synthetic.sqlite"});
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  expect(screen.getByRole("region",{name:"课程来源数据库"})).toHaveTextContent("Windows 与非 Windows 都只接受带合成标记的只读样本");
   expect(screen.getByRole("region",{name:"课程来源数据库"})).toHaveTextContent("未标记数据库会在打开 SQLite 之前被拒绝");
   fireEvent.click(await screen.findByRole("button",{name:"选择课程数据库…"}));
   expect(await screen.findByText(/synthetic.sqlite/)).toBeInTheDocument();

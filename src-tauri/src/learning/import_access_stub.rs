@@ -1,12 +1,11 @@
 //! Non-Windows access commands.
 //!
-//! Course selection uses a native file dialog and the marked synthetic session.
-//! The command arguments do not include a path. Markdown vault leases stay Windows-only.
+//! Course selection, preview, and commit live in `course_import` and use the marked
+//! synthetic session. Markdown vault leases stay Windows-only.
 use crate::{learning::import_runner::ImportPrepareNote, state::AppState, tasks::LibraryTask};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
-use tauri_plugin_dialog::DialogExt;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,84 +78,6 @@ pub struct ImportItemView {
 
 fn unsupported() -> String {
     "学习资料迁入目前仅支持 Windows 来源目录绑定".into()
-}
-
-fn course_binding(
-    binding: super::course_source_readonly::MarkedCourseBinding,
-) -> SqliteSourceBinding {
-    SqliteSourceBinding {
-        selection_id: binding.selection_id,
-        library_id: binding.library_id,
-        profile_id: binding.profile_id,
-        epoch: binding.epoch,
-        file_name: binding.file_name,
-    }
-}
-
-async fn job<T, F>(app: AppHandle, work: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&AppState) -> Result<T, String> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Manager;
-        work(&app.state::<AppState>())
-    })
-    .await
-    .map_err(|_| "学习资料迁入操作中断，请重新核对来源与批次".to_owned())?
-}
-
-#[tauri::command]
-pub async fn select_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-) -> Result<Option<SqliteSourceBinding>, String> {
-    let picker_app = app.clone();
-    job(app, move |state| {
-        super::course_source_readonly::select_marked_course_with_picker(
-            state,
-            &expected_library_id,
-            || {
-                picker_app
-                    .dialog()
-                    .file()
-                    .set_title("选择带合成标记的课程数据库副本")
-                    .add_filter("SQLite 数据库", &["sqlite", "sqlite3", "db"])
-                    .blocking_pick_file()
-                    .and_then(|path| path.into_path().ok())
-            },
-        )
-        .map(|picked| picked.map(course_binding))
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn current_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-) -> Result<Option<SqliteSourceBinding>, String> {
-    job(app, move |state| {
-        super::course_source_readonly::current_marked_course_source(state, &expected_library_id)
-            .map(|picked| picked.map(course_binding))
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn release_learning_course_source(
-    app: AppHandle,
-    expected_library_id: String,
-    selection_id: String,
-) -> Result<bool, String> {
-    job(app, move |state| {
-        super::course_source_readonly::release_synthetic_course_source(
-            state,
-            &expected_library_id,
-            &selection_id,
-        )
-    })
-    .await
 }
 
 #[tauri::command]
