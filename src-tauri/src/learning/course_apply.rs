@@ -1,8 +1,8 @@
 //! Course-batch apply journal. Staging a preview is not source authorization and not a Tauri command.
 use super::course_origins::{self, CourseOriginKey, CourseOriginState, SeriesOriginKey};
 use super::import_course_preview::{
-    preview_courses_from_profile, ConflictKind, CourseImportPreview, CourseItem,
-    CourseMediaBinding, Progress, SourceSeries,
+    preview_courses_from_profile, preview_courses_from_profile_selected, ConflictKind,
+    CourseImportPreview, CourseItem, CourseMediaBinding, Progress, SourceSeries,
 };
 use super::source_profiles::{self, LibraryScope};
 use crate::state::AppState;
@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+// ponytail: 10,000 entries fit the 2 MiB receipt bound; split persisted receipts if raising this limit.
+const MAX_REVERTIBLE_ENTRIES: usize = 10_000;
 const SOURCE_CHANGED: &str = "课程来源已变化，请重新预检";
 const TARGET_CHANGED: &str = "目标课程或媒体绑定已变化，请重新预检";
 
@@ -42,6 +44,89 @@ struct StageRow {
     target_fingerprint: String,
     payload_sha256: String,
     payload_json: String,
+}
+
+/// A scoped preview, not an authorization to read the source or commit a batch.
+#[derive(Clone)]
+pub(super) struct CourseStagePreview {
+    scope: LibraryScope,
+    profile_id: String,
+    preview: CourseImportPreview,
+    selected_series: Option<Vec<String>>,
+}
+
+impl CourseStagePreview {
+    pub(super) fn preview(&self) -> &CourseImportPreview {
+        &self.preview
+    }
+    pub(super) fn selected_series(&self) -> Option<Vec<String>> {
+        self.selected_series.clone()
+    }
+}
+
+pub(super) fn preview_course_batch(
+    state: &AppState,
+    scope: &LibraryScope,
+    profile_id: &str,
+    source: &Connection,
+    bindings: &[CourseMediaBinding],
+) -> Result<CourseStagePreview, String> {
+    preview_course_batch_selected(state, scope, profile_id, source, bindings, None)
+}
+
+pub(super) fn preview_course_batch_selected(
+    state: &AppState,
+    scope: &LibraryScope,
+    profile_id: &str,
+    source: &Connection,
+    bindings: &[CourseMediaBinding],
+    selected_series: Option<Vec<String>>,
+) -> Result<CourseStagePreview, String> {
+    source_profiles::scoped(state, scope, |db| {
+        let preview = match selected_series.as_deref() {
+            Some(ids) => {
+                preview_courses_from_profile_selected(source, db, bindings, profile_id, ids)?
+            }
+            None => preview_courses_from_profile(source, db, bindings, profile_id)?,
+        };
+        Ok(CourseStagePreview {
+            scope: scope.clone(),
+            profile_id: profile_id.into(),
+            preview,
+            selected_series,
+        })
+    })
+}
+
+fn repreview(
+    source: &Connection,
+    db: &Connection,
+    bindings: &[CourseMediaBinding],
+    profile: &str,
+    approved: &CourseStagePreview,
+) -> Result<CourseImportPreview, String> {
+    match approved.selected_series.as_deref() {
+        Some(ids) => preview_courses_from_profile_selected(source, db, bindings, profile, ids),
+        None => preview_courses_from_profile(source, db, bindings, profile),
+    }
+}
+
+pub(super) fn validate_preview_capacity(
+    preview: &CourseImportPreview,
+    bindings: &[CourseMediaBinding],
+) -> Result<(), String> {
+    let count = preview
+        .series
+        .iter()
+        .try_fold(preview.series.len(), |n, s| n.checked_add(s.items.len()))
+        .ok_or("课程迁入批次过大")?;
+    if count > MAX_REVERTIBLE_ENTRIES {
+        return Err("课程和系列总数超过每批 10000 项，当前版本暂不支持此来源迁入".into());
+    }
+    if decision_bytes(preview, bindings)?.len() > MAX_PAYLOAD_BYTES {
+        return Err("课程迁入暂存内容超限".into());
+    }
+    Ok(())
 }
 
 struct LiveCourse {
@@ -455,6 +540,7 @@ fn verify_live(
     batch: &BatchHead,
     preview: &CourseImportPreview,
 ) -> Result<(), String> {
+    verify_source_binding(db, batch, preview)?;
     for series in &preview.series {
         let key = SeriesOriginKey::new(&batch.source_profile_id, &series.id)?;
         let expected = series.origin.clone().ok_or("课程来源身份无效")?;
@@ -475,6 +561,17 @@ fn verify_live(
                 return Err(TARGET_CHANGED.into());
             }
         }
+    }
+    Ok(())
+}
+
+fn verify_source_binding(
+    db: &Connection,
+    batch: &BatchHead,
+    preview: &CourseImportPreview,
+) -> Result<(), String> {
+    if source_profiles::sqlite_binding_in(db, &batch.source_profile_id)? != preview.source_binding {
+        return Err("来源数据库身份已变化，请重新预检".into());
     }
     Ok(())
 }
@@ -541,7 +638,7 @@ fn acceptable_title(title: &str) -> bool {
         && !title.chars().any(char::is_control)
 }
 
-fn acceptable_series(title: &str, description: &str) -> bool {
+pub(super) fn acceptable_series(title: &str, description: &str) -> bool {
     acceptable_title(title)
         && description.len() <= 20_000
         && !description.chars().any(char::is_control)
@@ -729,8 +826,10 @@ fn apply_series(
                 courses.iter().any(|outcome| {
                     outcome.source_id == item.id
                         && outcome.status == "committed"
-                        && outcome.record
-                        && matches!(item.origin, Some(CourseOriginState::Unmapped))
+                        && ((outcome.record
+                            && matches!(item.origin, Some(CourseOriginState::Unmapped)))
+                            || (!outcome.record
+                                && matches!(item.origin, Some(CourseOriginState::Unchanged(_)))))
                 })
             });
             if !newly_mapped || !acceptable_series(&series.title, &description) {
@@ -895,6 +994,7 @@ pub(super) fn stage_course_batch(
     batch_id: &str,
     source: &Connection,
     bindings: &[CourseMediaBinding],
+    approved: &CourseStagePreview,
 ) -> Result<(), String> {
     source_profiles::scoped(state, scope, |db| {
         let batch = prepare(db, scope, batch_id)?;
@@ -902,11 +1002,24 @@ pub(super) fn stage_course_batch(
             return Err("迁入批次已结束".into());
         }
         ensure_epoch(db, &batch)?;
-        let preview = preview_courses_from_profile(source, db, bindings, &batch.source_profile_id)?;
+        if approved.scope != *scope || approved.profile_id != batch.source_profile_id {
+            return Err("课程预检不属于当前来源或素材库会话，请重新预检".into());
+        }
+        let preview = repreview(source, db, bindings, &batch.source_profile_id, approved)?;
+        validate_preview_capacity(&preview, bindings)?;
+        if preview.source_fingerprint != approved.preview.source_fingerprint {
+            return Err(SOURCE_CHANGED.into());
+        }
+        if preview.target_fingerprint != approved.preview.target_fingerprint {
+            return Err(TARGET_CHANGED.into());
+        }
         if preview.series.is_empty() {
             return Err("迁入批次没有条目".into());
         }
         let bytes = decision_bytes(&preview, bindings)?;
+        if bytes != decision_bytes(&approved.preview, bindings)? {
+            return Err("课程迁入预检已变化，请重新确认".into());
+        }
         if bytes.len() > MAX_PAYLOAD_BYTES {
             return Err("课程迁入暂存内容超限".into());
         }
@@ -919,6 +1032,7 @@ pub(super) fn stage_course_batch(
             return Err("迁入批次已结束".into());
         }
         ensure_epoch(&tx, &batch)?;
+        verify_source_binding(&tx, &batch, &preview)?;
         if let Some(existing) = load_stage(&tx, batch_id)? {
             if existing.payload_json == payload
                 && existing.payload_sha256 == digest
@@ -952,6 +1066,7 @@ pub(super) fn commit_course_batch(
     batch_id: &str,
     source: &Connection,
     bindings: &[CourseMediaBinding],
+    approved: &CourseStagePreview,
 ) -> Result<CourseApplyReceipt, String> {
     source_profiles::scoped(state, scope, |db| {
         let batch = prepare(db, scope, batch_id)?;
@@ -959,6 +1074,9 @@ pub(super) fn commit_course_batch(
             return load_receipt(db, batch_id);
         }
         ensure_epoch(db, &batch)?;
+        if approved.scope != *scope || approved.profile_id != batch.source_profile_id {
+            return Err("课程预检不属于当前来源或素材库会话，请重新预检".into());
+        }
         let staged = load_stage(db, batch_id)?.ok_or("课程迁入尚未暂存")?;
         if !valid_hash(&staged.payload_sha256)
             || !valid_hash(&staged.source_fingerprint)
@@ -967,7 +1085,16 @@ pub(super) fn commit_course_batch(
         {
             return Err("课程迁入暂存损坏".into());
         }
-        let current = preview_courses_from_profile(source, db, bindings, &batch.source_profile_id)?;
+        if approved.preview.source_fingerprint != staged.source_fingerprint {
+            return Err(SOURCE_CHANGED.into());
+        }
+        if approved.preview.target_fingerprint != staged.target_fingerprint {
+            return Err(TARGET_CHANGED.into());
+        }
+        if decision_bytes(&approved.preview, bindings)? != staged.payload_json.as_bytes() {
+            return Err("课程迁入预检已变化，请重新确认".into());
+        }
+        let current = repreview(source, db, bindings, &batch.source_profile_id, approved)?;
         if current.source_fingerprint != staged.source_fingerprint {
             return Err(SOURCE_CHANGED.into());
         }
@@ -1090,7 +1217,12 @@ fn saved_revert(db: &Connection, batch_id: &str) -> Result<Option<Value>, String
         .optional()
         .map_err(|_| "无法读取迁入撤回记录")?;
     saved
-        .map(|text| serde_json::from_str(&text).map_err(|_| "迁入撤回记录损坏".into()))
+        .map(|text| {
+            if !super::course_batch::valid_revert_report(&text, batch_id) {
+                return Err("迁入撤回记录损坏".into());
+            }
+            serde_json::from_str(&text).map_err(|_| "迁入撤回记录损坏".into())
+        })
         .transpose()
 }
 
@@ -1402,7 +1534,7 @@ pub(super) fn revert_course_batch(
             "archivesKept": true,
         });
         let report_text = report.to_string();
-        if report_text.len() > 65_536 {
+        if report_text.len() > 2_097_152 {
             return Err("无法记录课程迁入撤回".into());
         }
         let original = batch_request(&tx, batch_id)?;

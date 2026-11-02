@@ -69,11 +69,33 @@ pub enum ImportTaskRequest {
         batch_id: String,
         expected_epoch: String,
     },
+    CancelCourse {
+        batch_id: String,
+    },
+    CommitCourse {
+        selection_id: String,
+        preview_id: String,
+    },
+    RevertCourse {
+        batch_id: String,
+        expected_epoch: String,
+    },
 }
 
 impl ImportTaskRequest {
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            Self::CommitCourse {
+                selection_id,
+                preview_id,
+            } => {
+                if !source_profiles::valid_uuid(selection_id)
+                    || !source_profiles::valid_uuid(preview_id)
+                {
+                    return Err("课程来源选择或预检无效".into());
+                }
+                Ok(())
+            }
             Self::Prepare {
                 profile_id,
                 epoch,
@@ -91,13 +113,19 @@ impl ImportTaskRequest {
                 validate_prepare_notes(profile_id, vault, &notes)?;
                 Ok(())
             }
-            Self::Commit { batch_id } | Self::Cancel { batch_id } => {
+            Self::Commit { batch_id }
+            | Self::Cancel { batch_id }
+            | Self::CancelCourse { batch_id } => {
                 if !source_profiles::valid_uuid(batch_id) {
                     return Err("迁入批次无效".into());
                 }
                 Ok(())
             }
             Self::Revert {
+                batch_id,
+                expected_epoch,
+            }
+            | Self::RevertCourse {
                 batch_id,
                 expected_epoch,
             } => {
@@ -117,6 +145,9 @@ impl ImportTaskRequest {
             Self::Commit { .. } => "学习资料迁入提交",
             Self::Cancel { .. } => "学习资料迁入取消",
             Self::Revert { .. } => "学习资料迁入撤回",
+            Self::CancelCourse { .. } => "课程迁入取消",
+            Self::CommitCourse { .. } => "课程迁入提交",
+            Self::RevertCourse { .. } => "课程迁入撤回",
         }
     }
 }
@@ -236,6 +267,35 @@ pub(crate) fn run_local(
         .tasks
         .update(&task.id, 0, 1, String::new(), "处理迁入批次".into(), None);
     match request {
+        ImportTaskRequest::CommitCourse {
+            selection_id,
+            preview_id,
+        } => {
+            #[cfg(windows)]
+            {
+                let value = super::course_import::commit_selected(
+                    state,
+                    &task.library_id,
+                    selection_id,
+                    preview_id,
+                    stopped,
+                )?;
+                state.tasks.update(
+                    &task.id,
+                    1,
+                    1,
+                    String::new(),
+                    "课程迁入提交已完成".into(),
+                    Some(value.clone()),
+                );
+                Ok(value)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (selection_id, preview_id);
+                Err("课程来源迁入当前仅支持 Windows".into())
+            }
+        }
         ImportTaskRequest::Prepare {
             profile_id,
             epoch,
@@ -391,6 +451,52 @@ pub(crate) fn run_local(
                 1,
                 String::new(),
                 "迁入撤回已完成".into(),
+                Some(value.clone()),
+            );
+            Ok(value)
+        }
+        ImportTaskRequest::CancelCourse { batch_id } => {
+            let receipt = super::course_apply::cancel_course_batch(state, &scope, batch_id)?;
+            if receipt.batch_id != *batch_id
+                || !matches!(receipt.status.as_str(), "cancelled" | "committed")
+            {
+                return Err("无法确认课程批次状态".into());
+            }
+            let value = json!({"batchId":receipt.batch_id,"status":receipt.status});
+            state.tasks.update(
+                &task.id,
+                1,
+                1,
+                String::new(),
+                "课程批次状态已确认".into(),
+                Some(value.clone()),
+            );
+            Ok(value)
+        }
+        ImportTaskRequest::RevertCourse {
+            batch_id,
+            expected_epoch,
+        } => {
+            let report =
+                super::course_apply::revert_course_batch(state, &scope, expected_epoch, batch_id)?;
+            if !super::course_batch::valid_revert_report(&report.to_string(), batch_id) {
+                return Err("课程撤回记录损坏，请检查批次".into());
+            }
+            let reverted = report["reverted"]
+                .as_array()
+                .ok_or("课程撤回记录损坏，请检查批次")?
+                .len();
+            let kept = report["kept"]
+                .as_array()
+                .ok_or("课程撤回记录损坏，请检查批次")?
+                .len();
+            let value = json!({"batchId":batch_id,"status":"reverted","summary":{"revertedCount":reverted,"keptCount":kept,"archivesKept":true}});
+            state.tasks.update(
+                &task.id,
+                1,
+                1,
+                String::new(),
+                "课程迁入撤回已完成".into(),
                 Some(value.clone()),
             );
             Ok(value)

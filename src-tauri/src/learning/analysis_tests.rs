@@ -230,7 +230,7 @@ fn learning_analysis_v25_migration_and_competing_confirmation_keep_identity() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "37"
+        "39"
     );
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
     let barrier = std::sync::Barrier::new(2);

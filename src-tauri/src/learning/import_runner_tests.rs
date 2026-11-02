@@ -10,6 +10,54 @@ fn sha(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+#[test]
+fn learning_import_runner_course_cancel_is_scoped_and_rejects_notes() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let batch = super::course_batch::create_course_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &sha("course-task"),
+    )
+    .unwrap();
+    let request: ImportTaskRequest =
+        serde_json::from_value(json!({"action":"cancelCourse","batchId":batch})).unwrap();
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::LearningImport(request.clone()),
+        )
+        .unwrap();
+    let value = super::import_runner::run_local(&state, &task, &request).unwrap();
+    assert_eq!(value["batchId"], batch);
+    assert_eq!(value["status"], "cancelled");
+    let note = import_ops::create_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &sha("note-task"),
+    )
+    .unwrap();
+    let wrong: ImportTaskRequest =
+        serde_json::from_value(json!({"action":"cancelCourse","batchId":note.id})).unwrap();
+    let (task, _) = state
+        .tasks
+        .submit(library, TaskRequest::LearningImport(wrong.clone()))
+        .unwrap();
+    assert!(super::import_runner::run_local(&state, &task, &wrong).is_err());
+    assert_eq!(
+        import_ops::list_batches(&state, &scope).unwrap()[0].status,
+        "pending"
+    );
+}
+
 fn doc() -> serde_json::Value {
     json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"任务迁入"}]}]})
 }

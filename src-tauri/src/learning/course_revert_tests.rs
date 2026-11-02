@@ -1,7 +1,6 @@
 //! Synthetic course-batch revert. No Vault, user database, or source writes.
-use super::course_apply::{
-    cancel_course_batch, commit_course_batch, revert_course_batch, stage_course_batch,
-};
+use super::course_apply::{cancel_course_batch, revert_course_batch};
+use super::course_apply_tests::{commit_course_batch, stage_course_batch};
 use super::course_batch::create_course_batch;
 use super::import_course_preview::CourseMediaBinding;
 use super::{import_ops, source_profiles};
@@ -110,6 +109,39 @@ fn commit_solo(
     (batch, media, course, series)
 }
 
+#[test]
+fn learning_import_course_revert_rejects_malformed_saved_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let source = fresh_source(temp.path());
+    let (batch, _, _, _) = commit_solo(&state, &scope, &profile, &source, &"a".repeat(64));
+    revert_course_batch(&state, &scope, &profile.access_epoch, &batch).unwrap();
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "UPDATE learning_import_reverts SET report_json='{}' WHERE batch_id=?1",
+                [&batch],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        revert_course_batch(&state, &scope, &profile.access_epoch, &batch).unwrap_err(),
+        "迁入撤回记录损坏"
+    );
+    assert_eq!(
+        count(
+            &state,
+            "SELECT count(*) FROM learning_import_reverts WHERE batch_id=?1 AND report_json='{}'",
+            &batch
+        ),
+        1
+    );
+}
+
 fn count(state: &crate::state::AppState, sql: &str, id: &str) -> i64 {
     state
         .with_library(|db, _| {
@@ -176,6 +208,21 @@ fn learning_import_course_revert_removes_unchanged_created_course_and_series() {
         commit_solo(&state, &scope, &profile, &source, &"a".repeat(64));
     let before = source_bytes(temp.path());
     let report = revert_course_batch(&state, &scope, &profile.access_epoch, &batch).unwrap();
+    let details = super::course_batch::list_course_entries(
+        &state,
+        &state.active_library_id().unwrap(),
+        &batch,
+        0,
+    )
+    .unwrap();
+    assert_eq!(details.revert_report.as_ref(), Some(&report));
+    assert!(!details.revert_damaged);
+    let listed =
+        super::course_batch::list_course_batches(&state, &state.active_library_id().unwrap())
+            .unwrap();
+    let summary = listed.iter().find(|item| item.id == batch).unwrap();
+    assert!(summary.reverted);
+    assert!(!summary.revert_damaged);
     assert_eq!(report["batchId"], batch);
     assert_eq!(report["archivesKept"], true);
     assert_eq!(report["kept"], serde_json::json!([]));
@@ -250,6 +297,64 @@ fn learning_import_course_revert_removes_unchanged_created_course_and_series() {
 }
 
 #[test]
+fn learning_import_course_revert_runs_through_shared_task_with_epoch_check() {
+    use super::import_runner::{self, ImportTaskRequest};
+    use crate::tasks::TaskRequest;
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let source = fresh_source(temp.path());
+    let (batch, _media, course, series) =
+        commit_solo(&state, &scope, &profile, &source, &"a".repeat(64));
+    let stale = ImportTaskRequest::RevertCourse {
+        batch_id: batch.clone(),
+        expected_epoch: uuid::Uuid::new_v4().to_string(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library.clone(), TaskRequest::LearningImport(stale.clone()))
+        .unwrap();
+    assert!(import_runner::run_local(&state, &task, &stale).is_err());
+    assert_eq!(
+        count(
+            &state,
+            "SELECT count(*) FROM learning_courses WHERE id=?1",
+            &course
+        ),
+        1
+    );
+    let request = ImportTaskRequest::RevertCourse {
+        batch_id: batch.clone(),
+        expected_epoch: profile.access_epoch.clone(),
+    };
+    let (task, _) = state
+        .tasks
+        .submit(library, TaskRequest::LearningImport(request.clone()))
+        .unwrap();
+    let value = import_runner::run_local(&state, &task, &request).unwrap();
+    assert_eq!(value["status"], "reverted");
+    assert_eq!(value["batchId"], batch);
+    assert_eq!(
+        count(
+            &state,
+            "SELECT count(*) FROM learning_courses WHERE id=?1",
+            &course
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &state,
+            "SELECT count(*) FROM learning_series WHERE id=?1",
+            &series
+        ),
+        0
+    );
+}
+
+#[test]
 fn learning_import_course_revert_keeps_edited_course_and_removes_unchanged_series() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
@@ -271,6 +376,15 @@ fn learning_import_course_revert_keeps_edited_course_and_removes_unchanged_serie
     let report = revert_course_batch(&state, &scope, &profile.access_epoch, &batch).unwrap();
     let course_entry = entry_id(&state, &batch, "course", "solo-a");
     let series_entry = entry_id(&state, &batch, "series", "series-solo");
+    let details = super::course_batch::list_course_entries(
+        &state,
+        &state.active_library_id().unwrap(),
+        &batch,
+        0,
+    )
+    .unwrap();
+    assert_eq!(details.revert_report.as_ref(), Some(&report));
+    assert!(!details.revert_damaged);
     assert_eq!(
         outcome(&report, &course_entry, Some(&course)),
         "kept_modified"

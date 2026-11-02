@@ -116,6 +116,13 @@ pub struct AppState {
     pub(crate) source_scope_nonce: Mutex<Uuid>,
     #[cfg(windows)]
     pub(crate) learning_import_selection: Mutex<crate::learning::import_access::ImportSelection>,
+    #[cfg(windows)]
+    pub(crate) sqlite_import_gate: Mutex<()>,
+    #[cfg(windows)]
+    pub(crate) sqlite_import_selection:
+        Mutex<crate::learning::import_access::SqliteAccessSelection>,
+    pub(crate) synthetic_course_source:
+        Mutex<crate::learning::course_source_readonly::SyntheticCourseSession>,
     link_check_job: Mutex<Option<Arc<AtomicBool>>>,
     pending_move_undo: Mutex<Option<PendingMoveUndo>>,
     reference_window_board: Mutex<Option<String>>,
@@ -341,6 +348,11 @@ impl AppState {
             source_scope_nonce: Mutex::new(Uuid::new_v4()),
             #[cfg(windows)]
             learning_import_selection: Mutex::default(),
+            #[cfg(windows)]
+            sqlite_import_gate: Mutex::default(),
+            #[cfg(windows)]
+            sqlite_import_selection: Mutex::default(),
+            synthetic_course_source: Mutex::default(),
             link_check_job: Mutex::new(None),
             pending_move_undo: Mutex::new(None),
             reference_window_board: Mutex::new(None),
@@ -1417,6 +1429,11 @@ pub(crate) fn test_state(path: &Path) -> AppState {
         source_scope_nonce: Mutex::new(Uuid::new_v4()),
         #[cfg(windows)]
         learning_import_selection: Mutex::default(),
+        #[cfg(windows)]
+        sqlite_import_gate: Mutex::default(),
+        #[cfg(windows)]
+        sqlite_import_selection: Mutex::default(),
+        synthetic_course_source: Mutex::default(),
         link_check_job: Mutex::new(None),
         pending_move_undo: Mutex::new(None),
         reference_window_board: Mutex::new(None),

@@ -125,6 +125,36 @@ pub(super) fn get_in(db: &Connection, id: &str) -> Result<SourceProfile, String>
     Ok(profile)
 }
 
+pub(super) fn sqlite_binding_in(db: &Connection, id: &str) -> Result<Option<String>, String> {
+    let binding: Option<String> = db
+        .query_row(
+            "SELECT file_identity FROM learning_source_sqlite_bindings WHERE source_profile_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| "无法检查来源数据库身份")?;
+    if let Some(value) = binding.as_deref() {
+        let parts: Vec<_> = value.split(':').collect();
+        let hex = |part: &str| {
+            part.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if parts.len() != 4
+            || parts[0] != "win2"
+            || parts[1].len() != 8
+            || parts[2].len() != 16
+            || parts[3].len() != 16
+            || !parts[1..].iter().all(|part| hex(part))
+            || parts[2] == "0000000000000000"
+            || parts[3] == "0000000000000000"
+        {
+            return Err("来源数据库身份记录损坏".into());
+        }
+    }
+    Ok(binding)
+}
+
 /// Restore keeps provenance but invalidates any future local grants bound to an old epoch.
 pub fn invalidate_epochs(db: &Connection) -> Result<(), String> {
     let epoch = Uuid::new_v4().to_string();

@@ -2,6 +2,265 @@ use super::{course_batch::create_course_batch, import_ops, source_profiles};
 use crate::state::test_state;
 use sha2::{Digest, Sha256};
 
+#[test]
+fn learning_import_course_revert_capacity_upgrade_is_atomic_and_preserves_reports() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let batch = create_course_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    state.with_library(|db,_|{
+        db.execute_batch("DROP INDEX learning_course_import_entries_target; ALTER TABLE learning_import_reverts RENAME TO test_v39; CREATE TABLE learning_import_reverts(batch_id TEXT PRIMARY KEY REFERENCES learning_import_batches(id) ON DELETE CASCADE,original_request_sha256 TEXT NOT NULL CHECK(length(original_request_sha256)=64),reverted_at TEXT NOT NULL,report_json TEXT NOT NULL CHECK(length(CAST(report_json AS BLOB))<=65536)); INSERT INTO learning_import_reverts SELECT * FROM test_v39; DROP TABLE test_v39;").unwrap();
+        let report=serde_json::json!({"batchId":batch,"reverted":[],"kept":[],"archivesKept":true}).to_string();
+        db.execute("INSERT INTO learning_import_reverts(batch_id,original_request_sha256,reverted_at,report_json) VALUES(?1,?2,'now',?3)",rusqlite::params![batch,"a".repeat(64),report]).unwrap();
+        db.execute_batch("UPDATE schema_meta SET value='38' WHERE key='schema_version'; CREATE TRIGGER reject_v39 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='39' BEGIN SELECT RAISE(ABORT,'rollback'); END;").unwrap();
+        assert!(super::migrate(db).is_err());
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"38");
+        assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
+        db.execute_batch("DROP TRIGGER reject_v39").unwrap();super::migrate(db)?;super::migrate(db)?;
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"39");
+        assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
+        let large=serde_json::json!({"data":"x".repeat(70000)}).to_string();
+        db.execute("UPDATE learning_import_reverts SET report_json=?1 WHERE batch_id=?2",rusqlite::params![large,batch]).unwrap();
+        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT 1 FROM learning_course_import_entries WHERE entry_kind=?1 AND target_id=?2 AND id<>?3 AND status='committed'",rusqlite::params!["course",uuid::Uuid::new_v4().to_string(),uuid::Uuid::new_v4().to_string()],|row|row.get(3)).unwrap();
+        assert!(plan.contains("learning_course_import_entries_target"),"{plan}");
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn learning_import_course_batch_list_isolates_invalid_source_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let good = source_profiles::create(&state, &scope).unwrap();
+    let bad = source_profiles::create(&state, &scope).unwrap();
+    let good_batch = create_course_batch(
+        &state,
+        &scope,
+        &good.id,
+        &good.access_epoch,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let bad_batch =
+        create_course_batch(&state, &scope, &bad.id, &bad.access_epoch, &"b".repeat(64)).unwrap();
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "UPDATE learning_source_profiles SET access_epoch=?1 WHERE id=?2",
+                rusqlite::params!["x".repeat(36), bad.id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let rows = super::course_batch::list_course_batches(&state, &library).unwrap();
+    let valid = rows.iter().find(|row| row.id == good_batch).unwrap();
+    let damaged = rows.iter().find(|row| row.id == bad_batch).unwrap();
+    let valid_json = serde_json::to_value(valid).unwrap();
+    let damaged_json = serde_json::to_value(damaged).unwrap();
+    assert_eq!(valid_json["currentSourceEpoch"], good.access_epoch);
+    assert!(damaged_json["currentSourceEpoch"].is_null());
+}
+
+#[test]
+fn learning_import_course_batch_list_has_a_bounded_first_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    state.with_library(|db, _| {
+        for index in 0..205u128 {
+            db.execute("INSERT INTO learning_import_batches(id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,batch_kind) VALUES(?1,?2,?3,?4,?5,?6,'pending','2026-01-01T00:00:00Z','courses')", rusqlite::params![uuid::Uuid::from_u128(index + 1).to_string(),library,scope.root_hash(),profile.id,profile.access_epoch,format!("{index:064x}")]).unwrap();
+        }
+        Ok(())
+    }).unwrap();
+    let rows = super::course_batch::list_course_batches(&state, &library).unwrap();
+    assert_eq!(rows.len(), 101);
+    let cursor = |row: &super::course_batch::CourseBatchSummary| {
+        serde_json::from_value::<super::course_batch::CourseBatchCursor>(
+            serde_json::json!({"createdAt":row.created_at,"id":row.id}),
+        )
+        .unwrap()
+    };
+    let second_cursor = cursor(&rows[99]);
+    state.with_library(|db, _| {
+        db.execute("INSERT INTO learning_import_batches(id,library_id,root_hash,source_profile_id,source_epoch,request_sha256,status,created_at,batch_kind) VALUES(?1,?2,?3,?4,?5,?6,'pending','2026-02-01T00:00:00Z','courses')",rusqlite::params![uuid::Uuid::from_u128(999).to_string(),library,scope.root_hash(),profile.id,profile.access_epoch,"f".repeat(64)]).unwrap();
+        Ok(())
+    }).unwrap();
+    let second =
+        super::course_batch::list_course_batches_page(&state, &library, Some(&second_cursor))
+            .unwrap();
+    assert_eq!(second.len(), 101);
+    let third =
+        super::course_batch::list_course_batches_page(&state, &library, Some(&cursor(&second[99])))
+            .unwrap();
+    assert_eq!(third.len(), 5);
+    let ids = rows[..100]
+        .iter()
+        .chain(second[..100].iter())
+        .chain(third.iter())
+        .map(|row| row.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 205);
+    assert!(!ids.contains(&uuid::Uuid::from_u128(999).to_string()));
+    let invalid = serde_json::from_value::<super::course_batch::CourseBatchCursor>(
+        serde_json::json!({"createdAt":"2026-01-01","id":"invalid"}),
+    )
+    .unwrap();
+    assert!(
+        super::course_batch::list_course_batches_page(&state, &library, Some(&invalid)).is_err()
+    );
+    assert!(super::course_batch::list_course_batches_page(
+        &state,
+        &uuid::Uuid::new_v4().to_string(),
+        Some(&second_cursor)
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_course_batch_entries_are_scoped_and_paginated() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let course = create_course_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let note = import_ops::create_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &"b".repeat(64),
+    )
+    .unwrap();
+    state.with_library(|db, _| {
+        for n in 0..101 {
+            db.execute("INSERT INTO learning_course_import_entries(id,batch_id,entry_kind,source_id,status,conflict_code,receipt_json,created_at) VALUES(?1,?2,'course',?3,'conflict','unresolved','{}','now')", rusqlite::params![uuid::Uuid::new_v4().to_string(),course,format!("item-{n:03}")]).unwrap();
+        }
+        Ok(())
+    }).unwrap();
+    let first = super::course_batch::list_course_entries(&state, &library, &course, 0).unwrap();
+    assert_eq!(first.items.len(), 100);
+    assert!(first.has_more);
+    assert!(first.revert_report.is_none());
+    assert!(!first.revert_damaged);
+    assert_eq!(first.items[0].source_id, "item-000");
+    assert_eq!(first.items[0].conflict_code.as_deref(), Some("unresolved"));
+    let last = super::course_batch::list_course_entries(&state, &library, &course, 100).unwrap();
+    assert_eq!(last.items.len(), 1);
+    assert!(!last.has_more);
+    assert_eq!(last.items[0].source_id, "item-100");
+    assert!(super::course_batch::list_course_entries(&state, &library, &note.id, 0).is_err());
+    assert!(super::course_batch::list_course_entries(
+        &state,
+        &library,
+        &uuid::Uuid::new_v4().to_string(),
+        0
+    )
+    .is_err());
+    assert!(super::course_batch::list_course_entries(
+        &state,
+        &uuid::Uuid::new_v4().to_string(),
+        &course,
+        0
+    )
+    .is_err());
+}
+
+#[test]
+fn learning_import_course_batch_list_is_scoped_and_excludes_notes() {
+    use super::course_batch::list_course_batches;
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let scope = source_profiles::scope(&state, &library).unwrap();
+    let profile = source_profiles::create(&state, &scope).unwrap();
+    let course = create_course_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let note = import_ops::create_batch(
+        &state,
+        &scope,
+        &profile.id,
+        &profile.access_epoch,
+        &"b".repeat(64),
+    )
+    .unwrap();
+    let rows = list_course_batches(&state, &library).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, course);
+    assert_eq!(rows[0].status, "pending");
+    assert!(!rows[0].staged);
+    assert_eq!((rows[0].committed, rows[0].conflicts), (0, 0));
+    assert!(!rows[0].reverted);
+    assert_eq!(
+        rows[0].current_source_epoch.as_deref(),
+        Some(profile.access_epoch.as_str())
+    );
+    assert!(rows.iter().all(|b| b.id != note.id));
+    assert!(list_course_batches(&state, &uuid::Uuid::new_v4().to_string()).is_err());
+    state.with_library(|db,_| {
+        db.execute("INSERT INTO learning_course_import_stage(batch_id,source_fingerprint,target_fingerprint,payload_sha256,payload_json,staged_at) VALUES(?1,?2,?2,?2,'{}','now')", rusqlite::params![course,"a".repeat(64)]).unwrap();
+        db.execute("INSERT INTO learning_course_import_entries(id,batch_id,entry_kind,source_id,status,target_id,receipt_json,created_at) VALUES(?1,?2,'course','one','committed',?3,'{}','now')", rusqlite::params![uuid::Uuid::new_v4().to_string(),course,uuid::Uuid::new_v4().to_string()]).unwrap();
+        db.execute("INSERT INTO learning_course_import_entries(id,batch_id,entry_kind,source_id,status,conflict_code,receipt_json,created_at) VALUES(?1,?2,'series','two','conflict','CHANGED','{}','now')", rusqlite::params![uuid::Uuid::new_v4().to_string(),course]).unwrap();
+        let report = serde_json::json!({"batchId":course,"reverted":[],"kept":[],"archivesKept":true}).to_string();
+        db.execute("INSERT INTO learning_import_reverts(batch_id,original_request_sha256,reverted_at,report_json) VALUES(?1,?2,'now',?3)",rusqlite::params![course,"a".repeat(64),report]).unwrap();
+        Ok(())
+    }).unwrap();
+    let rows = list_course_batches(&state, &library).unwrap();
+    assert!(rows[0].staged);
+    assert_eq!((rows[0].committed, rows[0].conflicts), (1, 1));
+    assert!(rows[0].reverted);
+    assert!(!rows[0].revert_damaged);
+    state
+        .with_library(|db, _| {
+            db.execute(
+                "UPDATE learning_import_reverts SET report_json='{}' WHERE batch_id=?1",
+                [&course],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let rows = list_course_batches(&state, &library).unwrap();
+    assert!(!rows[0].reverted);
+    assert!(rows[0].revert_damaged);
+    state.with_library(|db,_| {
+        let bad = serde_json::json!({"batchId":course,"reverted":[null],"kept":[],"archivesKept":true}).to_string();
+        db.execute("UPDATE learning_import_reverts SET report_json=?1 WHERE batch_id=?2",rusqlite::params![bad,course]).unwrap();
+        Ok(())
+    }).unwrap();
+    assert!(list_course_batches(&state, &library).unwrap()[0].revert_damaged);
+    let details = super::course_batch::list_course_entries(&state, &library, &course, 0).unwrap();
+    assert!(details.revert_damaged);
+    assert!(details.revert_report.is_none());
+}
+
 const NOTE_OP: &str = "课程迁入批次不能使用笔记操作";
 
 fn note_input(path: &str, bytes: &[u8]) -> import_ops::NewImportItem {
@@ -231,7 +490,7 @@ fn learning_import_course_batch_schema_upgrade_rolls_back_and_preserves_note_bat
         super::migrate(db)?;
         super::migrate(db)?;
         assert_eq!(db.query_row("SELECT batch_kind FROM learning_import_batches WHERE id=?1",[&note.id],|r| r.get::<_,String>(0)).unwrap(),"notes");
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"37");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"39");
         Ok(())
     }).unwrap();
     assert_eq!(
@@ -261,6 +520,12 @@ fn learning_import_course_batch_backup_keeps_kind_and_invalidates_epoch() {
     let scope = source_profiles::scope(&state, &state.active_library_id().unwrap()).unwrap();
     let restored = source_profiles::get(&state, &scope, &profile.id).unwrap();
     assert_ne!(restored.access_epoch, profile.access_epoch);
+    assert_eq!(
+        super::course_batch::list_course_batches(&state, scope.library_id()).unwrap()[0]
+            .current_source_epoch
+            .as_deref(),
+        Some(restored.access_epoch.as_str())
+    );
     assert!(
         create_course_batch(&state, &scope, &profile.id, &profile.access_epoch, &request).is_err()
     );

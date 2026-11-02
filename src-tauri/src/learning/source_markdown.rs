@@ -249,8 +249,24 @@ impl VaultSelection {
 }
 
 fn open_checked(path: &Path, directory: bool) -> Result<File, String> {
+    open_checked_with_share(path, directory, false)
+}
+
+pub(super) fn open_checked_shared(path: &Path) -> Result<File, String> {
+    open_checked_with_share(path, false, true)
+}
+
+pub(super) fn open_checked_deny_write(path: &Path) -> Result<File, String> {
+    open_checked(path, false)
+}
+
+fn open_checked_with_share(
+    path: &Path,
+    directory: bool,
+    shared_write: bool,
+) -> Result<File, String> {
     let mut options = OpenOptions::new();
-    options.read(true).share_mode(if directory {
+    options.read(true).share_mode(if directory || shared_write {
         FILE_SHARE_READ | FILE_SHARE_WRITE
     } else {
         FILE_SHARE_READ
