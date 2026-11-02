@@ -13,9 +13,10 @@ use crate::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::io::Read;
 use std::{
     collections::HashSet,
-    io::Read,
     path::{Path, PathBuf},
 };
 use tauri::{AppHandle, State};
@@ -44,6 +45,8 @@ pub struct SqliteSourceBinding {
     pub file_name: String,
 }
 
+/// Offline selection kept for Windows lease tests. Product builds do not store it.
+#[cfg(test)]
 #[derive(Clone)]
 pub(super) struct SqliteAccessGrant {
     pub(super) scope: source_profiles::LibraryScope,
@@ -51,10 +54,15 @@ pub(super) struct SqliteAccessGrant {
     pub(super) path: PathBuf,
 }
 
+/// The mutex stays on Windows so the test session has a place to live.
+/// Product builds do not keep a path or an approval that can copy an unmarked database.
 #[derive(Default)]
 pub(crate) struct SqliteAccessSelection {
+    #[cfg(test)]
     pub(super) generation: String,
+    #[cfg(test)]
     pub(super) selected: Option<SqliteAccessGrant>,
+    #[cfg(test)]
     pub(super) approved: Option<super::course_import_legacy::ApprovedCourse>,
 }
 
@@ -203,8 +211,8 @@ fn scope_for(state: &AppState, library: &str) -> Result<source_profiles::Library
 }
 
 /// Older offline selection used by Windows lease tests.
-/// Course UI commands do not call this, and it can still open a database that has no synthetic marker.
-#[allow(dead_code)]
+/// Compiled only for tests, so product commands cannot copy an unmarked database through it.
+#[cfg(test)]
 pub(super) fn select_sqlite_with_picker(
     state: &AppState,
     library: &str,
@@ -287,7 +295,7 @@ pub(super) fn select_sqlite_with_picker(
     result
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn verify_sqlite_selection(
     state: &AppState,
     library: &str,
@@ -328,7 +336,7 @@ pub(super) fn verify_sqlite_selection(
     })
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn release_sqlite_selection(
     state: &AppState,
     library: &str,
@@ -358,7 +366,7 @@ pub(super) fn release_sqlite_selection(
     })
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn current_sqlite_selection(
     state: &AppState,
     library: &str,

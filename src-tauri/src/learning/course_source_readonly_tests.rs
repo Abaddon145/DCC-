@@ -218,6 +218,59 @@ fn synthetic_course_gate_rejects_bad_header_non_schema8_timeout_and_torn_reread(
 }
 
 #[test]
+fn synthetic_course_gate_rejects_marker_or_sidecar_that_appears_and_disappears() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let marker = temp.path().join(SYNTHETIC_COURSE_MARKER);
+    let marker_before = fs::read(&marker).unwrap();
+    let [wal, shm, journal] = sidecars(&path);
+    let transient = open_isolated_readonly(&path, Duration::from_secs(2), || {
+        fs::write(&wal, b"transient-wal").unwrap();
+        fs::write(&shm, vec![7u8; 32]).unwrap();
+        fs::write(&journal, b"transient-journal").unwrap();
+        fs::remove_file(&wal).unwrap();
+        fs::remove_file(&shm).unwrap();
+        fs::remove_file(&journal).unwrap();
+        fs::remove_file(&marker).unwrap();
+        fs::write(&marker, marker_before.as_slice()).unwrap();
+    });
+    let error = transient.unwrap_err();
+    assert!(
+        error.contains("无法只读隔离"),
+        "transient names were accepted: {error}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read(&marker).unwrap(), marker_before);
+    assert_no_sidecars(&path);
+
+    let mut marker_file = fs::OpenOptions::new().write(true).open(&marker).unwrap();
+    let rewritten = open_isolated_readonly(&path, Duration::from_secs(2), || {
+        use std::io::Write;
+        marker_file.write_all(marker_before.as_slice()).unwrap();
+        marker_file.sync_all().unwrap();
+    });
+    let rewritten_error = rewritten.unwrap_err();
+    assert!(
+        rewritten_error.contains("无法只读隔离"),
+        "rewritten marker was accepted: {rewritten_error}"
+    );
+    drop(marker_file);
+    assert_eq!(fs::read(&marker).unwrap(), marker_before);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+
+    let snapshot = open_isolated_readonly(&path, Duration::from_secs(2), || {}).unwrap();
+    let version: i64 = snapshot
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+    drop(snapshot);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+}
+
+#[test]
 fn synthetic_course_preview_reads_uncheckpointed_wal_and_keeps_source_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
