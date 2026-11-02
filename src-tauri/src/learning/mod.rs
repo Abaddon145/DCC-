@@ -138,6 +138,7 @@ mod course_apply_tests;
 pub mod course_batch;
 #[cfg(test)]
 mod course_batch_tests;
+mod course_directory_watch;
 #[path = "course_import_stub.rs"]
 pub mod course_import;
 #[cfg(all(test, windows))]

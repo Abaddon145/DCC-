@@ -289,6 +289,160 @@ fn synthetic_course_gate_rejects_marker_or_sidecar_that_appears_and_disappears()
     assert_no_sidecars(&path);
 }
 
+/// Endpoint file and directory stamps match the pre-rewrite identity. The gate
+/// still fails because the parent watch saw the in-place write.
+#[cfg(target_os = "linux")]
+#[test]
+fn synthetic_course_gate_rejects_inplace_rewrite_when_mtime_is_restored() {
+    use std::cell::Cell;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let restored = Cell::new(false);
+    let error = open_isolated_readonly(&path, Duration::from_secs(2), || {
+        let file_before = fs::symlink_metadata(&path).unwrap();
+        let dir_before = fs::symlink_metadata(temp.path()).unwrap();
+        let mut flipped = before.clone();
+        flipped[100] ^= 0xff;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&flipped).unwrap();
+        file.sync_all().unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&before).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        restore_mtime(&path, file_before.mtime(), file_before.mtime_nsec());
+        let file_after = fs::symlink_metadata(&path).unwrap();
+        let dir_after = fs::symlink_metadata(temp.path()).unwrap();
+        assert_eq!(file_after.ino(), file_before.ino());
+        assert_eq!(file_after.len(), file_before.len());
+        assert_eq!(file_after.nlink(), file_before.nlink());
+        assert_eq!(file_after.mtime(), file_before.mtime());
+        assert_eq!(file_after.mtime_nsec(), file_before.mtime_nsec());
+        assert_eq!(dir_after.dev(), dir_before.dev());
+        assert_eq!(dir_after.ino(), dir_before.ino());
+        assert_eq!(dir_after.len(), dir_before.len());
+        assert_eq!(dir_after.mtime(), dir_before.mtime());
+        assert_eq!(dir_after.mtime_nsec(), dir_before.mtime_nsec());
+        assert_eq!(dir_after.ctime(), dir_before.ctime());
+        assert_eq!(dir_after.ctime_nsec(), dir_before.ctime_nsec());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        restored.set(true);
+    })
+    .unwrap_err();
+    assert!(
+        restored.get(),
+        "gate failed before the restored rewrite: {error}"
+    );
+    assert!(error.contains("无法只读隔离"), "{error}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+}
+
+#[cfg(target_os = "linux")]
+fn restore_mtime(path: &Path, sec: i64, nsec: i64) {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let mut raw = Vec::with_capacity(bytes.len() + 1);
+    raw.extend_from_slice(bytes);
+    raw.push(0);
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        },
+    ];
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            raw.as_ptr().cast::<libc::c_char>(),
+            times.as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+}
+
+/// Directory creation and last-write times are put back after `-wal` / `-shm` /
+/// `-journal` appear and disappear. Windows stamps would match; the watch must
+/// still fail closed. Not compiled on Linux.
+#[cfg(windows)]
+#[test]
+fn windows_directory_watch_rejects_sidecar_churn_when_directory_times_are_restored() {
+    use std::cell::Cell;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Storage::FileSystem::{
+        SetFileTime, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_fixture(temp.path(), "synthetic.sqlite");
+    let before = fs::read(&path).unwrap();
+    let [wal, shm, journal] = sidecars(&path);
+    let restored = Cell::new(false);
+    let error = open_isolated_readonly(&path, Duration::from_secs(2), || {
+        let dir_before = fs::symlink_metadata(temp.path()).unwrap();
+        let created = dir_before.creation_time();
+        let written = dir_before.last_write_time();
+        fs::write(&wal, b"transient-wal").unwrap();
+        fs::write(&shm, vec![7u8; 32]).unwrap();
+        fs::write(&journal, b"transient-journal").unwrap();
+        fs::remove_file(&wal).unwrap();
+        fs::remove_file(&shm).unwrap();
+        fs::remove_file(&journal).unwrap();
+        let filetime = |value: u64| FILETIME {
+            dwLowDateTime: value as u32,
+            dwHighDateTime: (value >> 32) as u32,
+        };
+        let created_time = filetime(created);
+        let written_time = filetime(written);
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        let directory = options.open(temp.path()).unwrap();
+        let set = unsafe {
+            SetFileTime(
+                directory.as_raw_handle(),
+                &created_time,
+                std::ptr::null(),
+                &written_time,
+            )
+        };
+        assert_ne!(set, 0, "{}", std::io::Error::last_os_error());
+        drop(directory);
+        let dir_after = fs::symlink_metadata(temp.path()).unwrap();
+        assert_eq!(dir_after.creation_time(), created);
+        assert_eq!(dir_after.last_write_time(), written);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        restored.set(true);
+    })
+    .unwrap_err();
+    assert!(
+        restored.get(),
+        "gate failed before the restored sidecar churn: {error}"
+    );
+    assert!(error.contains("无法只读隔离"), "{error}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_no_sidecars(&path);
+}
+
 #[test]
 fn synthetic_course_preview_reads_uncheckpointed_wal_and_keeps_source_bytes() {
     let temp = tempfile::tempdir().unwrap();
