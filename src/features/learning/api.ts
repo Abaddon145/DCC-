@@ -102,6 +102,7 @@ export const learningApi={
   loadSubtitle:(expectedLibraryId:string,sessionId:string,subtitleId:string)=>invoke<void>("load_learning_subtitle",{expectedLibraryId,sessionId,subtitleId}),
   bindImportSource:(expectedLibraryId:string,vault:string)=>invoke<ImportSourceBinding|null>("bind_learning_import_source",{expectedLibraryId,vault}),
   selectCourseSource:(expectedLibraryId:string)=>invoke<CourseSourceBinding|null>("select_learning_course_source",{expectedLibraryId}),
+  selectOfflineCourseSource:(expectedLibraryId:string)=>invoke<CourseSourceBinding|null>("select_learning_offline_course_source",{expectedLibraryId}),
   currentCourseSource:(expectedLibraryId:string)=>invoke<CourseSourceBinding|null>("current_learning_course_source",{expectedLibraryId}),
   releaseCourseSource:(expectedLibraryId:string,selectionId:string)=>invoke<boolean>("release_learning_course_source",{expectedLibraryId,selectionId}),
   listCourseSourceSeries:(expectedLibraryId:string,selectionId:string)=>invoke<CourseSourceSeries[]>("list_learning_course_source_series",{expectedLibraryId,selectionId}),

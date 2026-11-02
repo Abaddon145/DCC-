@@ -1,10 +1,6 @@
-//! Authorized synthetic course-source reads and one-shot commit approval.
-//!
-//! Selection, isolated copy, preflight, and commit run only when the sibling marker
-//! `dcc-synthetic-course-source.ok` is present. An unmarked file, including a real
-//! Yingliu Vault database, is refused before SQLite is opened. Product commands on
-//! Windows and non-Windows call this module after a native file dialog. Those
-//! commands do not take a path from the frontend.
+//! Authorized course-source reads and one-shot commit approval.
+//! Synthetic sources require a sibling marker. Windows also offers an explicit
+//! offline-copy picker. Neither command accepts a frontend-supplied path.
 //!
 //! `preview_synthetic_course_source` is a read and is not a commit grant. Only
 //! `approve_marked_course_preflight` stores the process-local approval that
@@ -39,6 +35,9 @@ struct SelectedSynthetic {
     selection_id: String,
     path: PathBuf,
     digest: [u8; 32],
+    offline: bool,
+    #[cfg(windows)]
+    identity: Option<std::sync::Arc<super::source_sqlite::SqliteSelection>>,
 }
 
 struct ApprovedSynthetic {
@@ -49,13 +48,16 @@ struct ApprovedSynthetic {
     epoch: String,
     path: PathBuf,
     digest: [u8; 32],
+    offline: bool,
+    #[cfg(windows)]
+    identity: Option<std::sync::Arc<super::source_sqlite::SqliteSelection>>,
     expires: i64,
     decision: super::course_apply::CourseStagePreview,
     bindings: Vec<CourseMediaBinding>,
     task_id: Option<String>,
 }
 
-/// In-memory selection and one-shot preflight for marked synthetic course databases.
+/// In-memory selection and one-shot preflight for explicitly selected course databases.
 /// The approval is process-local: it is not written to the library and does not survive restart.
 #[derive(Default)]
 pub(crate) struct SyntheticCourseSession {
@@ -104,6 +106,10 @@ fn matched<'a>(
 }
 
 fn confirm_epoch(state: &AppState, selected: &SelectedSynthetic) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(identity) = &selected.identity {
+        identity.check(state)?;
+    }
     let profile = source_profiles::get(state, &selected.scope, &selected.profile_id)?;
     if profile.access_epoch != selected.epoch {
         return Err("来源状态已变化，请重新选择".into());
@@ -119,6 +125,52 @@ fn selected_from_approval(approved: &ApprovedSynthetic) -> SelectedSynthetic {
         selection_id: approved.selection_id.clone(),
         path: approved.path.clone(),
         digest: approved.digest,
+        offline: approved.offline,
+        #[cfg(windows)]
+        identity: approved.identity.clone(),
+    }
+}
+
+fn source_digest(path: &Path, offline: bool) -> Result<[u8; 32], String> {
+    if !offline {
+        return super::course_snapshot::fingerprint_synthetic(path);
+    }
+    #[cfg(windows)]
+    {
+        super::course_snapshot::fingerprint_explicit_offline(path)
+            .map_err(|_| "无法安全读取离线课程副本，请关闭映流并检查副本文件".into())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("离线课程副本入口仅支持 Windows".into())
+    }
+}
+
+fn source_snapshot(
+    path: &Path,
+    offline: bool,
+    interfere: impl FnOnce(),
+) -> Result<rusqlite::Connection, String> {
+    if !offline {
+        return super::course_snapshot::open_isolated_readonly(
+            path,
+            Duration::from_secs(15),
+            interfere,
+        );
+    }
+    #[cfg(windows)]
+    {
+        super::course_snapshot::open_explicit_offline_readonly(
+            path,
+            Duration::from_secs(15),
+            interfere,
+        )
+        .map_err(|_| "离线课程副本无法安全读取或不符合 schema 8，请检查副本".into())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = interfere;
+        Err("离线课程副本入口仅支持 Windows".into())
     }
 }
 
@@ -293,6 +345,9 @@ pub(super) fn select_synthetic_course_source(
         selection_id: ticket.clone(),
         path: path.to_path_buf(),
         digest,
+        offline: false,
+        #[cfg(windows)]
+        identity: None,
     });
     Ok(SyntheticCourseTicket {
         selection_id: ticket,
@@ -365,6 +420,24 @@ pub(super) fn select_marked_course_with_picker(
     library: &str,
     picker: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<Option<MarkedCourseBinding>, String> {
+    select_course_with_picker(state, library, picker, false)
+}
+
+#[cfg(windows)]
+pub(super) fn select_offline_course_with_picker(
+    state: &AppState,
+    library: &str,
+    picker: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<MarkedCourseBinding>, String> {
+    select_course_with_picker(state, library, picker, true)
+}
+
+fn select_course_with_picker(
+    state: &AppState,
+    library: &str,
+    picker: impl FnOnce() -> Option<PathBuf>,
+    offline: bool,
+) -> Result<Option<MarkedCourseBinding>, String> {
     let scope = source_profiles::scope(state, library)?;
     let ticket = uuid::Uuid::new_v4().to_string();
     {
@@ -383,13 +456,33 @@ pub(super) fn select_marked_course_with_picker(
     let Some(path) = picked else {
         return Ok(None);
     };
-    let digest = super::course_snapshot::fingerprint_synthetic(&path)?;
+    let digest = source_digest(&path, offline)?;
     let file_name = marked_file_name(&path)?;
     let mut current = session(state)?;
     if current.generation != ticket {
         return Err(STALE_SELECTION.into());
     }
+    #[cfg(windows)]
+    let identity = if offline {
+        Some(std::sync::Arc::new(super::source_sqlite::bind_selected(
+            state, &scope, &path,
+        )?))
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let profile = match &identity {
+        Some(identity) => {
+            identity.check(state)?;
+            source_profiles::get(state, &scope, identity.profile_id())?
+        }
+        None => source_profiles::create(state, &scope)?,
+    };
+    #[cfg(not(windows))]
     let profile = source_profiles::create(state, &scope)?;
+    if source_digest(&path, offline)? != digest {
+        return Err(SOURCE_CHANGED.into());
+    }
     current.selected = Some(SelectedSynthetic {
         scope: scope.clone(),
         profile_id: profile.id.clone(),
@@ -397,6 +490,9 @@ pub(super) fn select_marked_course_with_picker(
         selection_id: ticket.clone(),
         path,
         digest,
+        offline,
+        #[cfg(windows)]
+        identity,
     });
     Ok(Some(MarkedCourseBinding {
         selection_id: ticket,
@@ -427,7 +523,7 @@ pub(super) fn current_marked_course_source(
         clear_matching_selection(state, &selected.selection_id)?;
         return Err(error);
     }
-    match super::course_snapshot::fingerprint_synthetic(&selected.path) {
+    match source_digest(&selected.path, selected.offline) {
         Ok(digest) if digest == selected.digest => {}
         Ok(_) => {
             clear_matching_selection(state, &selected.selection_id)?;
@@ -463,14 +559,15 @@ pub(super) fn list_marked_course_series(
         matched(&current, &scope, ticket)?.clone()
     };
     confirm_epoch(state, &selected)?;
-    let snapshot = super::course_snapshot::open_isolated_readonly(
-        &selected.path,
-        Duration::from_secs(15),
-        || {},
-    )?;
-    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    let snapshot = source_snapshot(&selected.path, selected.offline, || {})?;
+    let digest = source_digest(&selected.path, selected.offline)?;
     if digest != selected.digest {
-        return Err("合成课程来源无法只读隔离，请重试".into());
+        return Err(if selected.offline {
+            SOURCE_CHANGED
+        } else {
+            "合成课程来源无法只读隔离，请重试"
+        }
+        .into());
     }
     {
         let current = session(state)?;
@@ -508,7 +605,7 @@ pub(super) fn list_marked_course_series(
         series.push(json!({"id":id,"title":title,"courseCount":count}));
     }
     drop(stmt);
-    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    let digest = source_digest(&selected.path, selected.offline)?;
     if digest != selected.digest {
         return Err(SOURCE_CHANGED.into());
     }
@@ -529,14 +626,15 @@ pub(super) fn preview_synthetic_course_source(
     let current = session(state)?;
     let selected = matched(&current, &scope, ticket)?.clone();
     confirm_epoch(state, &selected)?;
-    let snapshot = super::course_snapshot::open_isolated_readonly(
-        &selected.path,
-        Duration::from_secs(15),
-        || {},
-    )?;
-    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    let snapshot = source_snapshot(&selected.path, selected.offline, || {})?;
+    let digest = source_digest(&selected.path, selected.offline)?;
     if digest != selected.digest {
-        return Err("合成课程来源无法只读隔离，请重试".into());
+        return Err(if selected.offline {
+            SOURCE_CHANGED
+        } else {
+            "合成课程来源无法只读隔离，请重试"
+        }
+        .into());
     }
     if matched(&current, &scope, ticket).is_err() {
         return Err(STALE_SELECTION.into());
@@ -577,14 +675,15 @@ pub(super) fn approve_marked_course_preflight(
     let selected = matched(&current, &scope, selection_id)?.clone();
     confirm_epoch(state, &selected)?;
     current.approved = None;
-    let snapshot = super::course_snapshot::open_isolated_readonly(
-        &selected.path,
-        Duration::from_secs(15),
-        || {},
-    )?;
-    let digest = super::course_snapshot::fingerprint_synthetic(&selected.path)?;
+    let snapshot = source_snapshot(&selected.path, selected.offline, || {})?;
+    let digest = source_digest(&selected.path, selected.offline)?;
     if digest != selected.digest {
-        return Err("合成课程来源无法只读隔离，请重试".into());
+        return Err(if selected.offline {
+            SOURCE_CHANGED
+        } else {
+            "合成课程来源无法只读隔离，请重试"
+        }
+        .into());
     }
     if matched(&current, &scope, selection_id).is_err() {
         return Err(STALE_SELECTION.into());
@@ -611,6 +710,9 @@ pub(super) fn approve_marked_course_preflight(
         epoch: selected.epoch,
         path: selected.path,
         digest,
+        offline: selected.offline,
+        #[cfg(windows)]
+        identity: selected.identity,
         expires,
         decision,
         bindings,
@@ -654,6 +756,7 @@ pub(super) fn queue_synthetic_course_commit(
     if selected.profile_id != current.approved.as_ref().unwrap().profile_id
         || selected.epoch != current.approved.as_ref().unwrap().epoch
         || selected.digest != current.approved.as_ref().unwrap().digest
+        || selected.offline != current.approved.as_ref().unwrap().offline
     {
         current.approved = None;
         return Err(STALE_SELECTION.into());
@@ -774,12 +877,8 @@ fn commit_synthetic_course_with(
     }
     let selected = selected_from_approval(&approved);
     confirm_epoch(state, &selected)?;
-    let snapshot = super::course_snapshot::open_isolated_readonly(
-        &approved.path,
-        Duration::from_secs(15),
-        interfere,
-    )?;
-    let digest = super::course_snapshot::fingerprint_synthetic(&approved.path)?;
+    let snapshot = source_snapshot(&approved.path, approved.offline, interfere)?;
+    let digest = source_digest(&approved.path, approved.offline)?;
     if digest != approved.digest {
         return Err(SOURCE_CHANGED.into());
     }
@@ -812,7 +911,11 @@ fn commit_synthetic_course_with(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&json!([
-                "yingliu.synthetic-course-import.v1",
+                if approved.offline {
+                    "yingliu.offline-course-import.v1"
+                } else {
+                    "yingliu.synthetic-course-import.v1"
+                },
                 approved.profile_id,
                 approved.epoch,
                 fresh.preview().source_fingerprint,

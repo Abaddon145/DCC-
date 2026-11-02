@@ -136,6 +136,15 @@ it("shows source changes for both series and courses",async()=>{
   expect(screen.getByText(/冲突：目标已改/)).toBeInTheDocument();
 });
 
+it("explains that missing progress prevents creating a new course",async()=>{
+  const value=preview();
+  value.series[0].items[0].conflictCodes=["progress_absent"];
+  vi.mocked(invoke).mockResolvedValue(value);
+  render(<CourseSqliteImport libraryId="lib" source={source}/>);
+  fireEvent.click(screen.getByRole("button",{name:"预检课程数据库"}));
+  expect(await screen.findByText(/来源未记录进度；若目标没有课程，将保留冲突/)).toBeInTheDocument();
+});
+
 it("paginates course rows at 100 and refuses an expired preview",async()=>{
   const many=preview();many.expiresAt=Math.floor(Date.now()/1000)+1;many.series[0].items=Array.from({length:101},(_,index)=>({...many.series[0].items[0],id:`course-${index}`,title:`课程 ${index}`}));
   vi.mocked(invoke).mockResolvedValue(many);

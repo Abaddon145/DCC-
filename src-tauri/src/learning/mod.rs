@@ -258,7 +258,7 @@ mod source_markdown_tests;
 pub mod source_profiles;
 #[cfg(test)]
 mod source_profiles_tests;
-#[cfg(all(test, windows))]
+#[cfg(windows)]
 #[allow(dead_code)]
 mod source_sqlite;
 pub mod store;

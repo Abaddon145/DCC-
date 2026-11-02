@@ -459,8 +459,15 @@ fn optional_regular(path: &Path) -> Result<bool, String> {
     }
 }
 
-fn read_bundle(path: &Path, started: Instant, timeout: Duration) -> Result<IsolatedBundle, String> {
-    require_synthetic_marker(path)?;
+fn read_bundle(
+    path: &Path,
+    started: Instant,
+    timeout: Duration,
+    marked: bool,
+) -> Result<IsolatedBundle, String> {
+    if marked {
+        require_synthetic_marker(path)?;
+    }
     let journal = sidecar_name(path, "-journal");
     if fs::symlink_metadata(&journal).is_ok() {
         return Err(isolate_failed());
@@ -490,7 +497,11 @@ fn read_bundle(path: &Path, started: Instant, timeout: Duration) -> Result<Isola
         None
     };
     let mut hasher = Sha256::new();
-    hasher.update(SYNTHETIC_COURSE_MARKER_BODY);
+    hasher.update(if marked {
+        SYNTHETIC_COURSE_MARKER_BODY
+    } else {
+        b"dcc-explicit-offline-v1\n"
+    });
     hasher.update([u8::from(wal.is_some()), u8::from(shm.is_some())]);
     hasher.update((database.len() as u64).to_le_bytes());
     hasher.update(&database);
@@ -516,7 +527,35 @@ fn read_bundle(path: &Path, started: Instant, timeout: Duration) -> Result<Isola
 /// Hash a marked synthetic source without opening SQLite.
 pub(super) fn fingerprint_synthetic(path: &Path) -> Result<[u8; 32], String> {
     let started = Instant::now();
-    Ok(read_bundle(path, started, Duration::from_secs(15))?.digest)
+    Ok(read_bundle(path, started, Duration::from_secs(15), true)?.digest)
+}
+
+#[cfg(windows)]
+pub(super) fn fingerprint_explicit_offline(path: &Path) -> Result<[u8; 32], String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(isolate_failed());
+    }
+    let _lease = acquire_product_deny_write_lease(path)?;
+    let mut watch =
+        super::course_directory_watch::DirectoryWatch::arm(path, SYNTHETIC_COURSE_MARKER)
+            .map_err(|_| isolate_failed())?;
+    let started = Instant::now();
+    let timeout = Duration::from_secs(15);
+    let anchor = source_window(path, false)?;
+    let first = read_bundle(path, started, timeout, false)?;
+    require_same_window(path, &anchor, false)?;
+    watch.check_quiet().map_err(|_| isolate_failed())?;
+    let second = read_bundle(path, started, timeout, false)?;
+    if first.digest != second.digest {
+        return Err(isolate_failed());
+    }
+    require_same_window(path, &anchor, false)?;
+    watch.check_quiet().map_err(|_| isolate_failed())?;
+    Ok(first.digest)
 }
 
 fn write_copy(
@@ -701,7 +740,7 @@ struct DirStamp {
 #[derive(Clone, PartialEq, Eq)]
 struct SourceWindow {
     directory: DirStamp,
-    marker: FileStamp,
+    marker: Option<FileStamp>,
     database: FileStamp,
     wal: Option<FileStamp>,
     shm: Option<FileStamp>,
@@ -767,18 +806,25 @@ fn optional_file_stamp(path: &Path) -> Result<Option<FileStamp>, String> {
 }
 
 /// Presence and identity of the marker and sidecars. Does not read database bytes.
-fn source_window(path: &Path) -> Result<SourceWindow, String> {
-    require_synthetic_marker(path)?;
+fn source_window(path: &Path, marked: bool) -> Result<SourceWindow, String> {
+    if marked {
+        require_synthetic_marker(path)?;
+    }
     let parent = path.parent().ok_or_else(isolate_failed)?;
     let parent_meta = fs::symlink_metadata(parent).map_err(|_| isolate_failed())?;
     if !parent_meta.file_type().is_dir() {
         return Err(isolate_failed());
     }
     let marker = parent.join(SYNTHETIC_COURSE_MARKER);
-    let marker_meta = fs::symlink_metadata(&marker).map_err(|_| isolate_failed())?;
-    if !marker_meta.file_type().is_file() || !single_link(&marker, &marker_meta) {
-        return Err(isolate_failed());
-    }
+    let marker_stamp = if marked {
+        let meta = fs::symlink_metadata(&marker).map_err(|_| isolate_failed())?;
+        if !meta.file_type().is_file() || !single_link(&marker, &meta) {
+            return Err(isolate_failed());
+        }
+        Some(stamp_file(&meta))
+    } else {
+        None
+    };
     let journal = sidecar_name(path, "-journal");
     match fs::symlink_metadata(&journal) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -795,15 +841,15 @@ fn source_window(path: &Path) -> Result<SourceWindow, String> {
     }
     Ok(SourceWindow {
         directory: stamp_dir(&parent_meta),
-        marker: stamp_file(&marker_meta),
+        marker: marker_stamp,
         database: stamp_file(&database_meta),
         wal,
         shm,
     })
 }
 
-fn require_same_window(path: &Path, anchor: &SourceWindow) -> Result<(), String> {
-    if source_window(path)? != *anchor {
+fn require_same_window(path: &Path, anchor: &SourceWindow, marked: bool) -> Result<(), String> {
+    if source_window(path, marked)? != *anchor {
         return Err(isolate_failed());
     }
     Ok(())
@@ -829,25 +875,59 @@ fn open_isolated_readonly_leased(
     interfere: impl FnOnce(),
     lease: impl FnOnce(&Path) -> Result<SyntheticDenyWriteLease, String>,
 ) -> Result<Connection, String> {
+    open_with_lease(path, timeout, interfere, lease, true)
+}
+
+#[cfg(windows)]
+pub(super) fn open_explicit_offline_readonly(
+    path: &Path,
+    timeout: Duration,
+    interfere: impl FnOnce(),
+) -> Result<Connection, String> {
+    open_with_lease(
+        path,
+        timeout,
+        interfere,
+        acquire_product_deny_write_lease,
+        false,
+    )
+}
+
+fn open_with_lease(
+    path: &Path,
+    timeout: Duration,
+    interfere: impl FnOnce(),
+    lease: impl FnOnce(&Path) -> Result<SyntheticDenyWriteLease, String>,
+    marked: bool,
+) -> Result<Connection, String> {
     if timeout.is_zero() {
         return Err(isolate_failed());
     }
-    require_synthetic_marker(path)?;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(isolate_failed());
+    }
+    if marked {
+        require_synthetic_marker(path)?;
+    }
     let held = lease(path)?;
     let mut activity =
         super::course_directory_watch::DirectoryWatch::arm(path, SYNTHETIC_COURSE_MARKER)
             .map_err(|_| isolate_failed())?;
     let started = Instant::now();
-    let anchor = source_window(path)?;
-    let first = read_bundle(path, started, timeout)?;
-    require_same_window(path, &anchor)?;
+    let anchor = source_window(path, marked)?;
+    let first = read_bundle(path, started, timeout, marked)?;
+    require_same_window(path, &anchor, marked)?;
     activity.check_quiet().map_err(|_| isolate_failed())?;
     interfere();
-    let second = read_bundle(path, started, timeout)?;
+    let second = read_bundle(path, started, timeout, marked)?;
     if second.digest != first.digest {
         return Err(isolate_failed());
     }
-    require_same_window(path, &anchor)?;
+    require_same_window(path, &anchor, marked)?;
     activity.check_quiet().map_err(|_| isolate_failed())?;
     let temp = tempfile::tempdir().map_err(|_| isolate_failed())?;
     let copied = temp.path().join("snapshot.db");
@@ -868,11 +948,11 @@ fn open_isolated_readonly_leased(
     )?;
     drop(local);
     drop(temp);
-    let after = read_bundle(path, started, timeout)?;
+    let after = read_bundle(path, started, timeout, marked)?;
     if after.digest != first.digest {
         return Err(isolate_failed());
     }
-    require_same_window(path, &anchor)?;
+    require_same_window(path, &anchor, marked)?;
     activity.check_quiet().map_err(|_| isolate_failed())?;
     drop(activity);
     drop(held);
@@ -885,6 +965,140 @@ mod lease_gate_tests {
     use std::cell::Cell;
 
     const FIXTURE: &[u8] = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_offline_snapshot_accepts_unmarked_copy_without_weakening_synthetic_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("course.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        assert!(open_isolated_readonly(&path, Duration::from_secs(15), || {}).is_err());
+        let first = fingerprint_explicit_offline(&path).unwrap();
+        assert_eq!(first, fingerprint_explicit_offline(&path).unwrap());
+        let snapshot =
+            open_explicit_offline_readonly(&path, Duration::from_secs(15), || {}).unwrap();
+        assert_eq!(
+            snapshot
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+        assert!(!sidecar_name(&path, "-wal").exists());
+        assert!(!sidecar_name(&path, "-shm").exists());
+        let journal = sidecar_name(&path, "-journal");
+        assert!(
+            open_explicit_offline_readonly(&path, Duration::from_secs(15), || fs::write(
+                &journal, b"journal"
+            )
+            .unwrap())
+            .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_offline_snapshot_rejects_active_sqlite_writer_and_wrong_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("course.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
+            .unwrap();
+        assert!(sidecar_name(&path, "-shm").exists());
+        assert!(open_explicit_offline_readonly(&path, Duration::from_secs(15), || {}).is_err());
+        writer
+            .execute_batch("ROLLBACK; PRAGMA user_version=7;")
+            .unwrap();
+        drop(writer);
+        assert!(open_explicit_offline_readonly(&path, Duration::from_secs(15), || {}).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_offline_snapshot_rejects_hardlinks_and_directory_junctions() {
+        use std::os::windows::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("course.sqlite");
+        fs::write(&path, FIXTURE).unwrap();
+        let alias = root.join("alias.sqlite");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(fingerprint_explicit_offline(&path).is_err());
+        fs::remove_file(&alias).unwrap();
+        assert!(open_explicit_offline_readonly(&path, Duration::from_secs(15), || {}).is_ok());
+        let junction = temp.path().join("junction");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&root)
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "junction creation failed");
+        assert!(fingerprint_explicit_offline(&junction.join("course.sqlite")).is_err());
+        assert!(open_explicit_offline_readonly(
+            &junction.join("course.sqlite"),
+            Duration::from_secs(15),
+            || {}
+        )
+        .is_err());
+        fs::remove_dir(&junction).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an explicitly provided offline database copy"]
+    fn offline_copy_schema8_remains_unchanged() {
+        let path =
+            PathBuf::from(std::env::var_os("DCC_OFFLINE_COURSE_COPY").expect("offline copy path"));
+        let paths = [
+            path.clone(),
+            sidecar_name(&path, "-wal"),
+            sidecar_name(&path, "-shm"),
+        ];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                if p.exists() {
+                    Some(Sha256::digest(fs::read(p).unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(before[0].is_some());
+        assert_eq!(before[1].is_some(), before[2].is_some());
+        let snapshot = open_explicit_offline_readonly(&path, Duration::from_secs(15), || {})
+            .expect("offline snapshot");
+        let version: i64 = snapshot
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let versions: Vec<i64> = snapshot
+            .prepare("SELECT version FROM schema_version")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(version, 8);
+        assert_eq!(versions, vec![8]);
+        drop(snapshot);
+        let after: Vec<_> = paths
+            .iter()
+            .map(|p| {
+                if p.exists() {
+                    Some(Sha256::digest(fs::read(p).unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(before, after);
+    }
 
     #[test]
     fn unmarked_database_is_refused_before_shm_lease_or_sqlite() {

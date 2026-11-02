@@ -17,6 +17,7 @@ vi.mock("./api",()=>({learningApi:{
   listCourseImportBatches:vi.fn(),
   listCourseBatchEntries:vi.fn(),
   selectCourseSource:vi.fn(),
+  selectOfflineCourseSource:vi.fn(),
   currentCourseSource:vi.fn(),
   releaseCourseSource:vi.fn(),
   previewCourseImport:vi.fn(),
@@ -83,6 +84,7 @@ beforeEach(()=>{
   vi.mocked(learningApi.listCourseBatchEntries).mockReset().mockResolvedValue({items:[],hasMore:false,revertReport:null,revertDamaged:false});
   vi.mocked(learningApi.currentCourseSource).mockResolvedValue(null);
   vi.mocked(learningApi.selectCourseSource).mockResolvedValue(null);
+  vi.mocked(learningApi.selectOfflineCourseSource).mockResolvedValue(null);
   vi.mocked(learningApi.releaseCourseSource).mockResolvedValue(true);
   vi.mocked(learningApi.bindImportSource).mockResolvedValue(structuredClone(binding));
   vi.mocked(learningApi.pickImportNote).mockResolvedValue(null);
@@ -104,8 +106,7 @@ afterEach(()=>vi.restoreAllMocks());
 it("selects and releases a course database without automatically reading it",async()=>{
   vi.mocked(learningApi.selectCourseSource).mockResolvedValue({selectionId:"token",libraryId:"lib",profileId:"profile",epoch:"epoch",fileName:"synthetic.sqlite"});
   render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
-  expect(screen.getByRole("region",{name:"课程来源数据库"})).toHaveTextContent("Windows 与非 Windows 都只接受带合成标记的只读样本");
-  expect(screen.getByRole("region",{name:"课程来源数据库"})).toHaveTextContent("未标记数据库会在打开 SQLite 之前被拒绝");
+  expect(screen.getByRole("region",{name:"课程来源数据库"})).toHaveTextContent("合成样本入口只接受带合成标记的数据库");
   fireEvent.click(await screen.findByRole("button",{name:"选择课程数据库…"}));
   expect(await screen.findByText(/synthetic.sqlite/)).toBeInTheDocument();
   expect(screen.getByRole("button",{name:"预检课程数据库"})).toBeEnabled();
@@ -113,6 +114,18 @@ it("selects and releases a course database without automatically reading it",asy
   fireEvent.click(screen.getByRole("button",{name:"撤销课程来源选择"}));
   await waitFor(()=>expect(learningApi.releaseCourseSource).toHaveBeenCalledWith("lib","token"));
   expect(screen.queryByText(/synthetic.sqlite/)).not.toBeInTheDocument();
+});
+
+it("requires an explicit offline copy confirmation before opening its picker",async()=>{
+  const confirm=vi.spyOn(window,"confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  vi.mocked(learningApi.selectOfflineCourseSource).mockResolvedValue({selectionId:"offline",libraryId:"lib",profileId:"p",epoch:"e",fileName:"copy.db"});
+  render(<LearningImportPanel libraryId="lib" onClose={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择离线课程副本…"}));
+  expect(learningApi.selectOfflineCourseSource).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button",{name:"选择离线课程副本…"}));
+  expect(await screen.findByText(/copy.db/)).toBeInTheDocument();
+  expect(confirm).toHaveBeenCalledTimes(2);
+  expect(learningApi.previewCourseImport).not.toHaveBeenCalled();
 });
 
 it("restores the current course selection and clears it when choosing is cancelled",async()=>{

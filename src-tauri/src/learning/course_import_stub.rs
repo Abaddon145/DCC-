@@ -1,8 +1,8 @@
 //! Course selection, preflight, and commit commands.
 //!
 //! Arguments are library, selection, explicit media UUIDs, and preview ids.
-//! There is no path parameter. The marked synthetic session refuses an unmarked
-//! database before SQLite is opened. Windows and non-Windows use this module.
+//! There is no path parameter. Synthetic selection requires a marker; Windows
+//! has a separate picker for explicitly selected offline copies.
 use super::import_access::SqliteSourceBinding;
 use super::import_course_preview::CourseMediaBinding;
 use crate::state::AppState;
@@ -58,6 +58,39 @@ pub async fn select_learning_course_source(
         .map(|picked| picked.map(course_binding))
     })
     .await
+}
+
+#[tauri::command]
+pub async fn select_learning_offline_course_source(
+    app: AppHandle,
+    expected_library_id: String,
+) -> Result<Option<SqliteSourceBinding>, String> {
+    #[cfg(windows)]
+    {
+        let picker_app = app.clone();
+        job(app, move |state| {
+            super::course_source_readonly::select_offline_course_with_picker(
+                state,
+                &expected_library_id,
+                || {
+                    picker_app
+                        .dialog()
+                        .file()
+                        .set_title("选择已关闭映流后复制的离线数据库副本")
+                        .add_filter("SQLite 数据库", &["sqlite", "sqlite3", "db"])
+                        .blocking_pick_file()
+                        .and_then(|path| path.into_path().ok())
+                },
+            )
+            .map(|picked| picked.map(course_binding))
+        })
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, expected_library_id);
+        Err("离线课程副本入口仅支持 Windows".into())
+    }
 }
 
 #[tauri::command]

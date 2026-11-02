@@ -22,6 +22,343 @@ use std::{
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/yingliu-migration-sample.sqlite");
 
+#[cfg(windows)]
+#[test]
+fn explicit_offline_source_preflight_commit_and_revert_without_synthetic_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("offline.sqlite");
+    fs::write(&path, FIXTURE).unwrap();
+    let binding =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let media = insert_video(&state);
+    let preview = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        vec![bind("course-1", &media)],
+        None,
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["receipt"]["coursesCommitted"], 1);
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let report = super::course_apply::revert_course_batch(
+        &state,
+        &scope,
+        &binding.epoch,
+        result["batchId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!report["reverted"].as_array().unwrap().is_empty());
+    assert_eq!(courses(&state), 0);
+    assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+    assert_no_sidecars(&path);
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_offline_reselection_keeps_source_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("offline.sqlite");
+    fs::write(&path, FIXTURE).unwrap();
+    let first =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let second =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.profile_id, second.profile_id);
+    assert_eq!(first.epoch, second.epoch);
+    assert_ne!(first.selection_id, second.selection_id);
+    assert_eq!(fs::read(&path).unwrap(), FIXTURE);
+    assert!(fs::remove_file(&path).is_err());
+    let other = temp.path().join("other.sqlite");
+    fs::write(&other, FIXTURE).unwrap();
+    let third =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(other)
+        })
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.profile_id, third.profile_id);
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_offline_source_change_invalidates_approved_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let path = temp.path().join("offline.sqlite");
+    fs::write(&path, FIXTURE).unwrap();
+    let binding =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let media = insert_video(&state);
+    let preview = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        vec![bind("course-1", &media)],
+        None,
+    )
+    .unwrap();
+    let db = Connection::open(&path).unwrap();
+    db.execute("UPDATE series SET title='changed' WHERE id='series-1'", [])
+        .unwrap();
+    drop(db);
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(run_task(&state, &task).is_err());
+    assert_eq!(courses(&state), 0);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an explicitly provided offline database copy"]
+fn offline_copy_preflight_commit_and_revert_in_isolated_library() {
+    use sha2::{Digest, Sha256};
+    let path =
+        PathBuf::from(std::env::var_os("DCC_OFFLINE_COURSE_COPY").expect("offline copy path"));
+    let paths = [
+        path.clone(),
+        sidecars(&path)[0].clone(),
+        sidecars(&path)[1].clone(),
+    ];
+    let hashes = || {
+        paths
+            .iter()
+            .map(|p| {
+                if p.exists() {
+                    Some(Sha256::digest(fs::read(p).unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = hashes();
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let catalog = list_marked_course_series(&state, &library, &binding.selection_id).unwrap();
+    let mut choice = None;
+    for series in catalog.as_array().unwrap() {
+        let id = series["id"].as_str().unwrap();
+        let preview = approve_marked_course_preflight(
+            &state,
+            &library,
+            &binding.selection_id,
+            vec![],
+            Some(vec![id.into()]),
+        )
+        .unwrap();
+        if let Some(item) = preview["series"][0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| !item["sourceProgress"].is_null())
+        {
+            choice = Some((id.to_string(), item["id"].as_str().unwrap().to_string()));
+            break;
+        }
+    }
+    let (series_id, item_id) = choice.expect("offline copy has a course with progress");
+    let media = insert_video(&state);
+    let preview = approve_marked_course_preflight(
+        &state,
+        &library,
+        &binding.selection_id,
+        vec![bind(&item_id, &media)],
+        Some(vec![series_id]),
+    )
+    .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["receipt"]["coursesCommitted"], 1);
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let report = super::course_apply::revert_course_batch(
+        &state,
+        &scope,
+        &binding.epoch,
+        result["batchId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!report["reverted"].as_array().unwrap().is_empty());
+    assert_eq!(courses(&state), 0);
+    assert!(hashes() == before, "offline source files changed");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an explicitly provided offline database copy"]
+fn offline_copy_all_courses_accounted_for_and_reverted_in_isolated_library() {
+    use sha2::{Digest, Sha256};
+    let path =
+        PathBuf::from(std::env::var_os("DCC_OFFLINE_COURSE_COPY").expect("offline copy path"));
+    let [wal, shm, _] = sidecars(&path);
+    let paths = [path.clone(), wal, shm];
+    let hashes = || {
+        paths
+            .iter()
+            .map(|p| {
+                if p.exists() {
+                    Some(Sha256::digest(fs::read(p).unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = hashes();
+    assert!(before[0].is_some());
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let binding =
+        super::course_source_readonly::select_offline_course_with_picker(&state, &library, || {
+            Some(path.clone())
+        })
+        .unwrap()
+        .unwrap();
+    let unbound =
+        approve_marked_course_preflight(&state, &library, &binding.selection_id, vec![], None)
+            .unwrap();
+    let series = unbound["series"].as_array().unwrap();
+    assert!(!series.is_empty());
+    let ids: Vec<String> = series
+        .iter()
+        .flat_map(|s| s["items"].as_array().unwrap())
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!ids.is_empty());
+    let bindings = ids
+        .iter()
+        .map(|id| bind(id, &insert_video(&state)))
+        .collect();
+    let preview =
+        approve_marked_course_preflight(&state, &library, &binding.selection_id, bindings, None)
+            .unwrap();
+    let (task, _) = queue_synthetic_course_commit(
+        &state,
+        &library,
+        &binding.selection_id,
+        preview["previewId"].as_str().unwrap(),
+    )
+    .unwrap();
+    let result = run_task(&state, &task).unwrap();
+    assert_eq!(result["status"], "committed");
+    let receipt = &result["receipt"];
+    let committed = receipt["coursesCommitted"].as_u64().unwrap();
+    let conflicts = receipt["courseConflicts"].as_u64().unwrap();
+    assert!(committed > 0);
+    assert_eq!(committed + conflicts, ids.len() as u64);
+    assert_eq!(
+        receipt["seriesCommitted"].as_u64().unwrap() + receipt["seriesConflicts"].as_u64().unwrap(),
+        series.len() as u64
+    );
+    let scope = super::source_profiles::scope(&state, &library).unwrap();
+    let mut reasons = std::collections::BTreeMap::new();
+    let mut offset = 0;
+    loop {
+        let entries = super::course_batch::list_course_entries(
+            &state,
+            &library,
+            result["batchId"].as_str().unwrap(),
+            offset,
+        )
+        .unwrap();
+        for entry in entries
+            .items
+            .into_iter()
+            .filter(|entry| entry.status == "conflict" && entry.entry_kind == "course")
+        {
+            *reasons
+                .entry(entry.conflict_code.unwrap_or_else(|| "unknown".into()))
+                .or_insert(0usize) += 1;
+        }
+        if !entries.has_more {
+            break;
+        }
+        offset += 100;
+    }
+    assert_eq!(reasons.values().sum::<usize>(), conflicts as usize);
+    let report = super::course_apply::revert_course_batch(
+        &state,
+        &scope,
+        &binding.epoch,
+        result["batchId"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(!report["reverted"].as_array().unwrap().is_empty());
+    assert_eq!(courses(&state), 0);
+    state
+        .with_library(|db, _| {
+            let series_count: i64 = db
+                .query_row("SELECT count(*) FROM learning_series", [], |row| row.get(0))
+                .unwrap();
+            let media_count: i64 = db
+                .query_row("SELECT count(*) FROM media_entries", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(series_count, 0);
+            assert_eq!(media_count, ids.len() as i64);
+            Ok(())
+        })
+        .unwrap();
+    assert!(hashes() == before, "offline source files changed");
+    println!(
+        "verified series={}, courses={}, committed={}, conflicts={}, reasons={:?}",
+        series.len(),
+        ids.len(),
+        committed,
+        conflicts,
+        reasons
+    );
+}
+
 fn mark(dir: &Path) {
     fs::write(
         dir.join(SYNTHETIC_COURSE_MARKER),

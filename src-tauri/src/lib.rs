@@ -372,6 +372,7 @@ fn application_builder(
                     learning::excerpt_access::get_learning_excerpt_targets,
                     learning::import_access::bind_learning_import_source,
                     learning::course_import::select_learning_course_source,
+                    learning::course_import::select_learning_offline_course_source,
                     learning::course_import::current_learning_course_source,
                     learning::course_import::release_learning_course_source,
                     learning::course_import::preview_learning_course_import,

@@ -3,7 +3,7 @@ import {learningApi,type CourseImportProgress,type CourseSourceBinding,type Cour
 import {api} from "../../lib/api";
 import type {MediaEntry} from "../../types";
 
-const CONFLICT_LABEL:Record<string,string>={unresolved:"未绑定目标媒体",progress_absent:"来源进度缺失",divergent_progress:"来源和目标进度不一致",source_changed:"来源已变",target_changed:"目标已改",both_changed:"来源和目标均已变化",target_unavailable:"目标不可用",invalid_series:"系列标题或说明不符合要求",membership_may_be_withheld:"若课程未能完整建立或映射，系列将保留为冲突记录",shared_media:"多个来源课程共用同一媒体",repeated_membership:"系列成员重复",different_source_progress:"同一媒体的来源进度不一致",different_target_progress:"来源与目标进度存在差异"};
+const CONFLICT_LABEL:Record<string,string>={unresolved:"未绑定目标媒体",progress_absent:"来源未记录进度；若目标没有课程，将保留冲突",divergent_progress:"来源和目标进度不一致",source_changed:"来源已变",target_changed:"目标已改",both_changed:"来源和目标均已变化",target_unavailable:"目标不可用",invalid_series:"系列标题或说明不符合要求",membership_may_be_withheld:"若课程未能完整建立或映射，系列将保留为冲突记录",shared_media:"多个来源课程共用同一媒体",repeated_membership:"系列成员重复",different_source_progress:"同一媒体的来源进度不一致",different_target_progress:"来源与目标进度存在差异"};
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BATCH_ITEMS=10000;
 function progressText(value:CourseImportProgress|null){

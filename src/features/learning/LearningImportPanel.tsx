@@ -19,7 +19,7 @@ const CONFLICT_LABEL:Record<string,string>={
 const REVERT_LABEL:Record<string,string>={
   kept_modified:"已修改或被使用",kept_reused:"已被其他批次复用",kept_conflict:"存在冲突",kept_missing:"目标不可用",
 };
-const COURSE_CONFLICT_LABEL:Record<string,string>={unresolved:"未绑定目标媒体",progress_absent:"来源进度缺失",divergent_progress:"来源和目标进度不一致",source_changed:"来源已变",target_changed:"目标已改",both_changed:"来源和目标均已变化",target_unavailable:"目标不可用"};
+const COURSE_CONFLICT_LABEL:Record<string,string>={unresolved:"未绑定目标媒体",progress_absent:"来源未记录进度，目标课程未创建",divergent_progress:"来源和目标进度不一致",source_changed:"来源已变",target_changed:"目标已改",both_changed:"来源和目标均已变化",target_unavailable:"目标不可用"};
 type RevertReport={batchId:string;reverted:string[];kept:{itemId:string;outcome:string;noteId:string|null}[];archivesKept:true};
 function readRevertReport(value:unknown,batchId:string):RevertReport|null{
   if(!value||typeof value!=="object"||!("batchId" in value)||value.batchId!==batchId||!("reverted" in value)||!Array.isArray(value.reverted)||!value.reverted.every(v=>typeof v==="string")||!("kept" in value)||!Array.isArray(value.kept)||!("archivesKept" in value)||value.archivesKept!==true)return null;
@@ -284,10 +284,11 @@ function ImportPanel({libraryId,onClose}:Props){
     }catch(reason){setCourseError(String(reason));}finally{setBusy(false);}
   }
 
-  async function pickCourseSource(){
+  async function pickCourseSource(offline=false){
+    if(offline&&!window.confirm("请确认映流已退出，且你选择的是独立复制的数据库副本（含原有 WAL 和 SHM），不是映流正在使用的原库。继续选择副本？"))return;
     ++courseSourceRequest.current;setBusy(true);setCourseSource(null);setCourseSourceError("");setCourseSourceStatus("");
     try{
-      const selected=await learningApi.selectCourseSource(libraryId);
+      const selected=await (offline?learningApi.selectOfflineCourseSource(libraryId):learningApi.selectCourseSource(libraryId));
       setCourseSource(selected);
       if(!selected)setCourseSourceStatus("已取消课程数据库选择。");
     }catch(reason){setCourseSourceError(String(reason));}finally{setBusy(false);}
@@ -378,8 +379,9 @@ function ImportPanel({libraryId,onClose}:Props){
       {error&&<p className="learning-import-error" role="alert">{error}<button type="button" onClick={()=>{setError("");setStatus(s=>s+"（已清除错误，可重试）");}}>清除并重试</button></p>}
       <section aria-label="课程来源数据库">
         <h3>课程来源数据库</h3>
-        <p>通过系统文件对话框选择数据库副本，页面不能提交路径。Windows 与非 Windows 都只接受带合成标记的只读样本，未标记数据库会在打开 SQLite 之前被拒绝。只有点击课程预检才读取所选副本。</p>
+        <p>通过系统文件对话框选择数据库副本。合成样本入口只接受带合成标记的数据库；Windows 离线入口需要先退出映流并复制数据库及其 WAL、SHM。重新选择同一副本会保留来源身份，新复制的文件视为新来源。</p>
         <button type="button" disabled={busy} onClick={()=>void pickCourseSource()}>选择课程数据库…</button>
+        <button type="button" disabled={busy} onClick={()=>void pickCourseSource(true)}>选择离线课程副本…</button>
         {courseSource&&<><p>已选择：{courseSource.fileName}</p><button type="button" disabled={busy} onClick={()=>void releaseCourseSource()}>撤销课程来源选择</button></>}
         {courseSource&&<CourseSqliteImport key={courseSource.selectionId} libraryId={libraryId} source={courseSource}/>}
         {courseSourceStatus&&<p role="status">{courseSourceStatus}</p>}{courseSourceError&&<p role="alert">课程来源：{courseSourceError}</p>}
