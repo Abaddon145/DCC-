@@ -1,9 +1,13 @@
 //! Offline copy-only source access. SQLite never opens the source path.
+//!
+//! `open_isolated_readonly` is the portable synthetic gate: a sibling marker file is
+//! required, sidecars are fail-closed, and SQLite is opened only on a temporary copy.
 use rusqlite::{
     backup::{Backup, StepResult},
     config::DbConfig,
-    Connection,
+    Connection, OpenFlags,
 };
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -38,6 +42,7 @@ impl LockedSnapshot {
     }
 }
 
+#[cfg(windows)]
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -236,6 +241,326 @@ pub(super) fn snapshot_connection(
         .map_err(|_| failed())?;
     if started.elapsed() >= timeout {
         return Err(failed());
+    }
+    Ok(snapshot)
+}
+
+/// Sibling marker required before any synthetic course source is read.
+pub(super) const SYNTHETIC_COURSE_MARKER: &str = "dcc-synthetic-course-source.ok";
+pub(super) const SYNTHETIC_COURSE_MARKER_BODY: &[u8] = b"dcc-synthetic-course-source-v1\n";
+const ISOLATED_LIMIT: u64 = 256 * 1024 * 1024;
+
+fn unmarked() -> String {
+    "真实课程来源尚未授权，仅允许带合成标记的只读样本".into()
+}
+
+fn isolate_failed() -> String {
+    "合成课程来源无法只读隔离，请重试".into()
+}
+
+/// Checks only the SQLite database header, not its contents or integrity.
+pub(super) fn validate_database_header(database: &[u8]) -> Result<u32, String> {
+    let failed = || "来源数据库或 WAL 文件头无效".to_string();
+    if database.len() < 100
+        || &database[..16] != b"SQLite format 3\0"
+        || !matches!(database[18], 1 | 2)
+        || !matches!(database[19], 1 | 2)
+    {
+        return Err(failed());
+    }
+    let encoded = u16::from_be_bytes([database[16], database[17]]);
+    let page_size = if encoded == 1 {
+        65536
+    } else {
+        u32::from(encoded)
+    };
+    if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
+        return Err(failed());
+    }
+    Ok(page_size)
+}
+
+/// Reject invalid WAL header dimensions before passing a snapshot to SQLite.
+/// This structural check does not establish integrity or authorization.
+pub(super) fn validate_wal_headers(
+    database: &[u8],
+    wal: &[u8],
+    wal_len: u64,
+) -> Result<(), String> {
+    let failed = || "来源数据库或 WAL 文件头无效".to_string();
+    let page_size = validate_database_header(database)?;
+    if database[18] != 2 || database[19] != 2 {
+        return Err(failed());
+    }
+    if wal_len == 0 {
+        return Ok(());
+    }
+    if wal_len < 32 || wal.len() < 32 {
+        return Err(failed());
+    }
+    let value = |offset: usize| {
+        u32::from_be_bytes([
+            wal[offset],
+            wal[offset + 1],
+            wal[offset + 2],
+            wal[offset + 3],
+        ])
+    };
+    if !matches!(value(0), 0x377f0682 | 0x377f0683) || value(4) != 3007000 || value(8) != page_size
+    {
+        return Err(failed());
+    }
+    Ok(())
+}
+
+fn single_link(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::nlink(meta) == 1
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::number_of_links(meta) == 1
+    }
+}
+
+/// Refuse an unmarked path before opening or hashing the database file.
+pub(super) fn require_synthetic_marker(database: &Path) -> Result<(), String> {
+    if !database.is_absolute()
+        || database
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(unmarked());
+    }
+    let parent = database.parent().ok_or_else(unmarked)?;
+    let parent_meta = fs::symlink_metadata(parent).map_err(|_| unmarked())?;
+    if !parent_meta.file_type().is_dir() {
+        return Err(unmarked());
+    }
+    let marker = parent.join(SYNTHETIC_COURSE_MARKER);
+    let meta = fs::symlink_metadata(&marker).map_err(|_| unmarked())?;
+    if !meta.file_type().is_file()
+        || !single_link(&meta)
+        || meta.len() != SYNTHETIC_COURSE_MARKER_BODY.len() as u64
+    {
+        return Err(unmarked());
+    }
+    let mut file = fs::File::open(&marker).map_err(|_| unmarked())?;
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).map_err(|_| unmarked())?;
+    if body != SYNTHETIC_COURSE_MARKER_BODY {
+        return Err(unmarked());
+    }
+    Ok(())
+}
+
+struct IsolatedBundle {
+    database: Vec<u8>,
+    wal: Option<Vec<u8>>,
+    shm: Option<Vec<u8>>,
+    digest: [u8; 32],
+}
+
+fn sidecar_name(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn read_regular(
+    path: &Path,
+    budget: &mut u64,
+    started: Instant,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    if started.elapsed() >= timeout {
+        return Err(isolate_failed());
+    }
+    let meta = fs::symlink_metadata(path).map_err(|_| isolate_failed())?;
+    if !meta.file_type().is_file() || !single_link(&meta) {
+        return Err(isolate_failed());
+    }
+    let len = meta.len();
+    if len > *budget {
+        return Err("合成课程来源超过 256 MiB 上限".into());
+    }
+    *budget = budget.saturating_sub(len);
+    let mut file = fs::File::open(path).map_err(|_| isolate_failed())?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 65536];
+    let mut read = 0u64;
+    loop {
+        if started.elapsed() >= timeout {
+            return Err(isolate_failed());
+        }
+        let count = file.read(&mut chunk).map_err(|_| isolate_failed())?;
+        if count == 0 {
+            break;
+        }
+        read = read.checked_add(count as u64).ok_or_else(isolate_failed)?;
+        if read > len {
+            return Err(isolate_failed());
+        }
+        buf.extend_from_slice(&chunk[..count]);
+    }
+    if read != len || file.metadata().map_err(|_| isolate_failed())?.len() != len {
+        return Err(isolate_failed());
+    }
+    Ok(buf)
+}
+
+fn optional_regular(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(meta) if meta.file_type().is_file() => Ok(true),
+        _ => Err(isolate_failed()),
+    }
+}
+
+fn read_bundle(path: &Path, started: Instant, timeout: Duration) -> Result<IsolatedBundle, String> {
+    require_synthetic_marker(path)?;
+    let journal = sidecar_name(path, "-journal");
+    if fs::symlink_metadata(&journal).is_ok() {
+        return Err(isolate_failed());
+    }
+    let wal_path = sidecar_name(path, "-wal");
+    let shm_path = sidecar_name(path, "-shm");
+    let has_wal = optional_regular(&wal_path)?;
+    let has_shm = optional_regular(&shm_path)?;
+    if has_wal != has_shm {
+        return Err(isolate_failed());
+    }
+    let mut budget = ISOLATED_LIMIT;
+    let database = read_regular(path, &mut budget, started, timeout)?;
+    validate_database_header(&database)?;
+    let wal = if has_wal {
+        let bytes = read_regular(&wal_path, &mut budget, started, timeout)?;
+        validate_wal_headers(&database, &bytes, bytes.len() as u64)?;
+        Some(bytes)
+    } else if database.get(18) != database.get(19) {
+        return Err(isolate_failed());
+    } else {
+        None
+    };
+    let shm = if has_shm {
+        Some(read_regular(&shm_path, &mut budget, started, timeout)?)
+    } else {
+        None
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(SYNTHETIC_COURSE_MARKER_BODY);
+    hasher.update([u8::from(wal.is_some()), u8::from(shm.is_some())]);
+    hasher.update((database.len() as u64).to_le_bytes());
+    hasher.update(&database);
+    if let Some(bytes) = &wal {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    if let Some(bytes) = &shm {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let digest = hasher.finalize();
+    let mut sha = [0u8; 32];
+    sha.copy_from_slice(&digest);
+    Ok(IsolatedBundle {
+        database,
+        wal,
+        shm,
+        digest: sha,
+    })
+}
+
+/// Hash a marked synthetic source without opening SQLite.
+pub(super) fn fingerprint_synthetic(path: &Path) -> Result<[u8; 32], String> {
+    let started = Instant::now();
+    Ok(read_bundle(path, started, Duration::from_secs(15))?.digest)
+}
+
+fn write_copy(
+    path: &Path,
+    bytes: &[u8],
+    started: Instant,
+    timeout: Duration,
+) -> Result<(), String> {
+    if started.elapsed() >= timeout {
+        return Err(isolate_failed());
+    }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| isolate_failed())?;
+    output.write_all(bytes).map_err(|_| isolate_failed())?;
+    Ok(())
+}
+
+fn open_copied(path: &Path, has_wal: bool) -> Result<Connection, String> {
+    let connection = if has_wal {
+        Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| isolate_failed())?
+    } else {
+        let mut uri = url::Url::from_file_path(path).map_err(|_| isolate_failed())?;
+        uri.query_pairs_mut()
+            .append_pair("mode", "ro")
+            .append_pair("immutable", "1");
+        Connection::open_with_flags(
+            uri.as_str(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| isolate_failed())?
+    };
+    connection
+        .pragma_update(None, "query_only", 1i64)
+        .map_err(|_| isolate_failed())?;
+    Ok(connection)
+}
+
+/// Copy a marked synthetic database and open SQLite only on that copy.
+/// `interfere` runs between the two source reads so a torn sidecar fails closed.
+pub(super) fn open_isolated_readonly(
+    path: &Path,
+    timeout: Duration,
+    interfere: impl FnOnce(),
+) -> Result<Connection, String> {
+    if timeout.is_zero() {
+        return Err(isolate_failed());
+    }
+    let started = Instant::now();
+    let first = read_bundle(path, started, timeout)?;
+    interfere();
+    let second = read_bundle(path, started, timeout)?;
+    if second.digest != first.digest {
+        return Err(isolate_failed());
+    }
+    let temp = tempfile::tempdir().map_err(|_| isolate_failed())?;
+    let copied = temp.path().join("snapshot.db");
+    write_copy(&copied, &second.database, started, timeout)?;
+    if let Some(bytes) = &second.wal {
+        write_copy(&sidecar_name(&copied, "-wal"), bytes, started, timeout)?;
+    }
+    if let Some(bytes) = &second.shm {
+        write_copy(&sidecar_name(&copied, "-shm"), bytes, started, timeout)?;
+    }
+    let local = open_copied(&copied, second.wal.is_some())?;
+    let snapshot = snapshot_connection(
+        &local,
+        timeout
+            .checked_sub(started.elapsed())
+            .ok_or_else(isolate_failed)?,
+        ISOLATED_LIMIT,
+    )?;
+    drop(local);
+    drop(temp);
+    let after = read_bundle(path, started, timeout)?;
+    if after.digest != first.digest {
+        return Err(isolate_failed());
     }
     Ok(snapshot)
 }

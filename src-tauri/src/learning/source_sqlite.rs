@@ -29,24 +29,7 @@ pub(super) struct SqliteCandidate {
 
 /// Checks only the SQLite database header, not its contents or integrity.
 pub(super) fn validate_database_header(database: &[u8]) -> Result<u32, String> {
-    let failed = || "来源数据库或 WAL 文件头无效".to_string();
-    if database.len() < 100
-        || &database[..16] != b"SQLite format 3\0"
-        || !matches!(database[18], 1 | 2)
-        || !matches!(database[19], 1 | 2)
-    {
-        return Err(failed());
-    }
-    let encoded = u16::from_be_bytes([database[16], database[17]]);
-    let page_size = if encoded == 1 {
-        65536
-    } else {
-        u32::from(encoded)
-    };
-    if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
-        return Err(failed());
-    }
-    Ok(page_size)
+    super::course_snapshot::validate_database_header(database)
 }
 
 /// Reject invalid WAL header dimensions before passing a snapshot to SQLite.
@@ -56,30 +39,7 @@ pub(super) fn validate_wal_headers(
     wal: &[u8],
     wal_len: u64,
 ) -> Result<(), String> {
-    let failed = || "来源数据库或 WAL 文件头无效".to_string();
-    let page_size = validate_database_header(database)?;
-    if database[18] != 2 || database[19] != 2 {
-        return Err(failed());
-    }
-    if wal_len == 0 {
-        return Ok(());
-    }
-    if wal_len < 32 || wal.len() < 32 {
-        return Err(failed());
-    }
-    let value = |offset: usize| {
-        u32::from_be_bytes([
-            wal[offset],
-            wal[offset + 1],
-            wal[offset + 2],
-            wal[offset + 3],
-        ])
-    };
-    if !matches!(value(0), 0x377f0682 | 0x377f0683) || value(4) != 3007000 || value(8) != page_size
-    {
-        return Err(failed());
-    }
-    Ok(())
+    super::course_snapshot::validate_wal_headers(database, wal, wal_len)
 }
 
 fn file_identity(file: &File) -> Result<String, String> {

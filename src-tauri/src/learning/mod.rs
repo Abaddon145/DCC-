@@ -151,8 +151,11 @@ mod course_origins;
 mod course_origins_tests;
 #[cfg(test)]
 mod course_revert_tests;
-#[cfg(any(windows, test))]
 mod course_snapshot;
+#[allow(dead_code)]
+pub(crate) mod course_source_readonly;
+#[cfg(test)]
+mod course_source_readonly_tests;
 pub mod excerpt_access;
 #[cfg(test)]
 mod excerpt_access_tests;
