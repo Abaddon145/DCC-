@@ -941,6 +941,83 @@ fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_fai
 }
 
 #[test]
+fn learning_analysis_prefers_usable_subtitles_and_never_attaches_the_video() {
+    let (dir, db, old) = stored_fixture();
+    let video = dir.path().join("fixture.mp4");
+    std::fs::write(&video, b"registered managed video synthetic bytes").unwrap();
+    let track = uuid::Uuid::new_v4().to_string();
+    let caption = b"1\n00:00:10,000 --> 00:00:12,000\nFirst complete line\nSecond line\n\n2\n00:00:40,000 --> 00:00:42,000\nFinal step\n";
+    let folder = dir
+        .path()
+        .join("learning-data/subtitles")
+        .join(&old.preview.course_id);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(format!("{track}.srt")), caption).unwrap();
+    let track_sha = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(caption));
+    let track_relative = format!(
+        "learning-data/subtitles/{}/{track}.srt",
+        old.preview.course_id
+    );
+    db.execute("INSERT INTO learning_subtitles(id,course_id,name,format,relative_path,sha256,cue_count,created_at) VALUES(?1,?2,'source.srt','srt',?3,?4,2,'2020-01-01T00:00:00Z')",rusqlite::params![track,old.preview.course_id,track_relative,track_sha]).unwrap();
+    let state = crate::state::test_state(dir.path());
+    let library = state.active_library_id().unwrap();
+    let preview = super::analysis::prepare(
+        &state,
+        &library,
+        &old.preview.course_id,
+        &CourseAnalysisOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(preview.subtitle_id.as_deref(), Some(track.as_str()));
+    assert!(preview.frame_ids.is_empty());
+    assert!(preview
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("不会上传整段视频")));
+    let input = super::analysis::load_confirmed(
+        &state,
+        &library,
+        &old.preview.course_id,
+        &preview.preview_id,
+    )
+    .unwrap();
+    let body = super::analysis::request_body(&input, &input.segments[0]).unwrap();
+    let encoded = body.to_string();
+    assert!(encoded.contains("First complete line"));
+    assert!(!encoded.contains("fixture.mp4"));
+    assert!(!encoded.contains("data:video"));
+    assert!(!encoded.contains("image_url"));
+    assert_eq!(
+        state.translation_service.usage().unwrap().deepseek_tokens,
+        0
+    );
+}
+
+#[test]
+fn learning_analysis_subtitle_preference_skips_tracks_without_cues() {
+    let row = |id: &str, cues: i64| super::models::LearningSubtitle {
+        id: id.into(),
+        course_id: "course".into(),
+        name: id.into(),
+        format: "srt".into(),
+        sha256: "a".repeat(64),
+        cue_count: cues,
+    };
+    let skipped = vec![row("older", 2), row("empty", 0), row("newer-empty", 0)];
+    assert_eq!(
+        super::analysis::preferred_subtitle_id(&skipped).as_deref(),
+        Some("older")
+    );
+    let newest = vec![row("older", 2), row("newer", 4)];
+    assert_eq!(
+        super::analysis::preferred_subtitle_id(&newest).as_deref(),
+        Some("newer")
+    );
+    assert!(super::analysis::preferred_subtitle_id(&[row("empty", 0)]).is_none());
+}
+
+#[test]
 fn learning_analysis_cache_preserves_local_diagnostics_and_binds_full_material_identity() {
     let (dir, mut db, input) = stored_fixture();
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();

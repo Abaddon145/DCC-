@@ -5,17 +5,60 @@ import {useRequestGate} from "../../lib/workspace";
 import type {LibraryTask,Page} from "../../types";
 import {learningApi} from "./api";
 import {learningTime} from "./LearningControls";
-import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPreview,CourseAnalysisRequest,CourseAnalysisResult,LearningSubtitle} from "./types";
+import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPreview,CourseAnalysisRequest,CourseAnalysisResult,LearningSubtitle,WhisperComponentStatus} from "./types";
 
 export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;onSeek:(ms:number)=>void}
 type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
+function preferredSubtitle(rows:LearningSubtitle[],previous:string){
+  if(rows.some(row=>row.id===previous))return previous;
+  return [...rows].reverse().find(row=>row.cueCount>0)?.id||rows.at(-1)?.id||"";
+}
+function LocalWhisperOffer({libraryId,courseId,disabled,onSubtitle}:{libraryId:string;courseId:string;disabled:boolean;onSubtitle:(id:string)=>void}){
+  const [status,setStatus]=useState<WhisperComponentStatus|null>(null),[model,setModel]=useState<"base"|"small">("base"),[consent,setConsent]=useState(false);
+  const [task,setTask]=useState<LibraryTask|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const gate=useRequestGate(),busyRef=useRef(false),delivered=useRef(new Set<string>()),ready=useRef(onSubtitle);ready.current=onSubtitle;
+  const refresh=useCallback(async()=>{
+    const ticket=gate.begin();setError("");
+    try{const components=await learningApi.transcriptionComponents(libraryId);if(!gate.isCurrent(ticket))return;setStatus(components);const installed=components.models.filter(item=>item.installed);setModel(current=>installed.some(item=>item.id===current)?current:installed.find(item=>item.id==="base")?.id||installed[0]?.id||"base");}
+    catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}
+  },[libraryId,gate]);
+  useEffect(()=>{void refresh();},[refresh]);
+  useEffect(()=>{
+    if(!task||!active(task))return;let keep=true;let timer=0;
+    const poll=async()=>{
+      try{const next=await api.getLibraryTask(task.id);if(!keep)return;if(next.libraryId!==libraryId||next.payload.kind!=="courseTranscription"||next.payload.request.courseId!==courseId)throw new Error("任务不属于当前课程");setTask(next);if(active(next))timer=window.setTimeout(()=>void poll(),2000);}
+      catch(reason){if(keep)setError(`转写状态读取失败：${String(reason)}。后台仍继续，请重新检查组件。`);}
+    };
+    timer=window.setTimeout(()=>void poll(),0);return()=>{keep=false;window.clearTimeout(timer);};
+  },[task?.id,task?.status,libraryId,courseId]);
+  const resultId=task?.status==="completed"&&task.result&&typeof task.result==="object"&&"courseId" in task.result&&task.result.courseId===courseId&&"subtitleId" in task.result&&typeof task.result.subtitleId==="string"?task.result.subtitleId:null;
+  useEffect(()=>{if(task?.status==="completed"&&resultId&&!delivered.current.has(task.id)){delivered.current.add(task.id);ready.current(resultId);}},[task,resultId]);
+  const selected=status?.models.find(item=>item.id===model),installed=!!selected?.installed,toolReady=!!status?.toolReady&&installed,locked=disabled||busy||active(task);
+  const run=async(job:()=>Promise<void>)=>{if(busyRef.current)return;busyRef.current=true;setBusy(true);setError("");const ticket=gate.begin();try{await job();if(!gate.isCurrent(ticket))return;}catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}finally{busyRef.current=false;if(gate.isCurrent(ticket))setBusy(false);}};
+  return <section className="learning-analysis-whisper" aria-label="本地转写材料">
+    <h3>没有可用字幕</h3>
+    <p>优先使用已导入的 SRT / VTT。没有可用段落时，可在本机已核验的 Whisper 上转写；不会自动下载工具或模型，也不会因此调用付费分析。</p>
+    {!status&&!error&&<LoadFeedback label="正在检查本机转写组件…"/>}
+    {error&&<p role="alert">{error}</p>}
+    {status&&!toolReady&&<p role="status">Whisper {status.version} 未就绪：{status.toolReady?selected?.message||"所选模型尚未安装并校验":status.toolMessage}。请到「课程字幕」导入已核验组件，或只填写采样时间。不会自动下载。</p>}
+    {status&&toolReady&&<>
+      <p role="status">Whisper {status.version} 已核验。转写只在本机读取课程音频，不上传视频；完成后请再预览，不会自动开始付费分析。</p>
+      <label>语音模型<select aria-label="语音模型" value={model} disabled={locked} onChange={event=>{const value=event.target.value;if(value==="base"||value==="small"){setModel(value);setConsent(false);}}}>{status.models.map(item=><option key={item.id} value={item.id} disabled={!item.installed}>{item.label}{item.installed?"":" · 未安装"}</option>)}</select></label>
+      {selected&&<p>{(selected.bytes/1048576).toFixed(1)} MiB · {selected.message}</p>}
+      <label className="learning-analysis-consent"><input type="checkbox" checked={consent} disabled={locked} onChange={event=>setConsent(event.target.checked)}/>确认使用本机 CPU 和临时磁盘完成本地转写</label>
+      <div className="learning-panel-actions"><button className="secondary-button" type="button" disabled={locked||!consent} onClick={()=>void run(async()=>{const next=await api.startLibraryTask({kind:"courseTranscription",request:{courseId,modelId:model}},libraryId);if(next.libraryId!==libraryId||next.payload.kind!=="courseTranscription"||next.payload.request.courseId!==courseId)throw new Error("返回任务不属于当前课程");setTask(next);setConsent(false);})}>开始本地转写</button>{active(task)&&<button className="secondary-button" type="button" disabled={busy||!task?.cancellable} onClick={()=>void run(async()=>{if(!task)return;await api.cancelLibraryTask(task.id);setTask(current=>current?{...current,status:"cancelled"}:current);})}>取消本地转写</button>}</div>
+      {task&&<p role="status">{task.phase||labels[task.status]||task.status}{task.total>0?` · ${task.current} / ${task.total}`:""}</p>}
+    </>}
+  </section>;
+}
 export function CourseAnalysisPanel(props:CourseAnalysisPanelProps){return <AnalysisContent key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 
 function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysisPanelProps){
-  const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState("");
+  const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState(""),[subtitleState,setSubtitleState]=useState<"loading"|"ready"|"error">("loading");
   const [subtitleRead,setSubtitleRead]=useState(0);
+  const pendingSubtitle=useRef("");
   const [history,setHistory]=useState<Page<CourseAnalysisHistoryItem>>({items:[],total:0,offset:0,limit:50}),[offset,setOffset]=useState(0),[analysisId,setAnalysisId]=useState("");
   const [stageKey,setStageKey]=useState<string|null>(null),[stageOffset,setStageOffset]=useState(0),[detail,setDetail]=useState<CourseAnalysisDetail|null>(null);
   const [prepared,setPrepared]=useState<{value:CourseAnalysisPreview;phase:Phase}|null>(null),[consent,setConsent]=useState(false),[now,setNow]=useState(Date.now());
@@ -24,7 +67,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
   const [error,setError]=useState(""),[notice,setNotice]=useState("");
   const gate=useRequestGate(),historyGate=useRequestGate(),resultGate=useRequestGate(),busyRef=useRef(false),watchTask=useRef("");
   const hintId=useId();
-  useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(keep){setSubtitles(rows);setSubtitleId(previous=>rows.some(s=>s.id===previous)?previous:rows.at(-1)?.id||"");}}).catch(reason=>{if(keep)setError(String(reason));});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
+  useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(!keep)return;const wanted=pendingSubtitle.current;setSubtitles(rows);setSubtitleId(previous=>wanted&&rows.some(row=>row.id===wanted)?(pendingSubtitle.current="",wanted):preferredSubtitle(rows,previous));setSubtitleState("ready");}).catch(reason=>{if(keep){setError(String(reason));setSubtitleState("error");}});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
   const refresh=useCallback(async()=>{
     const ticket=historyGate.begin();
     try{
@@ -82,16 +125,26 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
   };
   const selectedPhase=detail?.parentAnalysisId?"summary":history.items.find(row=>row.id===analysisId)?.stage||"segments";
   const expired=!!prepared&&prepared.value.expiresAt*1000<=now;
+  const selectedSubtitle=subtitles.find(row=>row.id===subtitleId);
+  const usable=!!selectedSubtitle&&selectedSubtitle.cueCount>0;
+  const acceptTranscript=(id:string)=>{pendingSubtitle.current=id;setSubtitleRead(value=>value+1);setNotice("本地字幕已保存。请预览材料并确认费用后再开始分析，不会自动发送。");invalidatePreview();};
   return <section className="learning-analysis" aria-label="课程分析">
     <header><h2>课程分析</h2><button className="secondary-button" disabled={busy} onClick={()=>{setError("");invalidatePreview();setSubtitleRead(value=>value+1);void refresh();}}>刷新记录</button></header>
-    <p id={hintId}>只分析明确选中的字幕和采样帧，不上传整段视频，不会自动写入笔记。没有字幕时请先导入 SRT / VTT，或填写采样时间；不会自动转写或下载模型。</p>
+    <p id={hintId}>先准备材料：优先使用已导入且有内容的字幕，可选附加少量 JPEG 采样帧。确认预览后做分段分析，再按需汇总。不上传整段视频，也不把整段画面当作视觉分析。失败后必须重新预览，不会自动重试付费请求，也不会自动写入笔记。</p>
     {error&&<div className="learning-analysis-alert" role="alert">{error}</div>}
     {notice&&<p role="status">{notice}</p>}
     {loading&&<LoadFeedback label="正在读取分析记录…"/>}
     <form className="learning-analysis-form" onSubmit={event=>{event.preventDefault();void prepare("segments");}}>
-      <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.length&&<option value="">无已导入字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id}>{s.name} · {s.cueCount} 段</option>)}</select></label>
-      <label>采样时间（秒）<input value={frameText} disabled={busy||active(task)} placeholder="例如 12.5, 30，可留空" aria-describedby={hintId} onChange={event=>{setFrameText(event.target.value);invalidatePreview();}}/></label>
-      <button className="secondary-button" disabled={busy||active(task)||loading} type="submit">预览分段分析</button>
+      <fieldset>
+        <legend>分析材料</legend>
+        <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{pendingSubtitle.current="";setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.length&&<option value="">无已导入字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id}>{s.name} · {s.cueCount} 段{s.cueCount?"":" · 无可用段落"}</option>)}</select></label>
+        {subtitleState==="ready"&&usable&&<p role="status">将发送「{selectedSubtitle?.name}」的完整段落{frameText.trim()?"，并附加列出的 JPEG 采样帧":"，不附加画面"}。不会上传视频文件。</p>}
+        {subtitleState==="ready"&&selectedSubtitle&&!usable&&<p role="status">所选字幕没有可用段落，不能作为文字来源。</p>}
+        {subtitleState==="ready"&&!usable&&<LocalWhisperOffer libraryId={libraryId} courseId={courseId} disabled={busy||active(task)} onSubtitle={acceptTranscript}/>}
+        <label>采样时间（秒）<input value={frameText} disabled={busy||active(task)} placeholder="例如 12.5, 30，可留空" aria-describedby={hintId} onChange={event=>{setFrameText(event.target.value);invalidatePreview();}}/></label>
+        <p>留空表示不采样。填写的每个时间只抽取一张 JPEG，不是整段视频画面分析。</p>
+        <button className="secondary-button" disabled={busy||active(task)||loading} type="submit">预览分段分析</button>
+      </fieldset>
     </form>
     {busy&&<LoadFeedback label="正在校验资料并处理请求…"/>}
     {prepared&&<section className="learning-analysis-preview" aria-label="分析费用预览">
