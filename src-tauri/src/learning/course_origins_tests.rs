@@ -171,6 +171,8 @@ fn learning_import_course_origins_preserves_identity_and_detects_conflicts() {
         db.execute("UPDATE learning_courses SET position_ms=100,progress_revision=progress_revision+1 WHERE id=?1", [&course]).unwrap();
         assert_eq!(inspect(db,&source_a,&hash)?, CourseOriginState::TargetChanged(course.clone()));
         assert_eq!(inspect(db,&source_a,&changed_hash)?, CourseOriginState::BothChanged(course.clone()));
+        // Simulate unavailable media changed by an older client.
+        db.execute_batch("DROP TRIGGER media_workspace_protect_learning_trash").unwrap();
         db.execute("UPDATE media_entries SET deleted_at='now' WHERE id=?1", [&media]).unwrap();
         assert_eq!(inspect(db,&source_a,&hash)?, CourseOriginState::TargetUnavailable(course.clone()));
         Ok(())

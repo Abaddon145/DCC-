@@ -583,6 +583,28 @@ mod tests {
         ));
     }
     #[test]
+    fn backup_restores_shared_media_membership_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = crate::state::test_state(&dir.path().join("source"));
+        let target = crate::state::test_state(&dir.path().join("target"));
+        let archive = dir.path().join("backup.dccassetlib");
+        source.with_library_mut(|db, base| {
+            db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('shared','video','Shared','file','now','now')", []).unwrap();
+            db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('shared','learning')", []).unwrap();
+            crate::media_library::delete_entries(db, vec!["shared".into()])?;
+            super::export_library(db, base, &archive)
+        }).unwrap();
+        target
+            .with_active_mut(|active| super::restore_library(active, &archive))
+            .unwrap();
+        target.with_library_mut(|db, _| {
+            let batch = crate::db::list_trash(db, 0, 10)?.items[0].id.clone();
+            crate::db::restore_trash_batch(db, &batch)?;
+            assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
     fn learning_data_backup_restore_keeps_archives_not_external_originals() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -788,7 +810,7 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "39"
+            "40"
         );
         assert_eq!(
             restored

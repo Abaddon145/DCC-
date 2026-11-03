@@ -213,6 +213,7 @@ fn old_fixture() -> Connection {
     db.execute("INSERT INTO assets(id,name,description,share_url,created_at,updated_at) VALUES(?1,'旧资产','原说明','','old','old')", [OLD_ID]).unwrap();
     db.execute("INSERT INTO asset_localizations(asset_id,locale,name,description) VALUES(?1,'en','Old asset','Original description')", [OLD_ID]).unwrap();
     db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'image','旧图片','09003f78-9a59-4fb8-abbc-14dc276f0b4a','old','old')", [OLD_ID]).unwrap();
+    db.execute_batch("CREATE TABLE media_workspace_memberships(media_entry_id TEXT NOT NULL,workspace TEXT NOT NULL,PRIMARY KEY(media_entry_id,workspace)); INSERT INTO media_workspace_memberships SELECT id,'materials' FROM media_entries; CREATE TRIGGER media_workspace_default_materials AFTER INSERT ON media_entries BEGIN INSERT INTO media_workspace_memberships VALUES(NEW.id,'materials'); END;").unwrap();
     db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,file_size,checksum,created_at) VALUES('09003f78-9a59-4fb8-abbc-14dc276f0b4a',?1,'main','原图.png','原图.png','media-library/image/旧图/原图.png',123,'known-hash','old')", [OLD_ID]).unwrap();
     db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','旧项目','scene','active','old','old')",[]).unwrap();
     db.execute("INSERT INTO project_assets(project_id,asset_id,status,created_at,updated_at) VALUES('project',?1,'candidate','old','old')",[OLD_ID]).unwrap();
@@ -234,7 +235,7 @@ fn database_open_installs_compatible_asset_registry() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "39");
+    assert_eq!(version, "40");
 }
 
 #[test]
@@ -370,6 +371,26 @@ fn core_constraints_and_migration_failure_roll_back() {
 
 fn request() -> CoreSearchRequest {
     serde_json::from_value(serde_json::json!({})).unwrap()
+}
+
+#[test]
+fn asset_search_and_detail_exclude_learning_only_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+    db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('learning-only','video','tutorial','file','now','now')", []).unwrap();
+    let id = repository::register_origin(
+        &db,
+        &CoreOrigin {
+            kind: "media".into(),
+            id: "learning-only".into(),
+        },
+    )
+    .unwrap();
+    db.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id='learning-only' AND workspace='materials'", []).unwrap();
+    db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('learning-only','learning')", []).unwrap();
+    assert_eq!(repository::search(&db, &request()).unwrap().total, 0);
+    assert!(repository::read_asset(&db, &id, "zh-CN").is_err());
+    assert!(repository::origin(&db, &id).is_err());
 }
 
 #[test]

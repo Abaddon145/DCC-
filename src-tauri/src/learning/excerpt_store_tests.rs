@@ -177,7 +177,7 @@ fn learning_excerpt_store_v28_upgrade_preserves_notes_and_enforces_operation_rec
     state.with_library_mut(|db,base|{
         let note=knowledge::save(db,NoteInput{id:None,expected_revision:None,notebook_id:None,title:"已有笔记".into(),document:prepared.document.clone(),tags:vec![],favorite:false,journal_date:None})?;
         db.execute_batch("DROP TABLE IF EXISTS learning_origin_map; DROP TABLE IF EXISTS learning_source_vault_bindings; DROP TABLE learning_source_profiles;DROP TABLE IF EXISTS learning_course_notes;DROP TABLE IF EXISTS learning_excerpt_operations;DROP TABLE IF EXISTS learning_excerpts;UPDATE schema_meta SET value='28' WHERE key='schema_version';").unwrap();super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"39");assert_eq!(knowledge::get(db,&note.id)?.document,note.document);
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"40");assert_eq!(knowledge::get(db,&note.id)?.document,note.document);
         let preview=save_prepared(db,base,&library,&prepared)?;let operation=uuid::Uuid::new_v4().to_string();
         assert!(db.execute("INSERT INTO learning_excerpt_operations(operation_id,excerpt_id,request_json,request_sha256,status,created_at) VALUES(?1,?2,'{}',?3,'committed','now')",params![operation,preview.id,hash(b"{}")]).is_err());
         db.execute("INSERT INTO learning_excerpt_operations(operation_id,excerpt_id,request_json,request_sha256,status,created_at) VALUES(?1,?2,'{}',?3,'pending','now')",params![operation,preview.id,hash(b"{}")]).unwrap();

@@ -201,17 +201,25 @@ mod learning_store_tests {
         let y = set_series_members(&mut db, &y.id, 0, &[a.id.clone()]).unwrap();
         assert_eq!(x.ordered_course_ids[0], y.ordered_course_ids[0]);
         assert_eq!(a.duration_ms, Some(1000));
-        crate::media_library::delete_entries(&mut db, vec![media_id.clone()]).unwrap();
-        assert!(course(&db, &a.id).is_err());
-        let batch: String = db
-            .query_row(
-                "SELECT delete_batch_id FROM media_entries WHERE id=?1",
-                [&media_id],
-                |r| r.get(0),
-            )
-            .unwrap();
+        assert_eq!(
+            crate::media_library::delete_entries(&mut db, vec![media_id.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(course(&db, &a.id).unwrap().id, a.id);
+        let batch = crate::db::list_trash(&db, 0, 10).unwrap().items[0]
+            .id
+            .clone();
         crate::db::restore_trash_batch(&mut db, &batch).unwrap();
         assert_eq!(course(&db, &a.id).unwrap().id, a.id);
+        // Simulate an older client changing media outside the current guard.
+        db.execute_batch("DROP TRIGGER media_workspace_protect_learning_trash")
+            .unwrap();
+        db.execute(
+            "UPDATE media_entries SET deleted_at='now' WHERE id=?1",
+            [&media_id],
+        )
+        .unwrap();
+        assert!(course(&db, &a.id).is_err());
     }
     #[test]
     fn learning_store_rejects_foreign_media_and_order_conflicts() {

@@ -415,7 +415,11 @@ fn entry_row(row: &Row<'_>) -> rusqlite::Result<MediaEntry> {
 const ENTRY_SELECT:&str="SELECT e.id,e.kind,e.folder_id,e.name,e.description,e.author,e.source_url,e.license,e.favorite,e.processing_status,e.processing_message,lower(substr(m.original_name,instr(m.original_name,'.')+1)),m.file_size,COALESCE(group_concat(DISTINCT t.name),'') ,(SELECT id FROM media_files WHERE entry_id=e.id AND role IN ('thumbnail','waveform') ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END LIMIT 1),e.primary_file_id,e.created_at,e.updated_at FROM media_entries e JOIN media_files m ON m.id=e.primary_file_id LEFT JOIN media_entry_tags et ON et.entry_id=e.id LEFT JOIN localized_tags t ON t.id=et.tag_id";
 
 fn search_filter(request: &MediaSearchRequest) -> (String, Vec<Value>) {
-    let mut conditions = vec!["e.deleted_at IS NULL".to_string(), "e.kind=?".to_string()];
+    let mut conditions = vec![
+        "e.deleted_at IS NULL".to_string(),
+        "e.kind=?".to_string(),
+        "EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=e.id AND w.workspace='materials')".to_string(),
+    ];
     let mut values = vec![Value::Text(request.kind.as_str().into())];
     if !request.query.trim().is_empty() {
         let query = request.query.trim();
@@ -513,7 +517,7 @@ pub fn select_ids(
     Ok(ids)
 }
 pub fn get(connection: &Connection, id: &str) -> Result<MediaEntryDetail, String> {
-    let sql = format!("{ENTRY_SELECT} WHERE e.id=?1 AND e.deleted_at IS NULL GROUP BY e.id");
+    let sql = format!("{ENTRY_SELECT} WHERE e.id=?1 AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=e.id AND w.workspace='materials') GROUP BY e.id");
     let entry = connection
         .query_row(&sql, [id], entry_row)
         .optional()
@@ -542,7 +546,7 @@ pub fn get(connection: &Connection, id: &str) -> Result<MediaEntryDetail, String
     })
 }
 pub fn list_folders(connection: &Connection, kind: &MediaKind) -> Result<Vec<MediaFolder>, String> {
-    let mut stmt=connection.prepare("SELECT f.id,f.kind,f.parent_id,f.name,f.sort_order,(SELECT count(*) FROM media_entries e WHERE e.folder_id=f.id AND e.deleted_at IS NULL) FROM media_folders f WHERE f.kind=?1 AND f.deleted_at IS NULL ORDER BY f.parent_id,f.sort_order,f.name COLLATE NOCASE").map_err(|e|e.to_string())?;
+    let mut stmt=connection.prepare("SELECT f.id,f.kind,f.parent_id,f.name,f.sort_order,(SELECT count(*) FROM media_entries e WHERE e.folder_id=f.id AND e.deleted_at IS NULL AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=e.id AND w.workspace='materials')) FROM media_folders f WHERE f.kind=?1 AND f.deleted_at IS NULL ORDER BY f.parent_id,f.sort_order,f.name COLLATE NOCASE").map_err(|e|e.to_string())?;
     let values = stmt
         .query_map([kind.as_str()], |r| {
             Ok(MediaFolder {
@@ -659,12 +663,14 @@ pub fn delete_folder(connection: &mut Connection, id: &str) -> Result<(), String
         .map_err(|e| e.to_string())?
         .ok_or("媒体文件夹不存在")?;
     let folder_count:i64=connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) SELECT count(*) FROM tree",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    let media_count:i64=connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) SELECT count(*) FROM media_entries WHERE deleted_at IS NULL AND folder_id IN (SELECT id FROM tree)",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let media_count:i64=connection.query_row("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) SELECT count(*) FROM media_entries e WHERE e.deleted_at IS NULL AND e.folder_id IN (SELECT id FROM tree) AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=e.id AND w.workspace='materials')",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
     let batch = Uuid::new_v4().to_string();
     let timestamp = now();
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO deletion_batches(id,kind,label,media_count,media_folder_count,created_at) VALUES(?1,'mediaFolder',?2,?3,?4,?5)",params![batch,format!("{}库文件夹：{name}",kind),media_count,folder_count,timestamp]).map_err(|e|e.to_string())?;
-    tx.execute("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) UPDATE media_entries SET deleted_at=?2,delete_batch_id=?3 WHERE deleted_at IS NULL AND folder_id IN (SELECT id FROM tree)",params![id,timestamp,batch]).map_err(|e|e.to_string())?;
+    tx.execute("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) INSERT INTO media_workspace_trash(batch_id,media_entry_id,workspace) SELECT ?2,e.id,'materials' FROM media_entries e JOIN media_workspace_memberships w ON w.media_entry_id=e.id AND w.workspace='materials' WHERE e.deleted_at IS NULL AND e.folder_id IN (SELECT id FROM tree) AND EXISTS(SELECT 1 FROM media_workspace_effective_memberships x WHERE x.media_entry_id=e.id AND x.workspace='learning')",params![id,batch]).map_err(|e|e.to_string())?;
+    tx.execute("DELETE FROM media_workspace_memberships WHERE workspace='materials' AND media_entry_id IN (SELECT media_entry_id FROM media_workspace_trash WHERE batch_id=?1)",[&batch]).map_err(|e|e.to_string())?;
+    tx.execute("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) UPDATE media_entries SET deleted_at=?2,delete_batch_id=?3 WHERE deleted_at IS NULL AND folder_id IN (SELECT id FROM tree) AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=media_entries.id AND w.workspace='materials')",params![id,timestamp,batch]).map_err(|e|e.to_string())?;
     tx.execute("WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL SELECT f.id FROM media_folders f JOIN tree t ON f.parent_id=t.id WHERE f.deleted_at IS NULL) UPDATE media_folders SET deleted_at=?2,delete_batch_id=?3 WHERE id IN (SELECT id FROM tree)",params![id,timestamp,batch]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -1199,7 +1205,7 @@ pub fn update(
     if name.trim().is_empty() {
         return Err("名称不能为空".into());
     }
-    let changed=connection.execute("UPDATE media_entries SET name=?1,description=?2,author=?3,source_url=?4,license=?5,updated_at=?6 WHERE id=?7 AND deleted_at IS NULL",params![name.trim(),description.trim(),author.trim(),source_url.trim(),license.trim(),now(),id]).map_err(|e|e.to_string())?;
+    let changed=connection.execute("UPDATE media_entries SET name=?1,description=?2,author=?3,source_url=?4,license=?5,updated_at=?6 WHERE id=?7 AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=media_entries.id AND w.workspace='materials')",params![name.trim(),description.trim(),author.trim(),source_url.trim(),license.trim(),now(),id]).map_err(|e|e.to_string())?;
     if changed == 0 {
         return Err("媒体条目不存在".into());
     }
@@ -1216,6 +1222,10 @@ pub fn batch_update(
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     let mut changed = 0;
     for id in &update.ids {
+        let belongs:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM media_entries e JOIN media_workspace_memberships w ON w.media_entry_id=e.id AND w.workspace='materials' WHERE e.id=?1 AND e.deleted_at IS NULL)",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !belongs {
+            return Err("媒体条目不存在或不属于素材库".into());
+        }
         if update.clear_folder {
             changed+=tx.execute("UPDATE media_entries SET folder_id=NULL,updated_at=?1 WHERE id=?2 AND deleted_at IS NULL",params![now(),id]).map_err(|e|e.to_string())?
         } else if let Some(folder) = &update.folder_id {
@@ -1253,11 +1263,28 @@ pub fn delete_entries(connection: &mut Connection, ids: Vec<String>) -> Result<u
     let timestamp = now();
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     let mut count = 0;
+    tx.execute("INSERT INTO deletion_batches(id,kind,label,media_count,created_at) VALUES(?1,'media','',0,?2)",params![batch,timestamp]).map_err(|e|e.to_string())?;
     for id in ids {
-        count+=tx.execute("UPDATE media_entries SET deleted_at=?1,delete_batch_id=?2 WHERE id=?3 AND deleted_at IS NULL",params![timestamp,batch,id]).map_err(|e|e.to_string())?;
+        let shared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM media_workspace_effective_memberships WHERE media_entry_id=?1 AND workspace='learning')",[&id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if shared {
+            let inserted=tx.execute("INSERT INTO media_workspace_trash(batch_id,media_entry_id,workspace) SELECT ?1,w.media_entry_id,'materials' FROM media_workspace_memberships w JOIN media_entries e ON e.id=w.media_entry_id WHERE w.media_entry_id=?2 AND w.workspace='materials' AND e.deleted_at IS NULL",params![batch,id]).map_err(|e|e.to_string())?;
+            if inserted > 0 {
+                tx.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",[&id]).map_err(|e|e.to_string())?;
+                count += 1;
+            }
+        } else {
+            count+=tx.execute("UPDATE media_entries SET deleted_at=?1,delete_batch_id=?2 WHERE id=?3 AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=media_entries.id AND w.workspace='materials')",params![timestamp,batch,id]).map_err(|e|e.to_string())?;
+        }
     }
     if count > 0 {
-        tx.execute("INSERT INTO deletion_batches(id,kind,label,media_count,created_at) VALUES(?1,'media',?2,?3,?4)",params![batch,format!("{count} 个媒体条目"),count as i64,timestamp]).map_err(|e|e.to_string())?;
+        tx.execute(
+            "UPDATE deletion_batches SET label=?1,media_count=?2 WHERE id=?3",
+            params![format!("{count} 个媒体条目"), count as i64, batch],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM deletion_batches WHERE id=?1", [&batch])
+            .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(count)
@@ -1351,6 +1378,202 @@ mod tests {
     use super::*;
     use crate::db::open_database;
     use tempfile::tempdir;
+    #[test]
+    fn trash_and_restore_materials_membership_preserves_shared_learning_media() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('shared','video','Shared','file','now','now')", []).unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('shared','learning')", []).unwrap();
+        assert_eq!(delete_entries(&mut db, vec!["shared".into()]).unwrap(), 1);
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared' AND workspace='materials'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_entries WHERE id='shared' AND deleted_at IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        let trash = crate::db::list_trash(&db, 0, 10).unwrap();
+        crate::db::restore_trash_batch(&mut db, &trash.items[0].id).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn trash_and_restore_folder_keeps_shared_course_playable() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let folder = upsert_folder(&db, MediaKind::Video, None, None, "Courses".into()).unwrap();
+        db.execute("INSERT INTO media_entries(id,kind,folder_id,name,primary_file_id,created_at,updated_at) VALUES('shared','video',?1,'Shared','file','now','now')", [&folder.id]).unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('shared','learning')", []).unwrap();
+        delete_folder(&mut db, &folder.id).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_entries WHERE id='shared' AND deleted_at IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared' AND workspace='materials'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        let trash = crate::db::list_trash(&db, 0, 10).unwrap();
+        crate::db::restore_trash_batch(&mut db, &trash.items[0].id).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn purging_materials_membership_keeps_shared_video_bytes() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let file = dir.path().join("video.mp4");
+        fs::write(&file, b"test-video").unwrap();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('shared','video','Shared','file','now','now')", []).unwrap();
+        db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES('file','shared','main','video.mp4','video.mp4','video.mp4','now')", []).unwrap();
+        db.execute("INSERT INTO learning_courses(id,media_entry_id,created_at,updated_at) VALUES('course','shared','now','now')", []).unwrap();
+        delete_entries(&mut db, vec!["shared".into()]).unwrap();
+        let trash = crate::db::list_trash(&db, 0, 10).unwrap();
+        crate::db::purge_trash_batch(&mut db, dir.path(), &trash.items[0].id).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"test-video");
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM learning_courses WHERE id='course'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_entries WHERE id='shared' AND deleted_at IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_workspace_trash", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn media_with_learning_membership_cannot_be_trashed_or_physically_deleted() {
+        let dir = tempdir().unwrap();
+        let db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('shared','video','Shared','file','now','now')", []).unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('shared','learning')", []).unwrap();
+        assert!(db
+            .execute(
+                "UPDATE media_entries SET deleted_at='now' WHERE id='shared'",
+                []
+            )
+            .is_err());
+        assert!(db
+            .execute("DELETE FROM media_entries WHERE id='shared'", [])
+            .is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_entries WHERE id='shared' AND deleted_at IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='shared'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn materials_search_and_select_exclude_learning_only_media() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let folder = upsert_folder(&db, MediaKind::Video, None, None, "Videos".into()).unwrap();
+        for id in ["materials", "learning"] {
+            db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video',?1,?2,'now','now')", params![id, format!("{id}-file")]).unwrap();
+            db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'main','v.mp4','v.mp4',?3,'now')", params![format!("{id}-file"), id, format!("{id}/v.mp4")]).unwrap();
+        }
+        db.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id='learning' AND workspace='materials'", []).unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('learning','learning')", []).unwrap();
+        db.execute(
+            "UPDATE media_entries SET folder_id=?1 WHERE id IN ('materials','learning')",
+            [&folder.id],
+        )
+        .unwrap();
+        let request = MediaSearchRequest {
+            kind: MediaKind::Video,
+            query: String::new(),
+            folder_id: None,
+            include_child_folders: false,
+            tags: vec![],
+            formats: vec![],
+            favorite_only: false,
+            sort: "updated".into(),
+            offset: 0,
+            limit: 20,
+        };
+        assert_eq!(search(&db, &request).unwrap().total, 1);
+        assert_eq!(select_ids(&db, &request).unwrap(), vec!["materials"]);
+        assert!(get(&db, "learning").is_err());
+        assert_eq!(
+            list_folders(&db, &MediaKind::Video).unwrap()[0].entry_count,
+            1
+        );
+        assert!(update(
+            &db,
+            "learning",
+            "changed".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+            vec![]
+        )
+        .is_err());
+        let batch = MediaBatchUpdate {
+            ids: vec!["materials".into(), "learning".into()],
+            folder_id: None,
+            clear_folder: false,
+            add_tags: vec![],
+            remove_tags: vec![],
+            favorite: Some(true),
+        };
+        assert!(batch_update(&mut db, batch).is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_entries WHERE favorite=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
     #[test]
     fn selects_every_matching_media_id_beyond_the_first_virtual_page() {
         let dir = tempdir().unwrap();

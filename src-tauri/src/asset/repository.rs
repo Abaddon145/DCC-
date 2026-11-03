@@ -31,6 +31,17 @@ pub fn register_origin(db: &Connection, origin: &CoreOrigin) -> Result<String, S
 }
 
 pub fn origin(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
+    let origin = origin_unscoped(db, id)?;
+    if origin.kind == "media" {
+        let allowed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials')", [&origin.id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if !allowed {
+            return Err("资产不存在或不属于当前素材库".into());
+        }
+    }
+    Ok(origin)
+}
+
+fn origin_unscoped(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
     db.query_row(
         "SELECT legacy_asset_id,media_entry_id,entity_id FROM asset_core WHERE id=?1",
         [id],
@@ -60,7 +71,7 @@ pub fn origin(db: &Connection, id: &str) -> Result<CoreOrigin, String> {
 }
 
 pub fn register_files(db: &Connection, core_id: &str) -> Result<(), String> {
-    let owner = origin(db, core_id)?;
+    let owner = origin_unscoped(db, core_id)?;
     if owner.kind == "entity" {
         return Ok(());
     }
@@ -221,7 +232,7 @@ const VIEW: &str = "WITH unified AS (
  SELECT c.id,c.legacy_asset_id AS owner_id,'legacy' AS kind,'asset' AS asset_type,
  COALESCE(NULLIF(l.name,''),a.name) AS name,COALESCE(NULLIF(l.description,''),a.description) AS description,a.created_at,a.updated_at,a.deleted_at,a.source_url,a.author
  FROM asset_core c JOIN assets a ON a.id=c.legacy_asset_id LEFT JOIN asset_localizations l ON l.asset_id=a.id AND l.locale=?1
- UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url,m.author FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id
+ UNION ALL SELECT c.id,c.media_entry_id,'media',m.kind,m.name,m.description,m.created_at,m.updated_at,m.deleted_at,m.source_url,m.author FROM asset_core c JOIN media_entries m ON m.id=c.media_entry_id WHERE EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=m.id AND w.workspace='materials')
  UNION ALL SELECT c.id,c.entity_id,'entity',e.kind,e.name,e.description,e.created_at,e.updated_at,e.deleted_at,'','' FROM asset_core c JOIN asset_entities e ON e.id=c.entity_id)
 ";
 

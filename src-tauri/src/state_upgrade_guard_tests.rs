@@ -46,7 +46,7 @@ fn upgrade_schema_guard_backs_up_old_schema_even_when_app_version_matches() {
         &mut None,
     )
     .unwrap();
-    assert_eq!(schema(&path), "39");
+    assert_eq!(schema(&path), "40");
     let record = settings
         .upgrade_backups
         .get(&upgrade_backup::library_key(&path).unwrap())
@@ -120,7 +120,7 @@ fn upgrade_schema_guard_failed_switch_keeps_the_current_library() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "39"
+                "40"
             );
             Ok(())
         })
@@ -441,5 +441,5 @@ fn upgrade_schema_guard_interrupted_restore_can_retry_after_backup_failure() {
     fs::remove_file(&blocker).unwrap();
     state.recover_interrupted_restore().unwrap();
     assert!(!marker.exists());
-    assert_eq!(schema(&path), "39");
+    assert_eq!(schema(&path), "40");
 }

@@ -3,6 +3,66 @@ use crate::state::test_state;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn course_membership_is_derived_and_explicit_learning_membership_survives_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    state.with_library(|db, _| {
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('video','video','New','file','now','now')", []).unwrap();
+        db.execute("INSERT INTO learning_courses(id,media_entry_id,created_at,updated_at) VALUES('course','video','now','now')", []).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id='video' AND workspace='learning'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        db.execute("DELETE FROM learning_courses WHERE id='course'", []).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id='video' AND workspace='learning'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('video','learning')", []).unwrap();
+        db.execute("INSERT INTO learning_courses(id,media_entry_id,created_at,updated_at) VALUES('course','video','now','now')", []).unwrap();
+        db.execute("DELETE FROM learning_courses WHERE id='course'", []).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id='video' AND workspace='learning'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn new_media_acquires_materials_membership_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    state.with_library(|db, _| {
+        db.execute_batch("BEGIN; INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('m1','video','New','file','now','now');").unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='m1' AND workspace='materials'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='m1'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn learning_membership_upgrade_preserves_existing_visibility_and_course_progress() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    state.with_library(|db, _| {
+        db.execute_batch("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('legacy-video','video','Legacy','legacy-file','now','now'); INSERT INTO learning_courses(id,media_entry_id,position_ms,created_at,updated_at) VALUES('legacy-course','legacy-video',1234,'now','now'); DROP TABLE IF EXISTS media_workspace_memberships; UPDATE schema_meta SET value='39' WHERE key='schema_version';").unwrap();
+        super::migrate(db)?;
+        let memberships: String = db.query_row("SELECT group_concat(workspace, ',') FROM (SELECT workspace FROM media_workspace_memberships WHERE media_entry_id='legacy-video' ORDER BY workspace)", [], |row| row.get(0)).unwrap();
+        assert_eq!(memberships, "learning,materials");
+        assert_eq!(db.query_row("SELECT position_ms FROM learning_courses WHERE id='legacy-course'", [], |row| row.get::<_, i64>(0)).unwrap(), 1234);
+        super::migrate(db)?;
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id='legacy-video'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn learning_membership_upgrade_rolls_back_when_version_update_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(&temp.path().join("library"));
+    state.with_library(|db, _| {
+        db.execute_batch("DROP TABLE media_workspace_memberships; UPDATE schema_meta SET value='39' WHERE key='schema_version'; CREATE TRIGGER reject_v40 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='40' BEGIN SELECT RAISE(ABORT,'rollback'); END;").unwrap();
+        assert!(super::migrate(db).is_err());
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |row| row.get::<_, String>(0)).unwrap(), "39");
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='media_workspace_memberships'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn learning_import_course_revert_capacity_upgrade_is_atomic_and_preserves_reports() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));
@@ -26,7 +86,7 @@ fn learning_import_course_revert_capacity_upgrade_is_atomic_and_preserves_report
         assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"38");
         assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
         db.execute_batch("DROP TRIGGER reject_v39").unwrap();super::migrate(db)?;super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"39");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"40");
         assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
         let large=serde_json::json!({"data":"x".repeat(70000)}).to_string();
         db.execute("UPDATE learning_import_reverts SET report_json=?1 WHERE batch_id=?2",rusqlite::params![large,batch]).unwrap();
@@ -490,7 +550,7 @@ fn learning_import_course_batch_schema_upgrade_rolls_back_and_preserves_note_bat
         super::migrate(db)?;
         super::migrate(db)?;
         assert_eq!(db.query_row("SELECT batch_kind FROM learning_import_batches WHERE id=?1",[&note.id],|r| r.get::<_,String>(0)).unwrap(),"notes");
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"39");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"40");
         Ok(())
     }).unwrap();
     assert_eq!(

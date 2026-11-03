@@ -312,6 +312,10 @@ fn learning_import_course_preview_unresolved_and_invalid_bindings() {
     assert!(preview_courses(&source, &target, &[binding("missing", &media)]).is_err());
     assert!(source.is_autocommit());
     assert!(target.is_autocommit());
+    // Simulate a source target changed by an older client outside the current guard.
+    target
+        .execute_batch("DROP TRIGGER media_workspace_protect_learning_trash")
+        .unwrap();
     target
         .execute(
             "UPDATE media_entries SET deleted_at='now' WHERE id=?1",
@@ -621,6 +625,10 @@ fn learning_import_course_preview_fingerprints_track_source_and_target_independe
         membership_changed.target_fingerprint,
         different_missing.target_fingerprint
     );
+    // Simulate a source target changed by an older client outside the current guard.
+    target
+        .execute_batch("DROP TRIGGER media_workspace_protect_learning_trash")
+        .unwrap();
     target
         .execute(
             "UPDATE media_entries SET deleted_at='now' WHERE id=?1",

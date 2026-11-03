@@ -99,7 +99,7 @@ fn learning_import_production_sqlite_rejects_unrevertible_batch_at_preview() {
         &selected.selection_id,
         vec![CourseMediaBinding {
             source_item_id: "single".into(),
-            media_id: media,
+            media_id: media.clone(),
         }],
         Some(vec!["series-2".into()]),
     )
@@ -115,6 +115,10 @@ fn learning_import_production_sqlite_rejects_unrevertible_batch_at_preview() {
     assert_eq!(result["status"], "committed");
     assert_eq!(result["receipt"]["coursesCommitted"], 1);
     assert_eq!(result["receipt"]["seriesCommitted"], 1);
+    state.with_library(|db,_| {
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id=?1 AND workspace='learning'",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);
+        Ok(())
+    }).unwrap();
     let report = super::course_apply::revert_course_batch(
         &state,
         &scope,
@@ -123,6 +127,11 @@ fn learning_import_production_sqlite_rejects_unrevertible_batch_at_preview() {
     )
     .unwrap();
     assert_eq!(report["reverted"].as_array().unwrap().len(), 2);
+    state.with_library(|db,_| {
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id=?1 AND workspace='learning'",[&media],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id=?1 AND workspace='materials'",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);
+        Ok(())
+    }).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), source_before);
 }
 

@@ -10,7 +10,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 39;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 40;
 pub(crate) const FUTURE_SCHEMA_ERROR: &str = "此素材库由更新版本创建，请使用更新版本打开";
 
 pub(crate) fn schema_version(connection: &Connection) -> Result<u32, String> {
@@ -2126,6 +2126,7 @@ pub fn restore_trash_batch(
         .map_err(|e| e.to_string())?;
     transaction.execute("UPDATE media_folders SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction.execute("UPDATE media_entries SET deleted_at=NULL,delete_batch_id=NULL WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
+    transaction.execute("INSERT OR IGNORE INTO media_workspace_memberships(media_entry_id,workspace) SELECT media_entry_id,workspace FROM media_workspace_trash WHERE batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction.execute("UPDATE asset_entities SET deleted_at=NULL,delete_batch_id=NULL,revision=revision+1 WHERE delete_batch_id=?1",[batch_id]).map_err(|e|e.to_string())?;
     transaction
         .execute("DELETE FROM deletion_batches WHERE id=?1", [batch_id])
@@ -3467,7 +3468,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "39");
+        assert_eq!(version, "40");
         assert_eq!(fab_listing_id, "06003f78-9a59-4fb8-abbc-14dc276f0b4a");
         assert_eq!(link_status, "unknown");
         assert_eq!(localized, "旧素材");

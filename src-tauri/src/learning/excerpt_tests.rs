@@ -99,6 +99,9 @@ fn learning_excerpt_rejects_missing_duplicate_cross_course_and_oversized_selecti
     db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) SELECT ?1,kind,'other',primary_file_id,created_at,updated_at FROM media_entries LIMIT 1",[&media]).unwrap();
     let other = super::store::ensure_course(&db, &media).unwrap();
     assert!(prepare_text(&db, root.path(), &other.id, &selection).is_err());
+    // Simulate an older client changing media outside the current guard.
+    db.execute_batch("DROP TRIGGER media_workspace_protect_learning_trash")
+        .unwrap();
     db.execute("UPDATE media_entries SET deleted_at='now' WHERE id=(SELECT media_entry_id FROM learning_courses WHERE id=?1)",[&course]).unwrap();
     assert!(prepare_text(&db, root.path(), &course, &selection).is_err());
 }

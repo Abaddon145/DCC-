@@ -180,7 +180,7 @@ fn learning_note_preview_backup_restores_bytes_but_revokes_old_approvals() {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-                "39"
+                "40"
             );
             Ok(())
         })
@@ -236,7 +236,7 @@ fn learning_note_preview_v27_upgrade_keeps_note_json_and_raw_registration() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "39"
+        "40"
     );
 }
 
