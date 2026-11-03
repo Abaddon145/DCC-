@@ -27,7 +27,7 @@ export function MembershipMigration({libraryId}:{libraryId:string}) {
   };
   return <section aria-label="整理已有视频归属">
     <h3>整理已有视频归属</h3>
-    <p>选择视频属于素材库、学习库或两者。调整只改变归属，不移动或删除文件；有课程的视频必须保留学习归属。</p>
+    <p>选择视频属于素材库、学习库或两者。调整只改变归属，不移动或删除文件；有课程的视频必须保留学习归属。确认后，其他待确认的迁入预检会失效，需要重新选择来源并预检。</p>
     {error&&<p role="alert">{error}<button type="button" disabled={busy} onClick={()=>setRefresh(value=>value+1)}>重新读取</button></p>}
     {notice&&<p role="status">{notice}</p>}
     {!page&&!error&&<p role="status">正在读取视频…</p>}

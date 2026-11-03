@@ -18,5 +18,5 @@ export function LearningVideoImport({libraryId}:{libraryId:string}) {
     }catch(reason){setError(`未能提交导入：${String(reason)}`);}
     finally{running.current=false;setBusy(false);}
   };
-  return <section aria-label="导入学习视频"><h3>导入本地教程</h3><p>选择的视频会作为新课程加入学习库，原文件不会被删除；已有素材需先确认归属。</p><button type="button" disabled={busy} onClick={()=>void choose()}>导入本地教程…</button>{status&&<p role="status">{status}</p>}{error&&<p role="alert">{error}</p>}</section>;
+  return <section aria-label="导入学习视频"><h3>导入本地教程</h3><p>选择的视频会作为新课程加入学习库，原文件不会被删除；已有素材需先确认归属。</p><button type="button" className="primary-button" disabled={busy} onClick={()=>void choose()}>导入本地教程…</button>{status&&<p role="status">{status}</p>}{error&&<p role="alert">{error}</p>}</section>;
 }
