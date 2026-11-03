@@ -767,6 +767,7 @@ pub fn set_project_shot_video(
         .map_err(|e| e.to_string())?
         .ok_or("镜头不存在")?;
     if let Some(id) = entry_id {
+        crate::media_library::require_materials_entries(connection, &[id.to_string()])?;
         let valid = connection.query_row("SELECT EXISTS(SELECT 1 FROM media_entries WHERE id=?1 AND kind='video' AND deleted_at IS NULL)", [id], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())? != 0;
         if !valid {
             return Err("视频库条目不存在或不是视频".into());
@@ -1221,6 +1222,10 @@ mod tests {
         let project_id = saved.summary.id;
         connection.execute("INSERT INTO project_units(id,project_id,kind,name,created_at,updated_at) VALUES('shot-1',?1,'shot','SH010','now','now')", [&project_id]).unwrap();
         assert!(set_project_shot_video(&mut connection, "shot-1", Some("cover-image")).is_err());
+        connection.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('another-video','learning')", []).unwrap();
+        connection.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id='another-video' AND workspace='materials'", []).unwrap();
+        assert!(set_project_shot_video(&mut connection, "shot-1", Some("another-video")).is_err());
+        connection.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('another-video','materials')", []).unwrap();
         set_project_shot_video(&mut connection, "shot-1", Some("shot-video")).unwrap();
         let linked = get_project(&connection, &project_id, "zh-CN", false).unwrap();
         assert_eq!(
