@@ -116,6 +116,8 @@ pub struct CourseAnalysisOptions {
     pub frame_times_ms: Vec<u64>,
     #[serde(default)]
     pub template_id: Option<String>,
+    #[serde(default)]
+    pub template_version: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -183,6 +185,8 @@ pub struct PreparedCourseAnalysis {
     pub segments: Vec<CourseSegment>,
     pub frames: Vec<CourseFrameImage>,
     pub format_version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_focus: Option<String>,
     // Omitted, not null: existing segment snapshot bytes/hashes stay compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<super::analysis_summary::SummaryContext>,

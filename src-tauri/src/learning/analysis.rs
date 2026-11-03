@@ -20,6 +20,22 @@ pub(crate) fn template_instructions(id: &str, version: i64) -> Result<&'static s
     }
 }
 
+pub(crate) fn snapshot_instructions(input: &PreparedCourseAnalysis) -> Result<&str, String> {
+    if let Some(focus) = input.template_focus.as_deref() {
+        uuid::Uuid::parse_str(&input.preview.template_id).map_err(|_| "自定义模板标识无效")?;
+        if input.preview.template_version < 1
+            || focus.trim() != focus
+            || focus.is_empty()
+            || focus.len() > 4000
+        {
+            return Err("自定义模板快照无效".into());
+        }
+        Ok(focus)
+    } else {
+        template_instructions(&input.preview.template_id, input.preview.template_version)
+    }
+}
+
 pub(crate) fn prepare_summary(
     state: &crate::state::AppState,
     library: &str,
@@ -60,12 +76,11 @@ pub fn get(
     )?;
     if let Some(input) = snapshot {
         if check_sources(state, library, &input).is_err() {
-            detail
-                .stale_reasons
-                .push("课程原件、字幕、汇总谱系或本机访问批准已改变；结果仅作为历史查看".into());
+            detail.stale_reasons.push(
+                "课程原件、字幕、模板、汇总谱系或本机访问批准已改变；结果仅作为历史查看".into(),
+            );
         }
-        if template_instructions(&input.preview.template_id, input.preview.template_version)
-            .is_err()
+        if snapshot_instructions(&input).is_err()
             || input.preview.prompt_version
                 != if input.summary.is_some() {
                     super::analysis_summary::PROMPT_VERSION
@@ -95,7 +110,6 @@ pub fn prepare(
     use super::analysis_store as store;
     use base64::Engine;
     let template_id = options.template_id.as_deref().unwrap_or(store::TEMPLATE_ID);
-    template_instructions(template_id, store::TEMPLATE_VERSION)?;
     if options.frame_times_ms.len() > 4096 * 6
         || options.frame_times_ms.iter().collect::<HashSet<_>>().len()
             != options.frame_times_ms.len()
@@ -103,6 +117,22 @@ pub fn prepare(
         return Err("采样时间重复或超过课程分段容量".into());
     }
     let live = live_source(state, library, course, options.subtitle_id.as_deref(), true)?;
+    let (template_version, template_focus) = if uuid::Uuid::parse_str(template_id).is_ok() {
+        let template = super::analysis_templates::get(&live.db, template_id)?;
+        if options.template_version != Some(template.version) {
+            return Err("模板已变化，请重新读取后预览".into());
+        }
+        (template.version, Some(template.focus))
+    } else {
+        if options
+            .template_version
+            .is_some_and(|version| version != store::TEMPLATE_VERSION)
+        {
+            return Err("分析模板版本已变化，请重新预览".into());
+        }
+        template_instructions(template_id, store::TEMPLATE_VERSION)?;
+        (store::TEMPLATE_VERSION, None)
+    };
     let duration = live
         .course
         .duration_ms
@@ -174,7 +204,7 @@ pub fn prepare(
             frame_ids: refs.iter().map(|f| f.id.clone()).collect(),
             model: crate::translation_service::MODEL.into(),
             template_id: template_id.into(),
-            template_version: store::TEMPLATE_VERSION,
+            template_version,
             prompt_version: store::PROMPT_VERSION.into(),
             created_at: now,
             expires_at: now + 86400,
@@ -192,6 +222,7 @@ pub fn prepare(
         segments,
         frames,
         format_version: store::FORMAT_VERSION,
+        template_focus,
         summary: None,
     };
     for segment in &input.segments {
@@ -314,6 +345,12 @@ pub(crate) fn check_sources_controlled(
         false,
         stop,
     )?;
+    if let Some(focus) = input.template_focus.as_deref() {
+        let current = super::analysis_templates::get(&live.db, &input.preview.template_id)?;
+        if current.version != input.preview.template_version || current.focus != focus {
+            return Err("分析模板已变化，请重新预览".into());
+        }
+    }
     if live.file_id != input.source_file_id
         || live.sha != input.source_sha256
         || live.subtitle_sha != input.subtitle_sha256
@@ -373,7 +410,7 @@ pub(crate) fn request_body(
             .ok_or("课程阶段采样缺失")?;
         content.push(json!({"type":"image_url","image_url":{"url":frame.data_url}}));
     }
-    let focus = template_instructions(&input.preview.template_id, input.preview.template_version)?;
+    let focus = snapshot_instructions(input)?;
     let instructions = if focus.is_empty() {
         RESULT_INSTRUCTIONS.to_string()
     } else {

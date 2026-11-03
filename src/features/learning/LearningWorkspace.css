@@ -27,8 +27,9 @@
 .learning-analysis legend {padding:0 4px;}
 .learning-analysis-whisper {padding:12px;border:1px dashed var(--border);border-radius:var(--radius-sm);display:grid;gap:8px;}
 .learning-analysis-whisper h3 {margin:0;}
-.learning-analysis :is(select,input:not([type=checkbox])) {width:100%;min-width:0;background:var(--panel);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;font:inherit;}
-.learning-analysis :is(button,select,input):focus-visible {outline:2px solid var(--accent);outline-offset:2px;scroll-margin-block:16px;}
+.learning-analysis :is(select,textarea,input:not([type=checkbox])) {width:100%;min-width:0;background:var(--panel);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;font:inherit;}
+.learning-analysis textarea {min-height:100px;resize:vertical;}
+.learning-analysis :is(button,select,input,textarea):focus-visible {outline:2px solid var(--accent);outline-offset:2px;scroll-margin-block:16px;}
 .learning-analysis button {min-height:34px;white-space:normal;text-align:left;}.learning-analysis :is(ul,ol) {padding-left:20px;}.learning-analysis summary {cursor:pointer;padding-block:8px;}
 .learning-analysis-preview {padding:12px;border:1px solid var(--accent);border-radius:var(--radius-md);margin:12px 0;background:var(--panel);}
 .learning-analysis label.learning-analysis-consent {display:flex;align-items:flex-start;gap:8px;margin:12px 0;}.learning-analysis-consent input {min-width:24px;width:24px;height:24px;accent-color:var(--accent);}

@@ -111,6 +111,9 @@ pub fn fingerprint(input: &PreparedCourseAnalysis) -> Result<String, String> {
     if let Some(summary) = &input.summary {
         material["summary"] = serde_json::to_value(summary).map_err(|_| "汇总材料无法编码")?;
     }
+    if let Some(focus) = &input.template_focus {
+        material["templateFocus"] = serde_json::json!(focus);
+    }
     let bytes = serde_json::to_vec(&material).map_err(|_| "课程材料无法编码")?;
     Ok(hash(bytes))
 }
@@ -175,7 +178,7 @@ fn validate(input: &PreparedCourseAnalysis) -> Result<(), String> {
         || p.expires_at.checked_sub(p.created_at) != Some(86400)
         || input.format_version != FORMAT_VERSION
         || p.model != crate::translation_service::MODEL
-        || super::analysis::template_instructions(&p.template_id, p.template_version).is_err()
+        || super::analysis::snapshot_instructions(input).is_err()
         || p.prompt_version
             != if input.summary.is_some() {
                 super::analysis_summary::PROMPT_VERSION

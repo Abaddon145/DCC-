@@ -3,6 +3,42 @@ use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
 #[tauri::command]
+pub fn list_course_analysis_templates(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<Vec<super::analysis_templates::CustomTemplate>, String> {
+    super::analysis_templates::list(&state, &expected_library_id)
+}
+
+#[tauri::command]
+pub fn save_course_analysis_template(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: Option<String>,
+    version: Option<i64>,
+    name: String,
+    focus: String,
+) -> Result<super::analysis_templates::CustomTemplate, String> {
+    super::analysis_templates::save(
+        &state,
+        &expected_library_id,
+        id.as_deref(),
+        version,
+        &name,
+        &focus,
+    )
+}
+
+#[tauri::command]
+pub fn delete_course_analysis_template(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    version: i64,
+) -> Result<(), String> {
+    super::analysis_templates::remove(&state, &expected_library_id, &id, version)
+}
+#[tauri::command]
 pub async fn prepare_learning_note_jump(
     app: tauri::AppHandle,
     expected_library_id: String,

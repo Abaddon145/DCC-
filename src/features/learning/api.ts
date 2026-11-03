@@ -1,7 +1,7 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
 import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
-import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem} from "./types";
+import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisTemplate} from "./types";
 import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./types";
 import type {ExcerptTaskRequest,ExcerptDestination,StoredExcerpt,ExcerptOperation,ExcerptOperationSummary,ExcerptTargets} from "./types";
 import type {LibraryTask} from "../../types";
@@ -86,6 +86,9 @@ export const learningApi={
   installTranscriptionTools:(expectedLibraryId:string,selectedResourceRoot:string)=>invoke<import("./types").WhisperComponentStatus>("install_learning_transcription_tools",{expectedLibraryId,selectedResourceRoot}),
   listCourseAnalyses:(expectedLibraryId:string,courseId:string,offset=0,limit=50)=>invoke<Page<CourseAnalysisHistoryItem>>("list_course_analyses",{expectedLibraryId,courseId,offset,limit}),
   getCourseAnalysis:(expectedLibraryId:string,courseId:string,analysisId:string,stageKey:string|null=null,offset=0,limit=50)=>invoke<CourseAnalysisDetail>("get_course_analysis",{expectedLibraryId,courseId,analysisId,stageKey,offset,limit}),
+  listCourseAnalysisTemplates:(expectedLibraryId:string)=>invoke<CourseAnalysisTemplate[]>("list_course_analysis_templates",{expectedLibraryId}),
+  saveCourseAnalysisTemplate:(expectedLibraryId:string,id:string|null,version:number|null,name:string,focus:string)=>invoke<CourseAnalysisTemplate>("save_course_analysis_template",{expectedLibraryId,id,version,name,focus}),
+  deleteCourseAnalysisTemplate:(expectedLibraryId:string,id:string,version:number)=>invoke<void>("delete_course_analysis_template",{expectedLibraryId,id,version}),
   prepareCourseAnalysis:(expectedLibraryId:string,courseId:string,options:CourseAnalysisOptions)=>invoke<CourseAnalysisPreview>("prepare_course_analysis",{expectedLibraryId,courseId,options}),
   prepareCourseSummary:(expectedLibraryId:string,courseId:string,parentAnalysisId:string)=>invoke<CourseAnalysisPreview>("prepare_course_summary",{expectedLibraryId,courseId,parentAnalysisId}),
   previewExternalVideo:(expectedLibraryId:string,path:string)=>invoke<ExternalVideoPreview>("preview_external_video",{expectedLibraryId,path}),

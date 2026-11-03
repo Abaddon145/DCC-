@@ -290,7 +290,7 @@ fn learning_import_course_revert_capacity_upgrade_is_atomic_and_preserves_report
         assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"38");
         assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
         db.execute_batch("DROP TRIGGER reject_v39").unwrap();super::migrate(db)?;super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"40");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"41");
         assert_eq!(db.query_row("SELECT report_json FROM learning_import_reverts WHERE batch_id=?1",[&batch],|r|r.get::<_,String>(0)).unwrap(),report);
         let large=serde_json::json!({"data":"x".repeat(70000)}).to_string();
         db.execute("UPDATE learning_import_reverts SET report_json=?1 WHERE batch_id=?2",rusqlite::params![large,batch]).unwrap();
@@ -754,7 +754,7 @@ fn learning_import_course_batch_schema_upgrade_rolls_back_and_preserves_note_bat
         super::migrate(db)?;
         super::migrate(db)?;
         assert_eq!(db.query_row("SELECT batch_kind FROM learning_import_batches WHERE id=?1",[&note.id],|r| r.get::<_,String>(0)).unwrap(),"notes");
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"40");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r| r.get::<_,String>(0)).unwrap(),"41");
         Ok(())
     }).unwrap();
     assert_eq!(

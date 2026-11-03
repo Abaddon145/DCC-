@@ -230,7 +230,7 @@ fn learning_analysis_v25_migration_and_competing_confirmation_keep_identity() {
             |r| r.get::<_, String>(0)
         )
         .unwrap(),
-        "40"
+        "41"
     );
     super::analysis_store::save_preview(&db, dir.path(), &input).unwrap();
     let barrier = std::sync::Barrier::new(2);
@@ -295,6 +295,7 @@ fn learning_analysis_prepare_real_frames_are_stable_and_failed_decode_publishes_
         subtitle_id: None,
         frame_times_ms: vec![0, 100, 200, 300, 400, 500, 600],
         template_id: None,
+        template_version: None,
     };
     let first =
         super::analysis::prepare(&state, &library, &old.preview.course_id, &options, None).unwrap();
@@ -680,6 +681,7 @@ pub(super) fn stored_fixture() -> (
         segments,
         frames: vec![],
         format_version: 1,
+        template_focus: None,
         summary: None,
     };
     input.preview.fingerprint = super::analysis_store::fingerprint(&input).unwrap();
@@ -897,6 +899,7 @@ fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_fai
         subtitle_id: Some(track.id.clone()),
         frame_times_ms: vec![],
         template_id: None,
+        template_version: None,
     };
     let p = super::analysis::prepare(&state, &library, &old.preview.course_id, &options, None)
         .expect("prepare only reads local sources");
@@ -921,6 +924,57 @@ fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_fai
             .to_string()
             .contains("操作步骤")
     );
+    let custom =
+        super::analysis_templates::save(&state, &library, None, None, "材质拆解", "关注节点连接")
+            .unwrap();
+    let mut custom_options = options.clone();
+    custom_options.template_id = Some(custom.id.clone());
+    custom_options.template_version = Some(custom.version);
+    let custom_preview = super::analysis::prepare(
+        &state,
+        &library,
+        &old.preview.course_id,
+        &custom_options,
+        None,
+    )
+    .unwrap();
+    let custom_input = super::analysis::load_confirmed(
+        &state,
+        &library,
+        &custom_preview.course_id,
+        &custom_preview.preview_id,
+    )
+    .unwrap();
+    assert!(
+        super::analysis::request_body(&custom_input, &custom_input.segments[0])
+            .unwrap()
+            .to_string()
+            .contains("关注节点连接")
+    );
+    super::analysis_templates::save(
+        &state,
+        &library,
+        Some(&custom.id),
+        Some(custom.version),
+        "材质拆解",
+        "关注参数",
+    )
+    .unwrap();
+    assert!(super::analysis::prepare(
+        &state,
+        &library,
+        &custom_preview.course_id,
+        &custom_options,
+        None
+    )
+    .is_err());
+    assert!(super::analysis::load_confirmed(
+        &state,
+        &library,
+        &custom_preview.course_id,
+        &custom_preview.preview_id
+    )
+    .is_err());
     let input =
         super::analysis::load_confirmed(&state, &library, &old.preview.course_id, &p.preview_id)
             .unwrap();

@@ -300,7 +300,7 @@ fn learning_note_origins_upgrade_is_transactional() {
         db.execute_batch("DROP TRIGGER reject_v32;").unwrap();
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "40");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |r| r.get::<_,String>(0)).unwrap(), "41");
         assert_eq!(db.query_row("SELECT count(*) FROM learning_source_profiles WHERE id=?1", [&source.id], |r| r.get::<_,i64>(0)).unwrap(), 1);
         Ok(())
     }).unwrap();

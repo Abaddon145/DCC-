@@ -5,9 +5,10 @@ import {useRequestGate} from "../../lib/workspace";
 import type {LibraryTask,Page} from "../../types";
 import {learningApi} from "./api";
 import {learningTime} from "./LearningControls";
-import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPreview,CourseAnalysisRequest,CourseAnalysisResult,LearningSubtitle,WhisperComponentStatus} from "./types";
+import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPreview,CourseAnalysisRequest,CourseAnalysisResult,CourseAnalysisTemplate,LearningSubtitle,WhisperComponentStatus} from "./types";
+import "./LearningWorkspace.css";
 
-export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;onSeek:(ms:number)=>void}
+export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;autoPrepare?:boolean;onSeek:(ms:number)=>void}
 type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
 const templates:Record<string,string>={general:"综合分析",tutorial_steps:"操作步骤",key_points:"核心要点",concepts:"术语与概念"};
@@ -56,9 +57,11 @@ function LocalWhisperOffer({libraryId,courseId,disabled,onSubtitle}:{libraryId:s
 }
 export function CourseAnalysisPanel(props:CourseAnalysisPanelProps){return <AnalysisContent key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 
-function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysisPanelProps){
+function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSeek}:CourseAnalysisPanelProps){
   const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState(""),[subtitleState,setSubtitleState]=useState<"loading"|"ready"|"error">("loading");
   const [templateId,setTemplateId]=useState("general");
+  const [customTemplates,setCustomTemplates]=useState<CourseAnalysisTemplate[]>([]),[templateReady,setTemplateReady]=useState(false),[templateBusy,setTemplateBusy]=useState(false),[templateRead,setTemplateRead]=useState(0);
+  const [templateDraft,setTemplateDraft]=useState<{id:string|null;version:number|null;name:string;focus:string}>({id:null,version:null,name:"",focus:""});
   const [subtitleRead,setSubtitleRead]=useState(0);
   const pendingSubtitle=useRef("");
   const [history,setHistory]=useState<Page<CourseAnalysisHistoryItem>>({items:[],total:0,offset:0,limit:50}),[offset,setOffset]=useState(0),[analysisId,setAnalysisId]=useState("");
@@ -69,6 +72,9 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
   const [error,setError]=useState(""),[notice,setNotice]=useState("");
   const gate=useRequestGate(),historyGate=useRequestGate(),resultGate=useRequestGate(),busyRef=useRef(false),watchTask=useRef("");
   const hintId=useId();
+  const autoStarted=useRef(false);
+  const templateOperation=useRef(false);
+  useEffect(()=>{let keep=true;void learningApi.listCourseAnalysisTemplates(libraryId).then(rows=>{if(keep){setCustomTemplates(rows);setTemplateId(value=>templates[value]||rows.some(row=>row.id===value)?value:"general");setTemplateReady(true);}}).catch(reason=>{if(keep)setError(`读取自定义模板失败：${String(reason)}`)});return()=>{keep=false};},[libraryId,templateRead]);
   useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(!keep)return;const wanted=pendingSubtitle.current;setSubtitles(rows);setSubtitleId(previous=>wanted&&rows.some(row=>row.id===wanted)?(pendingSubtitle.current="",wanted):preferredSubtitle(rows,previous));setSubtitleState("ready");}).catch(reason=>{if(keep){setError(String(reason));setSubtitleState("error");}});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
   const refresh=useCallback(async()=>{
     const ticket=historyGate.begin();
@@ -96,8 +102,17 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
   },[libraryId,courseId,analysisId,stageKey,stageOffset,revision,resultGate]);
   useEffect(()=>{if(!prepared)return;setNow(Date.now());const timer=window.setInterval(()=>setNow(Date.now()),1000);return()=>window.clearInterval(timer);},[prepared]);
   const invalidatePreview=()=>{gate.invalidate();setPrepared(null);setConsent(false);};
+  const saveTemplate=async()=>{
+    if(templateOperation.current||busyRef.current||!templateReady)return;templateOperation.current=true;setTemplateBusy(true);setError("");
+    try{const saved=await learningApi.saveCourseAnalysisTemplate(libraryId,templateDraft.id,templateDraft.version,templateDraft.name,templateDraft.focus);setCustomTemplates(rows=>[...rows.filter(row=>row.id!==saved.id),saved]);setTemplateId(saved.id);setTemplateDraft({id:saved.id,version:saved.version,name:saved.name,focus:saved.focus});invalidatePreview();setNotice("模板已保存；请重新预览后确认分析。");}
+    catch(reason){setError(`保存模板失败：${String(reason)}。可刷新模板后重试。`);}finally{templateOperation.current=false;setTemplateBusy(false);}
+  };
+  const deleteTemplate=async()=>{
+    if(templateOperation.current||busyRef.current||!templateDraft.id||templateDraft.version===null||!window.confirm("删除这个自定义模板？已保存的分析历史会保留。"))return;
+    templateOperation.current=true;setTemplateBusy(true);setError("");try{await learningApi.deleteCourseAnalysisTemplate(libraryId,templateDraft.id,templateDraft.version);setCustomTemplates(rows=>rows.filter(row=>row.id!==templateDraft.id));if(templateId===templateDraft.id)setTemplateId("general");setTemplateDraft({id:null,version:null,name:"",focus:""});invalidatePreview();setNotice("模板已删除，分析历史仍然保留。");}catch(reason){setError(`删除模板失败：${String(reason)}`);}finally{templateOperation.current=false;setTemplateBusy(false);}
+  };
   const prepare=async(phase:Phase,parent?:string)=>{
-    if(busyRef.current||active(task))return;
+    if(busyRef.current||templateOperation.current||active(task))return;
     busyRef.current=true;setBusy(true);setError("");setNotice("");setPrepared(null);setConsent(false);setPreviewOffset(0);const ticket=gate.begin();
     try{
       let value:CourseAnalysisPreview;
@@ -106,13 +121,15 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
         value=await learningApi.prepareCourseSummary(libraryId,courseId,parent);
       }else{
         const frameTimesMs=frameText.trim()?frameText.split(/[,，\s]+/).filter(Boolean).map(raw=>{const ms=Math.round(Number(raw)*1000);if(!/^(?:\d+(?:\.\d{1,3})?|\.\d{1,3})$/.test(raw)||!Number.isSafeInteger(ms))throw new Error("采样时间必须是非负秒数，最多三位小数。");return ms;}):[];
-        value=await learningApi.prepareCourseAnalysis(libraryId,courseId,{subtitleId:subtitleId||null,frameTimesMs,...(templateId==="general"?{}:{templateId})});
+        const custom=customTemplates.find(item=>item.id===templateId);
+        value=await learningApi.prepareCourseAnalysis(libraryId,courseId,{subtitleId:subtitleId||null,frameTimesMs,...(templateId==="general"?{}:{templateId}),...(custom?{templateVersion:custom.version}:{})});
       }
       if(gate.isCurrent(ticket)&&value.courseId===courseId){setPrepared({value,phase});setNow(Date.now());}
     }catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}finally{busyRef.current=false;if(gate.isCurrent(ticket))setBusy(false);}
   };
+  useEffect(()=>{if(autoPrepare&&!autoStarted.current&&!loading&&!templateBusy&&subtitleState==="ready"&&subtitles.some(row=>row.id===subtitleId&&row.cueCount>0)&&!active(task)){autoStarted.current=true;void prepare("segments");}},[autoPrepare,loading,templateBusy,subtitleState,subtitleId,subtitles,task]);
   const start=async()=>{
-    if(!prepared||!consent||busyRef.current||active(task))return;
+    if(!prepared||!consent||busyRef.current||templateOperation.current||active(task))return;
     if(prepared.value.expiresAt*1000<=Date.now()){setError("预览已过期，请重新预览并确认费用。");setConsent(false);return;}
     busyRef.current=true;setBusy(true);setError("");const ticket=gate.begin();
     try{
@@ -139,27 +156,34 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
     <form className="learning-analysis-form" onSubmit={event=>{event.preventDefault();void prepare("segments");}}>
       <fieldset>
         <legend>分析材料</legend>
-        <label>分析模板<select aria-label="分析模板" value={templateId} disabled={busy||active(task)} onChange={event=>{setTemplateId(event.target.value);invalidatePreview();}}>{Object.entries(templates).map(([id,name])=><option value={id} key={id}>{name}</option>)}</select></label>
+        <label>分析模板<select aria-label="分析模板" value={templateId} disabled={templateBusy||busy||active(task)} onChange={event=>{setTemplateId(event.target.value);invalidatePreview();}}>{Object.entries(templates).map(([id,name])=><option value={id} key={id}>{name}</option>)}{customTemplates.map(item=><option value={item.id} key={item.id}>{item.name} · 自定义</option>)}</select></label>
+        <details><summary>管理自定义模板</summary><p>填写希望重点分析的内容；保存或修改后，需要重新预览材料和费用。</p>
+          <button type="button" className="secondary-button" disabled={templateBusy||busy||active(task)} onClick={()=>{setTemplateReady(false);setTemplateDraft({id:null,version:null,name:"",focus:""});setError("");invalidatePreview();setTemplateRead(value=>value+1);}}>刷新模板</button>
+          {customTemplates.length>0&&<label>编辑已有模板<select aria-label="编辑已有模板" value={templateDraft.id||""} disabled={templateBusy||busy||active(task)} onChange={event=>{const row=customTemplates.find(item=>item.id===event.target.value);setTemplateDraft(row?{...row}:{id:null,version:null,name:"",focus:""});}}><option value="">新建模板</option>{customTemplates.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
+          <label>模板名称<input aria-label="模板名称" value={templateDraft.name} maxLength={80} disabled={templateBusy||busy||active(task)} onChange={event=>setTemplateDraft(old=>({...old,name:event.target.value}))}/></label>
+          <label>分析要求<textarea aria-label="分析要求" value={templateDraft.focus} maxLength={4000} disabled={templateBusy||busy||active(task)} onChange={event=>setTemplateDraft(old=>({...old,focus:event.target.value}))}/></label>
+          <button type="button" className="secondary-button" disabled={!templateReady||templateBusy||busy||active(task)||!templateDraft.name.trim()||!templateDraft.focus.trim()} onClick={()=>void saveTemplate()}>保存模板</button>{templateDraft.id&&<button type="button" className="secondary-button" disabled={templateBusy||busy||active(task)} onClick={()=>void deleteTemplate()}>删除模板</button>}
+        </details>
         <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{pendingSubtitle.current="";setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.length&&<option value="">无已导入字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id}>{s.name} · {s.cueCount} 段{s.cueCount?"":" · 无可用段落"}</option>)}</select></label>
         {subtitleState==="ready"&&usable&&<p role="status">将发送「{selectedSubtitle?.name}」的完整段落{frameText.trim()?"，并附加列出的 JPEG 采样帧":"，不附加画面"}。不会上传视频文件。</p>}
         {subtitleState==="ready"&&selectedSubtitle&&!usable&&<p role="status">所选字幕没有可用段落，不能作为文字来源。</p>}
         {subtitleState==="ready"&&!usable&&<LocalWhisperOffer libraryId={libraryId} courseId={courseId} disabled={busy||active(task)} onSubtitle={acceptTranscript}/>}
         <label>采样时间（秒）<input value={frameText} disabled={busy||active(task)} placeholder="例如 12.5, 30，可留空" aria-describedby={hintId} onChange={event=>{setFrameText(event.target.value);invalidatePreview();}}/></label>
         <p>留空表示不采样。填写的每个时间只抽取一张 JPEG，不是整段视频画面分析。</p>
-        <button className="secondary-button" disabled={busy||active(task)||loading} type="submit">预览分段分析</button>
+        <button className="secondary-button" disabled={templateBusy||busy||active(task)||loading} type="submit">预览分段分析</button>
       </fieldset>
     </form>
     {busy&&<LoadFeedback label="正在校验资料并处理请求…"/>}
     {prepared&&<section className="learning-analysis-preview" aria-label="分析费用预览">
       <h3>{prepared.phase==="summary"?"汇总":"分段"}确认</h3><p>本次上限 {prepared.value.tokensMax.toLocaleString("zh-CN")} Token · {prepared.value.model}</p>
-      <p>分析模板：{templates[prepared.value.templateId]||prepared.value.templateId} · 版本 {prepared.value.templateVersion}</p>
+      <p>分析模板：{templates[prepared.value.templateId]||customTemplates.find(item=>item.id===prepared.value.templateId)?.name||prepared.value.templateId} · 版本 {prepared.value.templateVersion}</p>
       <p>{prepared.value.stages.filter(s=>s.cached).length} 个阶段可复用缓存 · {prepared.value.frameIds.length} 个来源帧</p>
       <p>字幕：{subtitles.find(s=>s.id===prepared.value.subtitleId)?.name||(prepared.value.subtitleId?"快照中的字幕":"未使用字幕")}</p>
       <details><summary>查看 {prepared.value.stages.length} 个阶段范围</summary><ol start={previewOffset+1}>{prepared.value.stages.slice(previewOffset,previewOffset+50).map(s=><li key={s.key}>{learningTime(s.startMs)}—{learningTime(s.endMs)} · {s.cached?"缓存":"需请求"} · {s.tokensMax.toLocaleString("zh-CN")} Token</li>)}</ol>{prepared.value.stages.length>50&&<nav aria-label="预览阶段分页"><button className="secondary-button" disabled={!previewOffset} onClick={()=>setPreviewOffset(value=>Math.max(0,value-50))}>上一页预览</button><span>{Math.floor(previewOffset/50)+1} / {Math.ceil(prepared.value.stages.length/50)}</span><button className="secondary-button" disabled={previewOffset+50>=prepared.value.stages.length} onClick={()=>setPreviewOffset(value=>value+50)}>下一页预览</button></nav>}</details>
       {prepared.value.warnings.map((w,i)=><p key={i}>{w}</p>)}
       {expired&&<p role="status">预览已过期，请重新预览。</p>}
       <label className="learning-analysis-consent"><input type="checkbox" checked={consent} disabled={expired||busy} onChange={event=>setConsent(event.target.checked)}/>确认发送上述材料给 DeepSeek，并使用显示的额度</label>
-      <button className="primary-button" disabled={!consent||expired||busy||active(task)} onClick={()=>void start()}>确认并开始分析</button>
+      <button className="primary-button" disabled={!consent||expired||templateBusy||busy||active(task)} onClick={()=>void start()}>确认并开始分析</button>
     </section>}
     {active(task)&&<section aria-label="当前分析任务"><p role="status">{task!.phase||labels[task!.status]}{task!.total>0?` · ${task!.current} / ${task!.total}`:" · 等待实际阶段数量"}</p>{task!.total>0?<progress aria-label="分析任务进度" max={task!.total} value={task!.current}/>:<progress aria-label="分析任务进度"/>}<button className="secondary-button" disabled={busy||!task!.cancellable} onClick={()=>void cancel()}>取消分析任务</button></section>}
     <section aria-label="分析历史"><h3>分析历史</h3>{!loading&&!history.total&&<p>暂无分析记录。先预览资料和费用，再确认开始。</p>}

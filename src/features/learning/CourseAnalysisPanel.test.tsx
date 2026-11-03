@@ -6,7 +6,7 @@ import {api} from "../../lib/api";
 import type {CourseAnalysisDetail,CourseAnalysisPreview,CourseAnalysisHistoryItem,CourseAnalysisResult,WhisperComponentStatus} from "./types";
 import type {LibraryTask} from "../../types";
 
-vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn(),transcriptionComponents:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn(),transcriptionComponents:vi.fn(),listCourseAnalysisTemplates:vi.fn(),saveCourseAnalysisTemplate:vi.fn(),deleteCourseAnalysisTemplate:vi.fn()}}));
 vi.mock("../../lib/api",()=>({api:{startLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),cancelLibraryTask:vi.fn(),getLibraryTask:vi.fn()}}));
 const now=Math.floor(Date.now()/1000);
 const preview:CourseAnalysisPreview={previewId:"preview",courseId:"course",fingerprint:"a".repeat(64),subtitleId:"subtitle",frameIds:["frame"],model:"deepseek-chat",templateId:"general",templateVersion:1,promptVersion:"dcc-course-v1",createdAt:now,expiresAt:now+86400,stages:[{key:"s1",startMs:10000,endMs:12000,cached:true,tokensMax:5000},{key:"s2",startMs:40000,endMs:42000,cached:false,tokensMax:10000}],tokensMax:10000,warnings:["不上传整段视频"]};
@@ -17,6 +17,7 @@ const task:LibraryTask={id:"task",libraryId:"lib",label:"课程分段分析",sta
 const props={libraryId:"lib",courseId:"course",onSeek:vi.fn()};
 beforeEach(()=>{
   vi.clearAllMocks();
+  vi.mocked(learningApi.listCourseAnalysisTemplates).mockResolvedValue([]);
   vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"subtitle",courseId:"course",name:"学习字幕.srt",format:"srt",sha256:"a".repeat(64),cueCount:2}]);
   vi.mocked(learningApi.listCourseAnalyses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
   vi.mocked(learningApi.prepareCourseAnalysis).mockResolvedValue(preview);
@@ -27,6 +28,45 @@ beforeEach(()=>{
   vi.mocked(api.cancelLibraryTask).mockResolvedValue(undefined);
   vi.mocked(api.getLibraryTask).mockResolvedValue(task);
   vi.mocked(learningApi.transcriptionComponents).mockResolvedValue({version:"1.9.1",modelRevision:"fixed",toolReady:false,toolMessage:"工具未安装",models:[]});
+});
+it("saves a custom template and makes it available for analysis",async()=>{
+  vi.mocked(learningApi.saveCourseAnalysisTemplate).mockResolvedValue({id:"custom-id",name:"材质拆解",focus:"关注节点连接",version:1});
+  render(<CourseAnalysisPanel {...props}/>);
+  fireEvent.click(await screen.findByText("管理自定义模板"));
+  fireEvent.change(screen.getByLabelText("模板名称"),{target:{value:"材质拆解"}});
+  fireEvent.change(screen.getByLabelText("分析要求"),{target:{value:"关注节点连接"}});
+  fireEvent.click(screen.getByRole("button",{name:"保存模板"}));
+  await waitFor(()=>expect(learningApi.saveCourseAnalysisTemplate).toHaveBeenCalledWith("lib",null,null,"材质拆解","关注节点连接"));
+  expect(await screen.findByRole("option",{name:"材质拆解 · 自定义"})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button",{name:"预览分段分析"}));
+  await waitFor(()=>expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[],templateId:"custom-id",templateVersion:1}));
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("prevents duplicate template saves and preview while saving",async()=>{
+  let finish!:(value:{id:string;name:string;focus:string;version:number})=>void;
+  vi.mocked(learningApi.saveCourseAnalysisTemplate).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  render(<CourseAnalysisPanel {...props}/>);
+  fireEvent.click(await screen.findByText("管理自定义模板"));
+  fireEvent.change(screen.getByLabelText("模板名称"),{target:{value:"测试"}});
+  fireEvent.change(screen.getByLabelText("分析要求"),{target:{value:"关注步骤"}});
+  const save=screen.getByRole("button",{name:"保存模板"});fireEvent.click(save);fireEvent.click(save);
+  expect(learningApi.saveCourseAnalysisTemplate).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button",{name:"预览分段分析"})).toBeDisabled();
+  await act(async()=>finish({id:"new",name:"测试",focus:"关注步骤",version:1}));
+  expect(screen.getByRole("button",{name:"预览分段分析"})).toBeEnabled();
+});
+it("quickly prepares available subtitles without submitting a paid task",async()=>{
+  render(<CourseAnalysisPanel {...props} autoPrepare/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[]});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("quick analysis asks for materials when there are no subtitles",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);
+  render(<CourseAnalysisPanel {...props} autoPrepare/>);
+  await screen.findByText("没有可用字幕");
+  expect(learningApi.prepareCourseAnalysis).not.toHaveBeenCalled();
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
 });
 it("prepares the selected analysis template without starting a paid task",async()=>{
   render(<CourseAnalysisPanel {...props}/>);
