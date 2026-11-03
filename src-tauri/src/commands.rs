@@ -334,7 +334,10 @@ pub fn link_media_assets(
     entry_ids: Vec<String>,
     asset_ids: Vec<String>,
 ) -> Result<usize, String> {
-    state.with_library(|c, _| media_library::link_assets(c, entry_ids, asset_ids, true))
+    state.with_library(|c, _| {
+        media_library::require_materials_entries(c, &entry_ids)?;
+        media_library::link_assets(c, entry_ids, asset_ids, true)
+    })
 }
 #[tauri::command]
 pub fn unlink_media_assets(
@@ -362,6 +365,7 @@ pub fn link_project_media(
             .connection
             .as_ref()
             .ok_or("数据库正在维护，请稍后重试")?;
+        media_library::require_materials_entries(connection, &entry_ids)?;
         media_library::link_projects(connection, entry_ids, project_ids, true)
     })
 }

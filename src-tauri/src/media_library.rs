@@ -714,7 +714,7 @@ pub fn import_learning_controlled(
     connection: &mut Connection,
     base_dir: &Path,
     resource_dir: Option<&Path>,
-    request: MediaImportRequest,
+    mut request: MediaImportRequest,
     progress: &dyn Fn(usize, usize, String, &MediaImportReport),
     stop: &dyn Fn() -> bool,
 ) -> Result<MediaImportReport, String> {
@@ -725,6 +725,7 @@ pub fn import_learning_controlled(
     {
         return Err("学习库导入仅接受未指定素材文件夹和标签的视频".into());
     }
+    request.paths = expand_learning_sources(&request.paths, base_dir, stop)?;
     import_checked(
         connection,
         base_dir,
@@ -736,6 +737,165 @@ pub fn import_learning_controlled(
         None,
         true,
     )
+}
+
+fn expand_learning_sources(
+    paths: &[String],
+    base_dir: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Result<Vec<String>, String> {
+    if paths.len() > 500 {
+        return Err("一次最多选择 500 项".into());
+    }
+    let mut files = Vec::new();
+    for raw in paths {
+        if stop() {
+            return Err("扫描已取消，未开始导入".into());
+        }
+        let source = Path::new(raw);
+        if !source.is_dir() {
+            files.push(raw.clone());
+        } else {
+            if source.ancestors().any(crate::asset::scanner::is_link) {
+                return Err("不接受符号链接、junction 或重解析目录".into());
+            }
+            let root = source
+                .canonicalize()
+                .map_err(|e| format!("文件夹不可访问：{e}"))?;
+            let library = base_dir.canonicalize().map_err(|e| e.to_string())?;
+            if root.starts_with(&library)
+                || root
+                    .ancestors()
+                    .any(|p| p.join("library.json").is_file() && p.join("library.db").is_file())
+            {
+                return Err("请选择素材库之外的文件夹".into());
+            }
+            let walker = walkdir::WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    !crate::asset::scanner::is_link(e.path())
+                        && !e.path().starts_with(&library)
+                        && !matches!(
+                            e.file_name().to_str(),
+                            Some(".git" | ".dcc" | "node_modules" | "target")
+                        )
+                        && !(e.file_type().is_dir()
+                            && e.path().join("library.json").is_file()
+                            && e.path().join("library.db").is_file())
+                });
+            for (index, entry) in walker.enumerate() {
+                if stop() {
+                    return Err("扫描已取消，未开始导入".into());
+                }
+                if index >= 10000 {
+                    return Err("文件夹条目超过 10000 项，请选择较小的文件夹".into());
+                }
+                let entry = entry.map_err(|e| format!("读取文件夹失败：{e}"))?;
+                if entry.file_type().is_file()
+                    && crate::asset::scanner::kind(entry.path()) == Some("video")
+                {
+                    let checked = crate::asset::scanner::validate_source(entry.path(), base_dir)?;
+                    files.push(checked.to_str().ok_or("文件路径不是有效文本")?.to_owned());
+                    if files.len() > 500 {
+                        return Err("一次最多导入 500 个视频，请选择较小的文件夹".into());
+                    }
+                }
+            }
+        }
+        if files.len() > 500 {
+            return Err("一次最多导入 500 个视频".into());
+        }
+    }
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return Err("所选文件夹中没有支持的视频".into());
+    }
+    Ok(files)
+}
+
+#[cfg(test)]
+mod learning_folder_tests {
+    use super::*;
+
+    #[test]
+    fn materials_link_commands_reject_learning_only_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::db::open_database(&temp.path().join("db.sqlite")).unwrap();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES('lesson','video','lesson','file','now','now')", []).unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES('lesson','learning')", []).unwrap();
+        db.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id='lesson' AND workspace='materials'", []).unwrap();
+        assert!(require_materials_entries(&db, &["lesson".into()]).is_err());
+    }
+
+    #[test]
+    fn folder_expansion_finds_nested_videos_and_rejects_over_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(root.join("nested/lesson.MP4"), b"fixture").unwrap();
+        std::fs::write(root.join("ignore.txt"), b"fixture").unwrap();
+        let files =
+            expand_learning_sources(&[root.to_string_lossy().into()], &library, &|| false).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("lesson.MP4"));
+        for index in 0..500 {
+            std::fs::write(root.join(format!("{index}.mp4")), b"fixture").unwrap();
+        }
+        assert!(
+            expand_learning_sources(&[root.to_string_lossy().into()], &library, &|| false).is_err()
+        );
+        assert!(
+            expand_learning_sources(&[root.to_string_lossy().into()], &library, &|| true).is_err()
+        );
+    }
+
+    #[test]
+    fn folder_import_creates_learning_courses_without_materials_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source/nested");
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        let file = root.join("lesson.mp4");
+        std::fs::write(&file, b"synthetic video").unwrap();
+        let mut db = crate::db::open_database(&library.join("db.sqlite")).unwrap();
+        let report = import_learning_controlled(
+            &mut db,
+            &library,
+            None,
+            MediaImportRequest {
+                kind: MediaKind::Video,
+                paths: vec![temp.path().join("source").to_string_lossy().into()],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!((report.imported, report.failed), (1, 0));
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM learning_courses", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_workspace_memberships WHERE workspace='materials'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read(file).unwrap(), b"synthetic video");
+    }
 }
 
 pub fn import_controlled_with_capture(
@@ -1360,6 +1520,19 @@ pub fn link_assets(
         }
     }
     Ok(n)
+}
+
+pub(crate) fn require_materials_entries(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<(), String> {
+    for id in ids {
+        let allowed: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM media_entries e JOIN media_workspace_memberships w ON w.media_entry_id=e.id AND w.workspace='materials' WHERE e.id=?1 AND e.deleted_at IS NULL)", [id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if !allowed {
+            return Err("媒体条目不存在或不属于素材库".into());
+        }
+    }
+    Ok(())
 }
 pub fn link_projects(
     connection: &Connection,

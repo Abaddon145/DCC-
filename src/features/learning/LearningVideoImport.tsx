@@ -5,10 +5,10 @@ import {api} from "../../lib/api";
 export function LearningVideoImport({libraryId}:{libraryId:string}) {
   const [busy,setBusy]=useState(false),[status,setStatus]=useState(""),[error,setError]=useState("");
   const running=useRef(false);
-  const choose=async()=>{
+  const choose=async(folder=false)=>{
     if(running.current)return;running.current=true;setBusy(true);setStatus("");setError("");
     try{
-      const selected=await open({title:"选择本地教程视频",multiple:true,filters:[{name:"视频",extensions:["mp4","webm","mov","mkv"]}]});
+      const selected=folder?await open({title:"选择教程文件夹",directory:true,multiple:false}):await open({title:"选择本地教程视频",multiple:true,filters:[{name:"视频",extensions:["mp4","webm","mov","mkv"]}]});
       if(!selected)return;
       const paths=Array.isArray(selected)?selected:[selected];
       if(paths.length>500)throw new Error("一次最多选择 500 个视频");
@@ -18,5 +18,5 @@ export function LearningVideoImport({libraryId}:{libraryId:string}) {
     }catch(reason){setError(`未能提交导入：${String(reason)}`);}
     finally{running.current=false;setBusy(false);}
   };
-  return <section aria-label="导入学习视频"><h3>导入本地教程</h3><p>选择的视频会作为新课程加入学习库，原文件不会被删除；已有素材需先确认归属。</p><button type="button" className="primary-button" disabled={busy} onClick={()=>void choose()}>导入本地教程…</button>{status&&<p role="status">{status}</p>}{error&&<p role="alert">{error}</p>}</section>;
+  return <section aria-label="导入学习视频"><h3>导入本地教程</h3><p>选择的视频会作为新课程加入学习库，原文件不会被删除；已有素材需先确认归属。文件夹会包含子文件夹中的视频，一次最多 500 个；链接和其他素材库目录会跳过。</p><button type="button" className="primary-button" disabled={busy} onClick={()=>void choose()}>导入本地教程…</button> <button type="button" className="secondary-button" disabled={busy} onClick={()=>void choose(true)}>导入教程文件夹…</button>{status&&<p role="status">{status}</p>}{error&&<p role="alert">{error}</p>}</section>;
 }

@@ -4,17 +4,33 @@ use sha2::{Digest, Sha256};
 
 #[test]
 fn membership_confirmation_cannot_be_replayed_after_state_changes_back() {
-    use super::membership::{apply_for_library,preview_for_library,MembershipChange};
-    let dir=tempfile::tempdir().unwrap();let state=test_state(&dir.path().join("library"));
-    let library=state.active_library_id().unwrap();let media=uuid::Uuid::new_v4().to_string();
+    use super::membership::{apply_for_library, preview_for_library, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let media = uuid::Uuid::new_v4().to_string();
     state.with_library(|db,_| {db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[&media]).unwrap();Ok(())}).unwrap();
-    let first=preview_for_library(&state,&library,&media).unwrap();
-    let old=MembershipChange{media_id:media.clone(),expected_materials:true,expected_learning:false,expected_snapshot:first.snapshot,materials:false,learning:true};
-    apply_for_library(&state,&library,&[old.clone()]).unwrap();
-    let second=preview_for_library(&state,&library,&media).unwrap();
-    let back=MembershipChange{media_id:media.clone(),expected_materials:false,expected_learning:true,expected_snapshot:second.snapshot,materials:true,learning:false};
-    apply_for_library(&state,&library,&[back]).unwrap();
-    assert!(apply_for_library(&state,&library,&[old]).is_err());
+    let first = preview_for_library(&state, &library, &media).unwrap();
+    let old = MembershipChange {
+        media_id: media.clone(),
+        expected_materials: true,
+        expected_learning: false,
+        expected_snapshot: first.snapshot,
+        materials: false,
+        learning: true,
+    };
+    apply_for_library(&state, &library, &[old.clone()]).unwrap();
+    let second = preview_for_library(&state, &library, &media).unwrap();
+    let back = MembershipChange {
+        media_id: media.clone(),
+        expected_materials: false,
+        expected_learning: true,
+        expected_snapshot: second.snapshot,
+        materials: true,
+        learning: false,
+    };
+    apply_for_library(&state, &library, &[back]).unwrap();
+    assert!(apply_for_library(&state, &library, &[old]).is_err());
 }
 
 #[test]

@@ -250,8 +250,13 @@ pub fn apply_for_library(
     }
     let scope = super::source_profiles::scope(state, library_id)?;
     super::source_profiles::scoped(state, &scope, |db| {
-        let mut nonce=state.source_scope_nonce.lock().map_err(|_| "来源会话状态不可用")?;
-        if *nonce!=scope.session_nonce(){return Err("素材库会话已变化，请重新预览".into());}
+        let mut nonce = state
+            .source_scope_nonce
+            .lock()
+            .map_err(|_| "来源会话状态不可用")?;
+        if *nonce != scope.session_nonce() {
+            return Err("素材库会话已变化，请重新预览".into());
+        }
         let mut checked = Vec::with_capacity(changes.len());
         for change in changes {
             let raw = preview_one(db, &change.media_id)?.snapshot;
@@ -263,7 +268,7 @@ pub fn apply_for_library(
             checked.push(verified);
         }
         apply_changes(db, &checked)?;
-        *nonce=uuid::Uuid::new_v4();
+        *nonce = uuid::Uuid::new_v4();
         Ok(())
     })
 }

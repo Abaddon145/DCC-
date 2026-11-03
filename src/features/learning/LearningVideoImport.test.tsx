@@ -24,3 +24,12 @@ it("does not submit anything when file selection is cancelled",async()=>{
   await waitFor(()=>expect(open).toHaveBeenCalledOnce());
   expect(api.startLibraryTask).not.toHaveBeenCalled();
 });
+
+it("queues a selected tutorial folder for the learning library",async()=>{
+  vi.mocked(open).mockResolvedValue("C:/synthetic/course");
+  vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task-2"} as never);
+  render(<LearningVideoImport libraryId="lib"/>);
+  fireEvent.click(screen.getByRole("button",{name:"导入教程文件夹…"}));
+  await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningMediaImport",request:{kind:"video",paths:["C:/synthetic/course"],folderId:null,tags:[],favorite:false}},"lib"));
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({directory:true}));
+});
