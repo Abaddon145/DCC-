@@ -572,6 +572,46 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn backup_restores_learning_only_video_without_material_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = crate::state::test_state(&dir.path().join("source"));
+        let target = crate::state::test_state(&dir.path().join("target"));
+        let input = dir.path().join("synthetic.mp4");
+        let archive = dir.path().join("backup.dccassetlib");
+        std::fs::write(&input, b"synthetic lesson").unwrap();
+        source
+            .with_library_mut(|db, base| {
+                let report = crate::media_library::import_learning_controlled(
+                    db,
+                    base,
+                    None,
+                    crate::models::MediaImportRequest {
+                        kind: crate::models::MediaKind::Video,
+                        paths: vec![input.to_string_lossy().into()],
+                        folder_id: None,
+                        tags: vec![],
+                        favorite: false,
+                    },
+                    &|_, _, _, _| {},
+                    &|| false,
+                )?;
+                assert_eq!(report.imported, 1);
+                super::export_library(db, base, &archive)
+            })
+            .unwrap();
+        target
+            .with_active_mut(|active| super::restore_library(active, &archive))
+            .unwrap();
+        target.with_library(|db,base| {
+            assert_eq!(db.query_row("SELECT count(*) FROM learning_courses",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE workspace='materials'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let path:String=db.query_row("SELECT rel_path FROM media_files WHERE role='main'",[],|r|r.get(0)).unwrap();
+            assert_eq!(std::fs::read(base.join(path)).unwrap(),b"synthetic lesson");
+            Ok(())
+        }).unwrap();
+        assert_eq!(std::fs::read(input).unwrap(), b"synthetic lesson");
+    }
+    #[test]
     fn learning_data_backup_rejects_unsafe_learning_paths() {
         assert!(!super::allowed_backup_path(
             std::path::Path::new("learning-data/archives/note.md:stream"),

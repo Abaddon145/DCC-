@@ -669,6 +669,21 @@ impl AppState {
         f(connection, &base_dir)
     }
 
+    pub(crate) fn with_membership_invalidation<T>(
+        &self,
+        f: impl FnOnce(&mut Connection, &Path) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_library_mut(|db, base| {
+            let mut nonce = self
+                .source_scope_nonce
+                .lock()
+                .map_err(|_| "来源会话状态不可用")?;
+            let result = f(db, base);
+            *nonce = Uuid::new_v4();
+            result
+        })
+    }
+
     pub fn with_library_mut_if_id<T>(
         &self,
         library_id: &str,

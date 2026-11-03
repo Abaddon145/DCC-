@@ -274,7 +274,7 @@ pub fn update_media_entry(
 }
 #[tauri::command]
 pub fn delete_media_entries(state: State<AppState>, ids: Vec<String>) -> Result<usize, String> {
-    state.with_library_mut(|c, _| media_library::delete_entries(c, ids))
+    state.with_membership_invalidation(|c, _| media_library::delete_entries(c, ids))
 }
 #[tauri::command]
 pub fn batch_update_media_entries(
@@ -326,7 +326,7 @@ pub fn move_media_folder(
 }
 #[tauri::command]
 pub fn delete_media_folder(state: State<AppState>, id: String) -> Result<(), String> {
-    state.with_library_mut(|c, _| media_library::delete_folder(c, &id))
+    state.with_membership_invalidation(|c, _| media_library::delete_folder(c, &id))
 }
 #[tauri::command]
 pub fn link_media_assets(
@@ -1196,7 +1196,9 @@ pub fn restore_trash_batch(
     state: State<AppState>,
     batch_id: String,
 ) -> Result<DeleteResult, String> {
-    state.with_library_mut(|connection, _| db::restore_trash_batch(connection, &batch_id))
+    state.with_membership_invalidation(|connection, _| {
+        db::restore_trash_batch(connection, &batch_id)
+    })
 }
 
 #[tauri::command]

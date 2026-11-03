@@ -3,6 +3,37 @@ use crate::state::test_state;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn membership_preview_expires_after_trash_and_restore() {
+    use super::membership::{apply_for_library, preview_for_library, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let media = uuid::Uuid::new_v4().to_string();
+    state.with_library(|db,_| {db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[&media]).unwrap();db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES(?1,'learning')",[&media]).unwrap();Ok(())}).unwrap();
+    let preview = preview_for_library(&state, &library, &media).unwrap();
+    let change = MembershipChange {
+        media_id: media.clone(),
+        expected_materials: true,
+        expected_learning: true,
+        expected_snapshot: preview.snapshot,
+        materials: false,
+        learning: true,
+    };
+    state
+        .with_membership_invalidation(|db, _| {
+            crate::media_library::delete_entries(db, vec![media.clone()])
+        })
+        .unwrap();
+    let batch = state
+        .with_library(|db, _| Ok(crate::db::list_trash(db, 0, 10)?.items[0].id.clone()))
+        .unwrap();
+    state
+        .with_membership_invalidation(|db, _| crate::db::restore_trash_batch(db, &batch))
+        .unwrap();
+    assert!(apply_for_library(&state, &library, &[change]).is_err());
+}
+
+#[test]
 fn membership_confirmation_cannot_be_replayed_after_state_changes_back() {
     use super::membership::{apply_for_library, preview_for_library, MembershipChange};
     let dir = tempfile::tempdir().unwrap();
