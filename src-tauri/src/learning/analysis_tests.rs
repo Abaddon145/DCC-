@@ -294,6 +294,7 @@ fn learning_analysis_prepare_real_frames_are_stable_and_failed_decode_publishes_
     let options = CourseAnalysisOptions {
         subtitle_id: None,
         frame_times_ms: vec![0, 100, 200, 300, 400, 500, 600],
+        template_id: None,
     };
     let first =
         super::analysis::prepare(&state, &library, &old.preview.course_id, &options, None).unwrap();
@@ -866,6 +867,22 @@ fn learning_analysis_preview_storage_rejects_copy_tamper_and_failed_publication(
 }
 
 #[test]
+fn learning_analysis_builtin_templates_change_prompt_and_cache_identity() {
+    let (_dir, _db, mut input) = stored_fixture();
+    let general = super::analysis::request_body(&input, &input.segments[0]).unwrap();
+    let original = super::analysis_store::fingerprint(&input).unwrap();
+    input.preview.template_id = "tutorial_steps".into();
+    let steps = super::analysis::request_body(&input, &input.segments[0]).unwrap();
+    assert_ne!(general, steps);
+    assert_ne!(
+        original,
+        super::analysis_store::fingerprint(&input).unwrap()
+    );
+    input.preview.template_id = "unknown".into();
+    assert!(super::analysis::request_body(&input, &input.segments[0]).is_err());
+}
+
+#[test]
 fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_failure() {
     let (dir, db, old) = stored_fixture();
     let video = dir.path().join("fixture.mp4");
@@ -879,9 +896,31 @@ fn learning_analysis_prepare_checks_real_sources_and_keeps_consent_unused_on_fai
     let options = CourseAnalysisOptions {
         subtitle_id: Some(track.id.clone()),
         frame_times_ms: vec![],
+        template_id: None,
     };
     let p = super::analysis::prepare(&state, &library, &old.preview.course_id, &options, None)
         .expect("prepare only reads local sources");
+    let mut steps_options = options.clone();
+    steps_options.template_id = Some("tutorial_steps".into());
+    let steps = super::analysis::prepare(
+        &state,
+        &library,
+        &old.preview.course_id,
+        &steps_options,
+        None,
+    )
+    .unwrap();
+    assert_eq!(steps.template_id, "tutorial_steps");
+    assert_ne!(steps.fingerprint, p.fingerprint);
+    let steps_input =
+        super::analysis::load_confirmed(&state, &library, &steps.course_id, &steps.preview_id)
+            .unwrap();
+    assert!(
+        super::analysis::request_body(&steps_input, &steps_input.segments[0])
+            .unwrap()
+            .to_string()
+            .contains("操作步骤")
+    );
     let input =
         super::analysis::load_confirmed(&state, &library, &old.preview.course_id, &p.preview_id)
             .unwrap();

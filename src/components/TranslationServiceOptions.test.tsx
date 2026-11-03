@@ -16,6 +16,12 @@ const settings: TranslationSettings = {
 };
 describe("TranslationServiceOptions", () => {
   beforeEach(() => vi.resetAllMocks());
+  it("makes shared video analysis credentials and limits discoverable", () => {
+    render(<TranslationServiceOptions settings={settings} reload={vi.fn()} notify={vi.fn()} />);
+    expect(screen.getByRole("heading", {name:"视频分析设置"})).toBeInTheDocument();
+    expect(screen.getByText(/视频分析与翻译、创作共享同一个 DeepSeek 凭据和本机月度额度/)).toBeInTheDocument();
+    expect(screen.getByLabelText("DeepSeek 本机月度 Token 上限")).toBeInTheDocument();
+  });
   it("shows course usage separately without counting it as translation", () => {
     render(<TranslationServiceOptions settings={{ ...settings, usage: { ...settings.usage!, creativeTokens: 50, courseTokens: 100 } }} reload={vi.fn()} notify={vi.fn()} />);
     const usage = screen.getByText(/DeepSeek 250 Token/);

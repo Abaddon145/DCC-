@@ -10,6 +10,7 @@ import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPrevie
 export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;onSeek:(ms:number)=>void}
 type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
+const templates:Record<string,string>={general:"综合分析",tutorial_steps:"操作步骤",key_points:"核心要点",concepts:"术语与概念"};
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
 function preferredSubtitle(rows:LearningSubtitle[],previous:string){
   if(rows.some(row=>row.id===previous))return previous;
@@ -57,6 +58,7 @@ export function CourseAnalysisPanel(props:CourseAnalysisPanelProps){return <Anal
 
 function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysisPanelProps){
   const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState(""),[subtitleState,setSubtitleState]=useState<"loading"|"ready"|"error">("loading");
+  const [templateId,setTemplateId]=useState("general");
   const [subtitleRead,setSubtitleRead]=useState(0);
   const pendingSubtitle=useRef("");
   const [history,setHistory]=useState<Page<CourseAnalysisHistoryItem>>({items:[],total:0,offset:0,limit:50}),[offset,setOffset]=useState(0),[analysisId,setAnalysisId]=useState("");
@@ -104,7 +106,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
         value=await learningApi.prepareCourseSummary(libraryId,courseId,parent);
       }else{
         const frameTimesMs=frameText.trim()?frameText.split(/[,，\s]+/).filter(Boolean).map(raw=>{const ms=Math.round(Number(raw)*1000);if(!/^(?:\d+(?:\.\d{1,3})?|\.\d{1,3})$/.test(raw)||!Number.isSafeInteger(ms))throw new Error("采样时间必须是非负秒数，最多三位小数。");return ms;}):[];
-        value=await learningApi.prepareCourseAnalysis(libraryId,courseId,{subtitleId:subtitleId||null,frameTimesMs});
+        value=await learningApi.prepareCourseAnalysis(libraryId,courseId,{subtitleId:subtitleId||null,frameTimesMs,...(templateId==="general"?{}:{templateId})});
       }
       if(gate.isCurrent(ticket)&&value.courseId===courseId){setPrepared({value,phase});setNow(Date.now());}
     }catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}finally{busyRef.current=false;if(gate.isCurrent(ticket))setBusy(false);}
@@ -137,6 +139,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
     <form className="learning-analysis-form" onSubmit={event=>{event.preventDefault();void prepare("segments");}}>
       <fieldset>
         <legend>分析材料</legend>
+        <label>分析模板<select aria-label="分析模板" value={templateId} disabled={busy||active(task)} onChange={event=>{setTemplateId(event.target.value);invalidatePreview();}}>{Object.entries(templates).map(([id,name])=><option value={id} key={id}>{name}</option>)}</select></label>
         <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{pendingSubtitle.current="";setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.length&&<option value="">无已导入字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id}>{s.name} · {s.cueCount} 段{s.cueCount?"":" · 无可用段落"}</option>)}</select></label>
         {subtitleState==="ready"&&usable&&<p role="status">将发送「{selectedSubtitle?.name}」的完整段落{frameText.trim()?"，并附加列出的 JPEG 采样帧":"，不附加画面"}。不会上传视频文件。</p>}
         {subtitleState==="ready"&&selectedSubtitle&&!usable&&<p role="status">所选字幕没有可用段落，不能作为文字来源。</p>}
@@ -149,6 +152,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,onSeek}:CourseAnalysis
     {busy&&<LoadFeedback label="正在校验资料并处理请求…"/>}
     {prepared&&<section className="learning-analysis-preview" aria-label="分析费用预览">
       <h3>{prepared.phase==="summary"?"汇总":"分段"}确认</h3><p>本次上限 {prepared.value.tokensMax.toLocaleString("zh-CN")} Token · {prepared.value.model}</p>
+      <p>分析模板：{templates[prepared.value.templateId]||prepared.value.templateId} · 版本 {prepared.value.templateVersion}</p>
       <p>{prepared.value.stages.filter(s=>s.cached).length} 个阶段可复用缓存 · {prepared.value.frameIds.length} 个来源帧</p>
       <p>字幕：{subtitles.find(s=>s.id===prepared.value.subtitleId)?.name||(prepared.value.subtitleId?"快照中的字幕":"未使用字幕")}</p>
       <details><summary>查看 {prepared.value.stages.length} 个阶段范围</summary><ol start={previewOffset+1}>{prepared.value.stages.slice(previewOffset,previewOffset+50).map(s=><li key={s.key}>{learningTime(s.startMs)}—{learningTime(s.endMs)} · {s.cached?"缓存":"需请求"} · {s.tokensMax.toLocaleString("zh-CN")} Token</li>)}</ol>{prepared.value.stages.length>50&&<nav aria-label="预览阶段分页"><button className="secondary-button" disabled={!previewOffset} onClick={()=>setPreviewOffset(value=>Math.max(0,value-50))}>上一页预览</button><span>{Math.floor(previewOffset/50)+1} / {Math.ceil(prepared.value.stages.length/50)}</span><button className="secondary-button" disabled={previewOffset+50>=prepared.value.stages.length} onClick={()=>setPreviewOffset(value=>value+50)}>下一页预览</button></nav>}</details>

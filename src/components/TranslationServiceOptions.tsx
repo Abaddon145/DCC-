@@ -23,7 +23,8 @@ export function TranslationServiceOptions({ settings, reload, notify }: { settin
   };
   const usage = settings?.usage;
   return <section className="translation-provider-options">
-    <h3>DeepSeek 翻译与创作服务</h3>
+    <h3>视频分析设置</h3>
+    <p>视频分析与翻译、创作共享同一个 DeepSeek 凭据和本机月度额度。分析前会展示选中的字幕、采样帧与额度，确认后才发送；不会上传整段视频。</p>
     <p>适用于 CG、UE 和 DCC 内容，继续使用专业术语库。API 按 Token 计费；翻译仅发送待翻译文字，AI 创作仅发送确认过的文字上下文，不上传媒体文件。</p>
     <label className="translation-key-field"><span>DeepSeek API Key</span><input aria-label="DeepSeek API Key" type="password" autoComplete="new-password" value={key} onChange={event => setKey(event.target.value)} placeholder={settings?.deepseekConfigured ? "已配置，输入新密钥可替换" : "填写自己的 DeepSeek API Key"} /></label>
     <div className="translation-settings-actions">

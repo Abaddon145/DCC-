@@ -175,8 +175,7 @@ fn validate(input: &PreparedCourseAnalysis) -> Result<(), String> {
         || p.expires_at.checked_sub(p.created_at) != Some(86400)
         || input.format_version != FORMAT_VERSION
         || p.model != crate::translation_service::MODEL
-        || p.template_id != TEMPLATE_ID
-        || p.template_version != TEMPLATE_VERSION
+        || super::analysis::template_instructions(&p.template_id, p.template_version).is_err()
         || p.prompt_version
             != if input.summary.is_some() {
                 super::analysis_summary::PROMPT_VERSION

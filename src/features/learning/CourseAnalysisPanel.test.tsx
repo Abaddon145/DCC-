@@ -28,6 +28,14 @@ beforeEach(()=>{
   vi.mocked(api.getLibraryTask).mockResolvedValue(task);
   vi.mocked(learningApi.transcriptionComponents).mockResolvedValue({version:"1.9.1",modelRevision:"fixed",toolReady:false,toolMessage:"工具未安装",models:[]});
 });
+it("prepares the selected analysis template without starting a paid task",async()=>{
+  render(<CourseAnalysisPanel {...props}/>);
+  fireEvent.change(await screen.findByLabelText("分析模板"),{target:{value:"tutorial_steps"}});
+  fireEvent.click(screen.getByRole("button",{name:"预览分段分析"}));
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[],templateId:"tutorial_steps"});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
 it("previews explicit materials and costs but sends no paid task until separate consent",async()=>{
   render(<CourseAnalysisPanel {...props}/>);
   await screen.findByRole("option",{name:/学习字幕/});

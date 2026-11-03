@@ -114,6 +114,8 @@ pub struct CourseAnalysisOptions {
     pub subtitle_id: Option<String>,
     #[serde(default)]
     pub frame_times_ms: Vec<u64>,
+    #[serde(default)]
+    pub template_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
