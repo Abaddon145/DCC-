@@ -1,6 +1,6 @@
 export type SortMode = "relevance" | "updated" | "name" | "created" | "recent" | "favorite";
 export type MediaKind = "image" | "model" | "audio" | "video";
-export type ViewMode = "library" | "downloader" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
+export type ViewMode = "library" | "downloader" | "browserCapture" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary" | "learningLibrary" | "projects" | "knowledge" | "aiAssistant" | "favorites" | "recent" | "tagManager" | "health" | "reference" | "trash";
 export type ModuleId = ViewMode | "smartCollections";
 export type ModuleGroupId = "content" | "libraryContext" | "creation" | "manage";
 export type ContextPaneId = "library" | "imageLibrary" | "modelLibrary" | "audioLibrary" | "videoLibrary";
@@ -25,6 +25,7 @@ export type LibraryTaskRequest =
   | { kind: "assetMediaRetry"; request: { id: string } }
   | { kind: "modelThumbnail"; request: { entryId:string } }
   | { kind: "mediaImport"; request: MediaImportRequest }
+  | { kind: "learningMediaImport"; request: MediaImportRequest }
   | { kind: "assetScan"; request: { root: string } }
   | { kind: "assetImport"; request: CoreAssetImportRequest }
   | { kind: "assetProcess"; request: { assetId: string; force?: boolean } }

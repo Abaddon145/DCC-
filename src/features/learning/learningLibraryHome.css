@@ -1,0 +1,9 @@
+.learning-home{height:100%;overflow:auto;padding:28px;display:flex;flex-direction:column;gap:24px}
+.learning-home-header,.learning-home-section-title{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.learning-home-header h1,.learning-home-section-title h2{margin:4px 0}
+.learning-home-header p,.learning-home-card p,.learning-home-section-title span{color:var(--text-muted)}
+.learning-home-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.learning-home-card{display:flex;flex-direction:column;gap:10px;padding:18px;border:1px solid var(--border-light);border-radius:12px;background:var(--panel)}
+.learning-home-card h3,.learning-home-card p{margin:0;overflow-wrap:anywhere}
+.learning-home-card progress{width:100%;accent-color:var(--accent)}
+.learning-home-card button{align-self:flex-start}

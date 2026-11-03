@@ -228,6 +228,7 @@ mod import_snapshot_tests;
 mod import_table_check;
 #[cfg(test)]
 mod import_table_check_tests;
+pub mod membership;
 pub mod models;
 #[cfg(windows)]
 mod native_ipc;

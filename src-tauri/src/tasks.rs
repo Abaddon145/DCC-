@@ -40,6 +40,7 @@ pub enum TaskRequest {
         id: String,
     },
     MediaImport(MediaImportRequest),
+    LearningMediaImport(MediaImportRequest),
     AssetScan {
         root: String,
     },
@@ -96,6 +97,7 @@ impl TaskRequest {
             Self::AssetMediaImport { .. } => "素材预览附件导入",
             Self::AssetMediaRetry { .. } => "素材预览附件重试",
             Self::MediaImport(_) => "媒体导入",
+            Self::LearningMediaImport(_) => "学习视频导入",
             Self::AssetScan { .. } => "资产目录扫描",
             Self::AssetImport(_) => "资产批量导入",
             Self::AssetProcess { .. } => "资产预览与元数据",
@@ -151,6 +153,15 @@ impl TaskRequest {
                 Err("单次预览附件导入最多 100 项".into())
             }
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
+            Self::LearningMediaImport(r)
+                if r.paths.len() > 500
+                    || r.kind != MediaKind::Video
+                    || r.folder_id.is_some()
+                    || !r.tags.is_empty()
+                    || r.favorite =>
+            {
+                Err("学习视频导入仅接受最多 500 个视频，且不使用素材分类或标签".into())
+            }
             Self::Translation { ids } if ids.len() > 5000 => Err("单次翻译最多 5000 项".into()),
             Self::Migration(r) if r.mode != "migrate" => Err("任务中心只接受复制迁移操作".into()),
             Self::ArchiveExternalVideo {
@@ -1434,6 +1445,7 @@ pub fn start_library_task_for_library(
             | TaskRequest::CourseAnalysis(_)
             | TaskRequest::CourseTranscription(_)
             | TaskRequest::LearningImport(_)
+            | TaskRequest::LearningMediaImport(_)
             | TaskRequest::ArchiveExternalVideo { .. }
     ) && expected_library.is_none()
     {
@@ -1507,7 +1519,9 @@ pub fn retry_library_task(
     if let TaskRequest::AssetImport(request) = &mut payload {
         retain_incomplete_core_import(request, previous.result.as_ref());
     }
-    if let TaskRequest::MediaImport(request) = &mut payload {
+    if let TaskRequest::MediaImport(request) | TaskRequest::LearningMediaImport(request) =
+        &mut payload
+    {
         if let Some(rows) = previous
             .result
             .and_then(|v| v.get("rows").cloned())
@@ -1933,11 +1947,15 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
             .await
             .map_err(|e| e.to_string())?
         }
-        TaskRequest::MediaImport(request) => {
+        TaskRequest::MediaImport(request) | TaskRequest::LearningMediaImport(request) => {
+            let learning = matches!(&task.payload, TaskRequest::LearningMediaImport(_));
             let worker_app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let state = worker_app.state::<AppState>();
                 let (base, path) = state.with_active_mut(|active| {
+                    if active.marker.library_id != task.library_id {
+                        return Err("导入所属素材库已切换".into());
+                    }
                     Ok((active.base_dir.clone(), active.db_path.clone()))
                 })?;
                 let mut connection = open_media_worker_connection(&path)?;
@@ -1947,23 +1965,36 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                 let _process_control = crate::media::ProcessControl::new(move || {
                     stop_app.state::<AppState>().tasks.should_stop(&stop_id)
                 });
-                let report = media_library::import_controlled(
-                    &mut connection,
-                    &base,
-                    resource.as_deref(),
-                    request,
-                    &|current, total, name, report| {
-                        state.tasks.update(
-                            &task.id,
-                            current,
-                            total,
-                            name,
-                            "校验 / 复制 / 生成预览".into(),
-                            serde_json::to_value(report).ok(),
-                        );
-                    },
-                    &|| state.tasks.should_stop(&task.id),
-                )?;
+                let on_progress = |current, total, name, report: &MediaImportReport| {
+                    state.tasks.update(
+                        &task.id,
+                        current,
+                        total,
+                        name,
+                        "校验 / 复制 / 生成预览".into(),
+                        serde_json::to_value(report).ok(),
+                    );
+                };
+                let stop = || state.tasks.should_stop(&task.id);
+                let report = if learning {
+                    media_library::import_learning_controlled(
+                        &mut connection,
+                        &base,
+                        resource.as_deref(),
+                        request,
+                        &on_progress,
+                        &stop,
+                    )?
+                } else {
+                    media_library::import_controlled(
+                        &mut connection,
+                        &base,
+                        resource.as_deref(),
+                        request,
+                        &on_progress,
+                        &stop,
+                    )?
+                };
                 serde_json::to_value(report).map_err(|e| e.to_string())
             })
             .await
@@ -2047,6 +2078,20 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn learning_media_import_task_accepts_only_learning_videos() {
+        use super::*;
+        let value = serde_json::json!({"kind":"learningMediaImport","request":{"kind":"video","paths":["lesson.mp4"],"folderId":null,"tags":[],"favorite":false}});
+        let task: TaskRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(task.validate().is_ok());
+        assert_eq!(task.label(), "学习视频导入");
+        let mut invalid = value;
+        invalid["request"]["kind"] = "image".into();
+        assert!(serde_json::from_value::<TaskRequest>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
     #[test]
     fn learning_transcription_task_is_typed_and_deduplicated() {
         use super::*;

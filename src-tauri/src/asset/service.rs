@@ -396,6 +396,10 @@ fn import_one(
     }
     let duplicate:Option<(String,bool)>=db.query_row("SELECT e.id,e.deleted_at IS NOT NULL FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE f.checksum=?1",[&hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
     if let Some((entry_id, deleted)) = duplicate {
+        let materials:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials')",[&entry_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !materials {
+            return Err("相同文件已存在于学习库，尚未加入素材库；未更改归属或项目关联".into());
+        }
         let core_id = repository::register_origin(
             db,
             &CoreOrigin {

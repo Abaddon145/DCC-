@@ -3,6 +3,148 @@ use crate::state::test_state;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn learning_unassigned_list_keeps_missing_progress_unknown() {
+    use super::membership::list_unassigned_for_library;
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let media = uuid::Uuid::new_v4().to_string();
+    state.with_library(|db,_| {db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[&media]).unwrap();db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES(?1,'learning')",[&media]).unwrap();Ok(())}).unwrap();
+    let page = list_unassigned_for_library(&state, &library, 0, 50).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].media_id, media);
+    state
+        .with_library(|db, _| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM learning_courses", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn membership_preview_list_is_paged_and_scoped_to_the_active_library() {
+    use super::membership::list_for_library;
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    state.with_library(|db,_| {for _ in 0..3 {let id=uuid::Uuid::new_v4().to_string();db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[id]).unwrap();}Ok(())}).unwrap();
+    let first = list_for_library(&state, &library, 0, 2).unwrap();
+    let second = list_for_library(&state, &library, 2, 2).unwrap();
+    assert_eq!(
+        (first.total, first.items.len(), second.items.len()),
+        (3, 2, 1)
+    );
+    assert_ne!(first.items[0].media_id, second.items[0].media_id);
+    assert!(list_for_library(&state, &uuid::Uuid::new_v4().to_string(), 0, 2).is_err());
+}
+
+#[test]
+fn membership_confirmation_rejects_stale_library_session() {
+    use super::membership::{apply_for_library, preview_for_library, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    let library = state.active_library_id().unwrap();
+    let media = uuid::Uuid::new_v4().to_string();
+    state.with_library(|db,_| {db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[&media]).unwrap();Ok(())}).unwrap();
+    let preview = preview_for_library(&state, &library, &media).unwrap();
+    let change = MembershipChange {
+        media_id: media.clone(),
+        expected_materials: true,
+        expected_learning: false,
+        expected_snapshot: preview.snapshot,
+        materials: false,
+        learning: true,
+    };
+    *state.source_scope_nonce.lock().unwrap() = uuid::Uuid::new_v4();
+    assert!(apply_for_library(&state, &library, &[change]).is_err());
+    state.with_library(|db,_| {assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);Ok(())}).unwrap();
+    let preview = preview_for_library(&state, &library, &media).unwrap();
+    let change = MembershipChange {
+        media_id: media.clone(),
+        expected_materials: true,
+        expected_learning: false,
+        expected_snapshot: preview.snapshot,
+        materials: false,
+        learning: true,
+    };
+    apply_for_library(&state, &library, &[change]).unwrap();
+    state.with_library(|db,_| {assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='learning'",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);Ok(())}).unwrap();
+}
+
+#[test]
+fn membership_batch_rejects_stale_state_without_partial_changes() {
+    use super::membership::{apply_changes, preview_one, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    state.with_library_mut(|db,_| {
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        for id in [&first,&second] {
+            db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[id]).unwrap();
+        }
+        let first_snapshot=preview_one(db,&first)?.snapshot;
+        let second_snapshot=preview_one(db,&second)?.snapshot;
+        let change = |id: &str, expected_materials: bool| MembershipChange { media_id:id.into(), expected_materials, expected_learning:false, expected_snapshot:if id==first {first_snapshot.clone()} else {second_snapshot.clone()}, materials:false, learning:true };
+        assert!(apply_changes(db,&[change(&first,true),change(&second,false)]).is_err());
+        let count:i64=db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE workspace='materials'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,2);
+        apply_changes(db,&[change(&first,true),change(&second,true)])?;
+        let count:i64=db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE workspace='learning'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,2);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn membership_changes_reject_invalid_inputs_and_removing_active_course() {
+    use super::membership::{apply_changes, preview_one, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    state.with_library_mut(|db,_| {
+        let media=uuid::Uuid::new_v4().to_string();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Video',?1,'now','now')",[&media]).unwrap();
+        db.execute("INSERT INTO learning_courses(id,media_entry_id,created_at,updated_at) VALUES('course',?1,'now','now')",[&media]).unwrap();
+        let snapshot=preview_one(db,&media)?.snapshot;
+        let change=MembershipChange{media_id:media.clone(),expected_materials:true,expected_learning:true,expected_snapshot:snapshot,materials:true,learning:false};
+        assert!(apply_changes(db,&[change.clone()]).is_err());
+        assert!(apply_changes(db,&[change.clone(),change.clone()]).is_err());
+        let mut invalid=change.clone();invalid.media_id="not-a-uuid".into();
+        assert!(apply_changes(db,&[invalid]).is_err());
+        let mut empty=change;empty.materials=false;
+        assert!(apply_changes(db,&[empty]).is_err());
+        assert_eq!(db.query_row("SELECT count(*) FROM learning_courses WHERE media_entry_id=?1",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn membership_preview_rejects_metadata_or_project_changes() {
+    use super::membership::{apply_changes, preview_one, MembershipChange};
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("library"));
+    state.with_library_mut(|db,_| {
+        let media=uuid::Uuid::new_v4().to_string();
+        db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','Old',?1,'now','now')",[&media]).unwrap();
+        let preview=preview_one(db,&media)?;
+        let change=MembershipChange{media_id:media.clone(),expected_materials:true,expected_learning:false,expected_snapshot:preview.snapshot,materials:false,learning:true};
+        db.execute("UPDATE media_entries SET name='Changed' WHERE id=?1",[&media]).unwrap();
+        assert!(apply_changes(db,&[change]).is_err());
+        let preview=preview_one(db,&media)?;
+        let change=MembershipChange{media_id:media.clone(),expected_materials:true,expected_learning:false,expected_snapshot:preview.snapshot,materials:false,learning:true};
+        db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','Project','scene','active','now','now')",[]).unwrap();
+        db.execute("INSERT INTO project_media_entries(project_id,entry_id,created_at) VALUES('project',?1,'now')",[&media]).unwrap();
+        assert!(apply_changes(db,&[change]).is_err());
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",[&media],|r|r.get::<_,i64>(0)).unwrap(),1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn course_membership_is_derived_and_explicit_learning_membership_survives_removal() {
     let temp = tempfile::tempdir().unwrap();
     let state = test_state(&temp.path().join("library"));

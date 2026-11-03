@@ -80,6 +80,7 @@ pub fn default_module_order() -> Vec<String> {
         "modelLibrary",
         "audioLibrary",
         "videoLibrary",
+        "learningLibrary",
         "projects",
         "knowledge",
         "aiAssistant",

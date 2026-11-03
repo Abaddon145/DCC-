@@ -710,6 +710,34 @@ pub fn import_controlled(
     )
 }
 
+pub fn import_learning_controlled(
+    connection: &mut Connection,
+    base_dir: &Path,
+    resource_dir: Option<&Path>,
+    request: MediaImportRequest,
+    progress: &dyn Fn(usize, usize, String, &MediaImportReport),
+    stop: &dyn Fn() -> bool,
+) -> Result<MediaImportReport, String> {
+    if request.kind != MediaKind::Video
+        || request.folder_id.is_some()
+        || !request.tags.is_empty()
+        || request.favorite
+    {
+        return Err("学习库导入仅接受未指定素材文件夹和标签的视频".into());
+    }
+    import_checked(
+        connection,
+        base_dir,
+        resource_dir,
+        request,
+        progress,
+        stop,
+        None,
+        None,
+        true,
+    )
+}
+
 pub fn import_controlled_with_capture(
     connection: &mut Connection,
     base_dir: &Path,
@@ -728,6 +756,7 @@ pub fn import_controlled_with_capture(
         stop,
         capture,
         None,
+        false,
     )
 }
 
@@ -752,6 +781,7 @@ pub(crate) fn import_controlled_verified(
         stop,
         None,
         Some(expected_hash),
+        false,
     )
 }
 
@@ -764,6 +794,7 @@ fn import_checked(
     stop: &dyn Fn() -> bool,
     capture: Option<&crate::browser_capture::Capture>,
     expected_hash: Option<&str>,
+    learning: bool,
 ) -> Result<MediaImportReport, String> {
     if request.paths.is_empty() {
         return Ok(MediaImportReport {
@@ -813,7 +844,15 @@ fn import_checked(
             if expected_hash.is_some_and(|hash| hash != checksum) {
                 return Err("文件在扫描或分析后发生变化，请重新扫描".into());
             }
-            if let Some(existing)=connection.query_row("SELECT e.id FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE f.checksum=?1",[&checksum],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string())?{return Ok((existing,Some("duplicate".into())))}
+            if let Some((existing,materials,in_learning))=connection.query_row("SELECT e.id,EXISTS(SELECT 1 FROM media_workspace_memberships w WHERE w.media_entry_id=e.id AND w.workspace='materials'),EXISTS(SELECT 1 FROM media_workspace_effective_memberships w WHERE w.media_entry_id=e.id AND w.workspace='learning') FROM media_entries e JOIN media_files f ON f.id=e.primary_file_id WHERE f.checksum=?1",[&checksum],|r|Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?,r.get::<_,bool>(2)?))).optional().map_err(|e|e.to_string())? {
+                if learning && !in_learning {
+                    return Err("相同文件已存在于素材库，尚未加入学习库；未更改归属".into());
+                }
+                if !learning && !materials {
+                    return Err("相同文件已存在于学习库，尚未加入素材库；未更改归属".into());
+                }
+                return Ok((existing,Some("duplicate".into())));
+            }
             let id = Uuid::new_v4().to_string();
             let root = format!("media-library/{}/{}", request.kind.as_str(), id);
             staged_root = Some(media::safe_relative(base_dir, &root)?);
@@ -874,6 +913,7 @@ fn import_checked(
                 }
                 insert_entry(
                     connection, &id, &request, &name, &main_id, &timestamp, files, capture,
+                    learning,
                 )?;
             } else {
                 let deps = if request.kind == MediaKind::Model {
@@ -994,6 +1034,7 @@ fn import_checked(
                 }
                 insert_entry(
                     connection, &id, &request, &name, &main_id, &timestamp, files, capture,
+                    learning,
                 )?;
             }
             Ok((id, None))
@@ -1138,6 +1179,7 @@ fn insert_entry(
         Option<i64>,
     )>,
     capture: Option<&crate::browser_capture::Capture>,
+    learning: bool,
 ) -> Result<(), String> {
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO media_entries(id,kind,folder_id,name,favorite,processing_status,primary_file_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'ready',?6,?7,?7)",params![id,request.kind.as_str(),request.folder_id,name,request.favorite as i64,main_id,timestamp]).map_err(|e|e.to_string())?;
@@ -1160,6 +1202,11 @@ fn insert_entry(
         },
     )?;
     crate::asset::repository::register_files(&tx, &core_id)?;
+    if learning {
+        crate::learning::store::ensure_course(&tx, id)?;
+        tx.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES(?1,'learning')",[id]).map_err(|e|e.to_string())?;
+        tx.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",[id]).map_err(|e|e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 fn mime_for(name: &str) -> &'static str {
@@ -1378,6 +1425,126 @@ mod tests {
     use super::*;
     use crate::db::open_database;
     use tempfile::tempdir;
+    #[test]
+    fn learning_import_creates_course_without_materials_membership() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let source = dir.path().join("lesson.mp4");
+        fs::write(&source, b"synthetic video bytes").unwrap();
+        let request = MediaImportRequest {
+            kind: MediaKind::Video,
+            paths: vec![source.to_string_lossy().into_owned()],
+            folder_id: None,
+            tags: vec![],
+            favorite: false,
+        };
+        let report = import_learning_controlled(
+            &mut db,
+            dir.path(),
+            None,
+            request.clone(),
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!((report.imported, report.failed), (1, 0));
+        let id = report.rows[0].entry_id.as_ref().unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",[id],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_effective_memberships WHERE media_entry_id=?1 AND workspace='learning'",[id],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM learning_courses WHERE media_entry_id=?1",
+                [id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        let repeated = import_learning_controlled(
+            &mut db,
+            dir.path(),
+            None,
+            request.clone(),
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            (repeated.imported, repeated.skipped, repeated.failed),
+            (0, 1, 0)
+        );
+        let materials = import(&mut db, dir.path(), None, request).unwrap();
+        assert_eq!(
+            (materials.imported, materials.skipped, materials.failed),
+            (0, 0, 1)
+        );
+        assert_eq!(fs::read(source).unwrap(), b"synthetic video bytes");
+    }
+    #[test]
+    fn learning_import_failure_rolls_back_and_preserves_source() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let source = dir.path().join("lesson.mp4");
+        fs::write(&source, b"synthetic video bytes").unwrap();
+        db.execute_batch("CREATE TRIGGER reject_learning_course BEFORE INSERT ON learning_courses BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        let request = MediaImportRequest {
+            kind: MediaKind::Video,
+            paths: vec![source.to_string_lossy().into_owned()],
+            folder_id: None,
+            tags: vec![],
+            favorite: false,
+        };
+        let report = import_learning_controlled(
+            &mut db,
+            dir.path(),
+            None,
+            request,
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!((report.imported, report.failed), (0, 1));
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_entries", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_workspace_memberships",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(fs::read(source).unwrap(), b"synthetic video bytes");
+    }
+    #[test]
+    fn materials_import_reports_learning_only_duplicate_without_exposing_it() {
+        let dir = tempdir().unwrap();
+        let mut db = open_database(&dir.path().join("db.sqlite")).unwrap();
+        let source = dir.path().join("test.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&source)
+            .unwrap();
+        let request = MediaImportRequest {
+            kind: MediaKind::Image,
+            paths: vec![source.to_string_lossy().into_owned()],
+            folder_id: None,
+            tags: vec![],
+            favorite: false,
+        };
+        let first = import(&mut db, dir.path(), None, request.clone()).unwrap();
+        let entry = first.rows[0].entry_id.as_ref().unwrap();
+        db.execute("INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES(?1,'learning')", [entry]).unwrap();
+        db.execute("DELETE FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'", [entry]).unwrap();
+        let second = import(&mut db, dir.path(), None, request).unwrap();
+        assert_eq!((second.imported, second.skipped, second.failed), (0, 0, 1));
+        assert!(second.rows[0].message.contains("学习库"));
+        assert_eq!(db.query_row("SELECT count(*) FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'", [entry], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
     #[test]
     fn trash_and_restore_materials_membership_preserves_shared_learning_media() {
         let dir = tempdir().unwrap();

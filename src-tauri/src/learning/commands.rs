@@ -312,6 +312,32 @@ pub async fn load_learning_subtitle(
     Err("当前平台不支持原生字幕".into())
 }
 #[tauri::command]
+pub fn list_learning_unassigned_videos(
+    state: State<AppState>,
+    expected_library_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<super::membership::UnassignedLearningVideo>, String> {
+    super::membership::list_unassigned_for_library(&state, &expected_library_id, offset, limit)
+}
+#[tauri::command]
+pub fn list_learning_membership_preview(
+    state: State<AppState>,
+    expected_library_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<super::membership::MembershipPreview>, String> {
+    super::membership::list_for_library(&state, &expected_library_id, offset, limit)
+}
+#[tauri::command]
+pub fn apply_learning_membership_changes(
+    state: State<AppState>,
+    expected_library_id: String,
+    changes: Vec<super::membership::MembershipChange>,
+) -> Result<(), String> {
+    super::membership::apply_for_library(&state, &expected_library_id, &changes)
+}
+#[tauri::command]
 pub fn ensure_learning_course(
     state: State<AppState>,
     expected_library_id: String,

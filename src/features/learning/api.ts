@@ -6,6 +6,10 @@ import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./typ
 import type {ExcerptTaskRequest,ExcerptDestination,StoredExcerpt,ExcerptOperation,ExcerptOperationSummary,ExcerptTargets} from "./types";
 import type {LibraryTask} from "../../types";
 
+export type MembershipPreview={mediaId:string;name:string;materials:boolean;learning:boolean;hasCourse:boolean;projectCount:number;assetCount:number;snapshot:string};
+export type MembershipChange={mediaId:string;expectedMaterials:boolean;expectedLearning:boolean;expectedSnapshot:string;materials:boolean;learning:boolean};
+export type UnassignedLearningVideo={mediaId:string;name:string};
+
 // Structural types do not strip snapshot metadata from runtime objects.
 function writableExcerptDestination(destination:ExcerptDestination):ExcerptDestination {
   switch(destination.kind){
@@ -54,6 +58,9 @@ export type CourseSqlitePreview={previewId:string;selectionId:string;sourceFinge
 export type CourseSourceSeries={id:string;title:string;courseCount:number};
 
 export const learningApi={
+  listUnassignedVideos:(expectedLibraryId:string,offset=0,limit=50)=>invoke<Page<UnassignedLearningVideo>>("list_learning_unassigned_videos",{expectedLibraryId,offset,limit}),
+  listMembershipPreview:(expectedLibraryId:string,offset=0,limit=50)=>invoke<Page<MembershipPreview>>("list_learning_membership_preview",{expectedLibraryId,offset,limit}),
+  applyMembershipChanges:(expectedLibraryId:string,changes:MembershipChange[])=>invoke<void>("apply_learning_membership_changes",{expectedLibraryId,changes}),
   startExcerptTask:(expectedLibraryId:string,request:ExcerptTaskRequest)=>invoke<LibraryTask>("start_library_task",{expectedLibraryId,payload:{kind:"courseExcerpt",request:writableExcerptTask(request)}}),
   getExcerpt:(expectedLibraryId:string,previewId:string)=>invoke<StoredExcerpt>("get_learning_excerpt",{expectedLibraryId,previewId}),
   getExcerptOperation:(expectedLibraryId:string,operationId:string)=>invoke<ExcerptOperation>("get_learning_excerpt_operation",{expectedLibraryId,operationId}),

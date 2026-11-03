@@ -684,6 +684,49 @@ fn folder_scan_streams_supported_files_and_reports_duplicates_and_reserved_types
 }
 
 #[test]
+fn core_import_learning_only_duplicate_does_not_link_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("library");
+    std::fs::create_dir_all(&base).unwrap();
+    let mut db = crate::db::open_database(&base.join("library.db")).unwrap();
+    db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','Project','scene','active','now','now')", []).unwrap();
+    let source = dir.path().join("a.png");
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+        .save(&source)
+        .unwrap();
+    let mut request: CoreImportRequest =
+        serde_json::from_value(serde_json::json!({"paths":[source]})).unwrap();
+    let first = super::service::import_files(&mut db, &base, None, &request, &|_, _| {}, &|| false)
+        .unwrap();
+    assert_eq!(first.imported, 1);
+    let media: String = db
+        .query_row("SELECT id FROM media_entries", [], |r| r.get(0))
+        .unwrap();
+    db.execute(
+        "INSERT INTO media_workspace_memberships(media_entry_id,workspace) VALUES(?1,'learning')",
+        [&media],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM media_workspace_memberships WHERE media_entry_id=?1 AND workspace='materials'",
+        [&media],
+    )
+    .unwrap();
+    request.project_id = Some("project".into());
+    let second =
+        super::service::import_files(&mut db, &base, None, &request, &|_, _| {}, &|| false)
+            .unwrap();
+    assert_eq!((second.imported, second.skipped, second.failed), (0, 0, 1));
+    assert!(second.rows[0].message.contains("学习库"));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM project_media_entries", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn core_import_deduplicates_mixed_rows_and_preserves_source_without_semantic_tags() {
     let dir = tempfile::tempdir().unwrap();
     let library = dir.path().join("library");

@@ -1,4 +1,6 @@
 import {useEffect,useRef,useState} from "react";
+import {MembershipMigration} from "./MembershipMigration";
+import {LearningVideoImport} from "./LearningVideoImport";
 import {learningApi,type CourseBatchCursor,type CourseImportBatchSummary,type CourseImportEntryPage,type CourseRevertReport,type CourseSourceBinding,type ImportBatchView,type ImportItemView,type ImportNotePreview,type ImportSourceBinding} from "./api";
 import {api} from "../../lib/api";
 import CourseSqliteImport from "./CourseSqliteImport";
@@ -46,6 +48,7 @@ export default function LearningImportPanel(props:Props){
 }
 
 function ImportPanel({libraryId,onClose}:Props){
+  const [organizing,setOrganizing]=useState(false);
   const dialog=useRef<HTMLDialogElement>(null);
   const [binding,setBinding]=useState<ImportSourceBinding|null>(null);
   const [relativePath,setRelativePath]=useState("");
@@ -377,6 +380,13 @@ function ImportPanel({libraryId,onClose}:Props){
       </section>}
       <p className="learning-import-status" role="status">{status}</p>
       {error&&<p className="learning-import-error" role="alert">{error}<button type="button" onClick={()=>{setError("");setStatus(s=>s+"（已清除错误，可重试）");}}>清除并重试</button></p>}
+      <LearningVideoImport libraryId={libraryId}/>
+      <section aria-label="已有视频归属整理">
+        <h3>已有视频归属整理</h3>
+        <p>预览当前库的视频，明确选择放入学习库、素材库或两者。</p>
+        <button type="button" disabled={busy} aria-expanded={organizing} onClick={()=>setOrganizing(value=>!value)}>{organizing?"收起整理":"整理已有视频…"}</button>
+        {organizing&&<MembershipMigration libraryId={libraryId}/>}
+      </section>
       <section aria-label="课程来源数据库">
         <h3>课程来源数据库</h3>
         <p>通过系统文件对话框选择数据库副本。合成样本入口只接受带合成标记的数据库；Windows 离线入口需要先退出映流并复制数据库及其 WAL、SHM。重新选择同一副本会保留来源身份，新复制的文件视为新来源。</p>
