@@ -1,4 +1,4 @@
-import {act,fireEvent,render,screen} from "@testing-library/react";
+import {act,fireEvent,render,screen,waitFor} from "@testing-library/react";
 import {beforeEach,expect,it,vi} from "vitest";
 import {LearningLibraryHome} from "./LearningLibraryHome";
 import {learningApi} from "./api";
@@ -71,8 +71,8 @@ it("does not show a stale search result after the query changes",async()=>{
 it("creates a learning category and assigns a series without touching courses",async()=>{
   vi.mocked(learningApi.listCourses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
   vi.mocked(learningApi.listSeries).mockResolvedValue([{id:"s1",name:"材质系列",description:"",revision:1,orderedCourseIds:["c1"]}]);
-  vi.mocked(learningApi.createCategory).mockResolvedValue({id:"cat1",name:"材质",revision:1});
-  vi.mocked(learningApi.assignSeriesCategory).mockResolvedValue({id:"s1",name:"材质系列",description:"",revision:2,orderedCourseIds:["c1"],categoryId:"cat1"});
+  vi.mocked(learningApi.createCategory).mockImplementation(async()=>{vi.mocked(learningApi.listCategories).mockResolvedValue([{id:"cat1",name:"材质",revision:1}]);return {id:"cat1",name:"材质",revision:1};});
+  vi.mocked(learningApi.assignSeriesCategory).mockImplementation(async()=>{const saved={id:"s1",name:"材质系列",description:"",revision:2,orderedCourseIds:["c1"],categoryId:"cat1"};vi.mocked(learningApi.listSeries).mockResolvedValue([saved]);return saved;});
   render(<LearningLibraryHome libraryId="lib" onOpen={vi.fn()} onOrganize={vi.fn()}/>);
   fireEvent.click(await screen.findByText("管理分类"));
   fireEvent.change(screen.getByLabelText("新分类名称"),{target:{value:"材质"}});
@@ -81,4 +81,21 @@ it("creates a learning category and assigns a series without touching courses",a
   fireEvent.change(screen.getByLabelText("材质系列的分类"),{target:{value:"cat1"}});
   expect(await screen.findByRole("button",{name:"材质 · 1 系列"})).toBeInTheDocument();
   expect(learningApi.assignSeriesCategory).toHaveBeenCalledWith("lib","s1",1,"cat1");
+});
+it("reloads series after an assignment so an overlapping refresh cannot restore stale data",async()=>{
+  const old={id:"s1",name:"材质系列",description:"",revision:1,orderedCourseIds:["c1"],categoryId:null};
+  const saved={...old,revision:2,categoryId:"cat1"};
+  let finishRefresh!:(value:typeof old[])=>void;
+  vi.mocked(learningApi.listCourses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
+  vi.mocked(learningApi.listCategories).mockResolvedValue([{id:"cat1",name:"材质",revision:1}]);
+  vi.mocked(learningApi.listSeries).mockResolvedValueOnce([old]).mockImplementationOnce(()=>new Promise(resolve=>{finishRefresh=resolve;})).mockResolvedValue([saved]);
+  vi.mocked(learningApi.assignSeriesCategory).mockResolvedValue(saved);
+  render(<LearningLibraryHome libraryId="lib" onOpen={vi.fn()} onOrganize={vi.fn()}/>);
+  await screen.findByLabelText("材质系列的分类");
+  act(()=>window.dispatchEvent(new CustomEvent("learning-memberships-changed",{detail:{libraryId:"lib"}})));
+  await waitFor(()=>expect(finishRefresh).toBeDefined());
+  fireEvent.change(screen.getByLabelText("材质系列的分类"),{target:{value:"cat1"}});
+  await waitFor(()=>expect(learningApi.listSeries).toHaveBeenCalledTimes(3));
+  await act(async()=>finishRefresh([old]));
+  expect(await screen.findByRole("button",{name:"材质 · 1 系列"})).toBeInTheDocument();
 });
