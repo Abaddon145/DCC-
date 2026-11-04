@@ -14,8 +14,8 @@ type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
 function preferredSubtitle(rows:LearningSubtitle[],previous:string){
-  if(rows.some(row=>row.id===previous))return previous;
-  return [...rows].reverse().find(row=>row.cueCount>0)?.id||rows.at(-1)?.id||"";
+  if(rows.some(row=>row.id===previous&&row.cueCount>0))return previous;
+  return [...rows].reverse().find(row=>row.cueCount>0)?.id||"";
 }
 function LocalWhisperOffer({libraryId,courseId,disabled,onSubtitle}:{libraryId:string;courseId:string;disabled:boolean;onSubtitle:(id:string)=>void}){
   const [status,setStatus]=useState<WhisperComponentStatus|null>(null),[model,setModel]=useState<"base"|"small">("base"),[consent,setConsent]=useState(false);
@@ -76,7 +76,7 @@ function AnalysisContent({libraryId,courseId,durationMs,canSeek=true,autoPrepare
   const autoStarted=useRef(false);
   const templateOperation=useRef(false);
   useEffect(()=>{let keep=true;void Promise.all([learningApi.listCourseAnalysisTemplates(libraryId),learningApi.getCourseAnalysisDefault(libraryId)]).then(([rows,preferred])=>{if(keep){setCustomTemplates(rows);if(templateRead===0&&!templates[preferred]&&!rows.some(row=>row.id===preferred))setTemplateNotice("默认模板已不可用，已改用综合分析；可在设置中重新选择。");setTemplateId(value=>{const desired=templateRead===0?preferred:value;return templates[desired]||rows.some(row=>row.id===desired)?desired:"general";});setTemplateReady(true);}}).catch(reason=>{if(keep)setError(`读取分析模板失败：${String(reason)}`)});return()=>{keep=false};},[libraryId,templateRead]);
-  useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(!keep)return;const wanted=pendingSubtitle.current;setSubtitles(rows);setSubtitleId(previous=>wanted&&rows.some(row=>row.id===wanted)?(pendingSubtitle.current="",wanted):preferredSubtitle(rows,previous));setSubtitleState("ready");}).catch(reason=>{if(keep){setError(String(reason));setSubtitleState("error");}});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
+  useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(!keep)return;const wanted=pendingSubtitle.current;setSubtitles(rows);setSubtitleId(previous=>wanted&&rows.some(row=>row.id===wanted&&row.cueCount>0)?(pendingSubtitle.current="",wanted):preferredSubtitle(rows,previous));setSubtitleState("ready");}).catch(reason=>{if(keep){setError(String(reason));setSubtitleState("error");}});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
   const refresh=useCallback(async()=>{
     const ticket=historyGate.begin();
     try{
@@ -165,7 +165,7 @@ function AnalysisContent({libraryId,courseId,durationMs,canSeek=true,autoPrepare
           <label>分析要求<textarea aria-label="分析要求" value={templateDraft.focus} maxLength={4000} disabled={templateBusy||busy||active(task)} onChange={event=>setTemplateDraft(old=>({...old,focus:event.target.value}))}/></label>
           <button type="button" className="secondary-button" disabled={!templateReady||templateBusy||busy||active(task)||!templateDraft.name.trim()||!templateDraft.focus.trim()} onClick={()=>void saveTemplate()}>保存模板</button>{templateDraft.id&&<button type="button" className="secondary-button" disabled={templateBusy||busy||active(task)} onClick={()=>void deleteTemplate()}>删除模板</button>}
         </details>
-        <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{pendingSubtitle.current="";setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.length&&<option value="">无已导入字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id}>{s.name} · {s.cueCount} 段{s.cueCount?"":" · 无可用段落"}</option>)}</select></label>
+        <label>分析字幕<select value={subtitleId} disabled={busy||active(task)} onChange={event=>{pendingSubtitle.current="";setSubtitleId(event.target.value);invalidatePreview();}} aria-describedby={hintId}>{!subtitles.some(s=>s.cueCount>0)&&<option value="">无可用字幕</option>}{subtitles.map(s=><option key={s.id} value={s.id} disabled={!s.cueCount}>{s.name} · {s.cueCount} 段{s.cueCount?"":" · 无可用段落"}</option>)}</select></label>
         {subtitleState==="ready"&&usable&&<p role="status">将发送「{selectedSubtitle?.name}」的完整段落{frameText.trim()?"，并附加列出的 JPEG 采样帧":"，不附加画面"}。不会上传视频文件。</p>}
         {subtitleState==="ready"&&selectedSubtitle&&!usable&&<p role="status">所选字幕没有可用段落，不能作为文字来源。</p>}
         {subtitleState==="ready"&&!usable&&<LocalWhisperOffer libraryId={libraryId} courseId={courseId} disabled={busy||active(task)} onSubtitle={acceptTranscript}/>}
