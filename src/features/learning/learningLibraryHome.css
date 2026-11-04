@@ -10,6 +10,8 @@
 .learning-card-progress{color:var(--text-muted);font-variant-numeric:tabular-nums}
 .learning-card-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:auto;padding-top:6px}
 .learning-card-actions button{display:inline-flex;align-items:center;gap:6px}
+.learning-series-nav{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.learning-series-nav button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .learning-home-card h3,.learning-home-card p{margin:0;overflow-wrap:anywhere}
 .learning-home-card progress{width:100%;accent-color:var(--accent)}
 .learning-home-card button{align-self:flex-start}
