@@ -850,7 +850,7 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "41"
+            "42"
         );
         assert_eq!(
             restored

@@ -434,6 +434,60 @@ pub fn list_learning_series(
     current(state.with_library_if_id(&expected_library_id, |db, _| store::list_series(db)))
 }
 #[tauri::command]
+pub fn list_learning_categories(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<Vec<LearningCategory>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::list_learning_categories(db)
+    }))
+}
+#[tauri::command]
+pub fn create_learning_category(
+    state: State<AppState>,
+    expected_library_id: String,
+    name: String,
+) -> Result<LearningCategory, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::create_learning_category(db, &name)
+    }))
+}
+#[tauri::command]
+pub fn rename_learning_category(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    revision: i64,
+    name: String,
+) -> Result<LearningCategory, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::rename_learning_category(db, &id, revision, &name)
+    }))
+}
+#[tauri::command]
+pub fn delete_learning_category(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    revision: i64,
+) -> Result<(), String> {
+    current(state.with_library_mut_if_id(&expected_library_id, |db, _| {
+        store::delete_learning_category(db, &id, revision)
+    }))
+}
+#[tauri::command]
+pub fn assign_learning_series_category(
+    state: State<AppState>,
+    expected_library_id: String,
+    id: String,
+    revision: i64,
+    category_id: Option<String>,
+) -> Result<Series, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::assign_series_category(db, &id, revision, category_id.as_deref())
+    }))
+}
+#[tauri::command]
 pub fn upsert_learning_series(
     state: State<AppState>,
     expected_library_id: String,

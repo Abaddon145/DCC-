@@ -19,6 +19,14 @@ pub struct Series {
     pub description: String,
     pub revision: i64,
     pub ordered_course_ids: Vec<String>,
+    pub category_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningCategory {
+    pub id: String,
+    pub name: String,
+    pub revision: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

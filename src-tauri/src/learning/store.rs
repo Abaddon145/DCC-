@@ -124,7 +124,7 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
     uuid(id)?;
     let mut value = db
         .query_row(
-            "SELECT id,name,description,revision FROM learning_series WHERE id=?1",
+            "SELECT id,name,description,revision,category_id FROM learning_series WHERE id=?1",
             [id],
             |r| {
                 Ok(Series {
@@ -133,6 +133,7 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
                     description: r.get(2)?,
                     revision: r.get(3)?,
                     ordered_course_ids: vec![],
+                    category_id: r.get(4)?,
                 })
             },
         )
@@ -157,6 +158,113 @@ pub fn list_series(db: &Connection) -> Result<Vec<Series>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     ids.iter().map(|id| series(db, id)).collect()
+}
+pub fn list_learning_categories(db: &Connection) -> Result<Vec<LearningCategory>, String> {
+    let mut stmt=db.prepare("SELECT id,name,revision FROM learning_categories ORDER BY name COLLATE NOCASE,id LIMIT 1000").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(LearningCategory {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                revision: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+pub fn create_learning_category(db: &Connection, name: &str) -> Result<LearningCategory, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err("分类名称需 1—100 字".into());
+    }
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM learning_categories", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if count >= 1000 {
+        return Err("学习分类最多 1000 个".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.execute("INSERT INTO learning_categories(id,name,revision,created_at,updated_at) VALUES(?1,?2,1,?3,?3)",params![id,name,now]).map_err(|_|"分类名称已存在或无法保存".to_string())?;
+    Ok(LearningCategory {
+        id,
+        name: name.into(),
+        revision: 1,
+    })
+}
+pub fn rename_learning_category(
+    db: &Connection,
+    id: &str,
+    revision: i64,
+    name: &str,
+) -> Result<LearningCategory, String> {
+    uuid(id)?;
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err("分类名称需 1—100 字".into());
+    }
+    let changed=db.execute("UPDATE learning_categories SET name=?1,revision=revision+1,updated_at=?2 WHERE id=?3 AND revision=?4",params![name,chrono::Utc::now().to_rfc3339(),id,revision]).map_err(|_|"分类名称已存在或无法保存".to_string())?;
+    if changed != 1 {
+        return Err("分类已变化或删除，请重新读取".into());
+    }
+    Ok(LearningCategory {
+        id: id.into(),
+        name: name.into(),
+        revision: revision + 1,
+    })
+}
+pub fn assign_series_category(
+    db: &Connection,
+    id: &str,
+    revision: i64,
+    category: Option<&str>,
+) -> Result<Series, String> {
+    uuid(id)?;
+    if let Some(category) = category {
+        uuid(category)?;
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM learning_categories WHERE id=?1)",
+                [category],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err("学习分类不存在".into());
+        }
+    }
+    let changed=db.execute("UPDATE learning_series SET category_id=?1,revision=revision+1,updated_at=?2 WHERE id=?3 AND revision=?4",params![category,chrono::Utc::now().to_rfc3339(),id,revision]).map_err(|e|e.to_string())?;
+    if changed != 1 {
+        return Err("系列已变化，请重新读取".into());
+    }
+    series(db, id)
+}
+pub fn delete_learning_category(
+    db: &mut Connection,
+    id: &str,
+    revision: i64,
+) -> Result<(), String> {
+    uuid(id)?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM learning_categories WHERE id=?1 AND revision=?2)",
+            params![id, revision],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("分类已变化或删除，请重新读取".into());
+    }
+    tx.execute("UPDATE learning_series SET category_id=NULL,revision=revision+1,updated_at=?1 WHERE category_id=?2",params![chrono::Utc::now().to_rfc3339(),id]).map_err(|e|e.to_string())?;
+    tx.execute(
+        "DELETE FROM learning_categories WHERE id=?1 AND revision=?2",
+        params![id, revision],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 pub fn upsert_series(
     db: &mut Connection,
@@ -240,6 +348,41 @@ mod learning_store_tests {
         db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','same title',?2,'now','now')",rusqlite::params![id,file]).unwrap();
         db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,duration_ms,created_at) VALUES(?1,?2,'main','video.mp4','video.mp4',?3,1000,'now')",rusqlite::params![file,id,format!("media-library/video/{id}/video.mp4")]).unwrap();
         id
+    }
+    #[test]
+    fn learning_category_delete_preserves_series_courses_and_rejects_stale_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+        let lesson = ensure_course(&db, &media(&db)).unwrap();
+        let series = upsert_series(&mut db, None, "教程", "", None).unwrap();
+        let series =
+            set_series_members(&mut db, &series.id, series.revision, &[lesson.id.clone()]).unwrap();
+        let category = create_learning_category(&db, "材质").unwrap();
+        let assigned =
+            assign_series_category(&db, &series.id, series.revision, Some(&category.id)).unwrap();
+        assert_eq!(assigned.category_id.as_deref(), Some(category.id.as_str()));
+        assert!(assign_series_category(&db, &series.id, series.revision, None).is_err());
+        delete_learning_category(&mut db, &category.id, category.revision).unwrap();
+        let kept = super::series(&db, &series.id).unwrap();
+        assert_eq!(kept.category_id, None);
+        assert_eq!(kept.ordered_course_ids, vec![lesson.id.clone()]);
+        assert!(super::course(&db, &lesson.id).is_ok());
+        assert!(assign_series_category(&db, &series.id, assigned.revision, None).is_err());
+    }
+    #[test]
+    fn learning_category_upgrade_rolls_back_and_keeps_existing_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::test_state(&dir.path().join("library"));
+        state.with_library_mut(|db,_| {
+            let series=upsert_series(db,None,"旧系列","",None)?;
+            db.execute_batch("DROP TABLE learning_categories; UPDATE schema_meta SET value='41' WHERE key='schema_version'; CREATE TRIGGER reject_v42 BEFORE UPDATE OF value ON schema_meta WHEN NEW.key='schema_version' AND NEW.value='42' BEGIN SELECT RAISE(ABORT,'rollback'); END;").unwrap();
+            assert!(super::super::migrate(db).is_err());
+            assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='learning_categories'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"41");
+            db.execute_batch("DROP TRIGGER reject_v42").unwrap();super::super::migrate(db)?;super::super::migrate(db)?;
+            assert_eq!(super::series(db,&series.id)?.name,"旧系列");
+            Ok(())
+        }).unwrap();
     }
     #[test]
     fn learning_course_search_scopes_series_and_treats_wildcards_as_text() {
@@ -332,29 +475,33 @@ mod learning_store_tests {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::test_state(&dir.path().join("library"));
         let archive = dir.path().join("learning.dccassetlib");
-        let (course_id,series_id,core_id)=state.with_library_mut(|db,base| {
+        let (course_id,series_id,core_id,category_id)=state.with_library_mut(|db,base| {
             let media_id=media(db);let c=ensure_course(db,&media_id)?;
             let s=upsert_series(db,None,"Backup","",None)?;
-            set_series_members(db,&s.id,0,&[c.id.clone()])?;
+            let s=set_series_members(db,&s.id,0,&[c.id.clone()])?;
+            let category=create_learning_category(db,"备份分类")?;
+            assign_series_category(db,&s.id,s.revision,Some(&category.id))?;
             db.execute("INSERT INTO projects(id,name,project_type,status,created_at,updated_at) VALUES('project','Existing','scene','active','now','now')",[]).unwrap();
             db.execute("INSERT INTO project_media_entries(project_id,entry_id,created_at) VALUES('project',?1,'now')",[&media_id]).unwrap();
             let core=crate::asset::repository::register_origin(db,&crate::asset::models::CoreOrigin{kind:"media".into(),id:media_id.clone()})?;
             crate::asset::repository::register_files(db,&core)?;
             crate::backup::export_library(db,base,&archive)?;
-            Ok((c.id,s.id,core))
+            Ok((c.id,s.id,core,category.id))
         }).unwrap();
         state
             .with_active_mut(|active| crate::backup::restore_library(active, &archive))
             .unwrap();
         state.with_library(|db,_| {
             assert_eq!(series(db,&series_id)?.ordered_course_ids,vec![course_id.clone()]);
+            assert_eq!(series(db,&series_id)?.category_id.as_deref(),Some(category_id.as_str()));
+            assert!(list_learning_categories(db)?.iter().any(|category|category.id==category_id));
             let c=course(db,&course_id)?;
             assert_eq!(list_courses(db,0,1)?.items[0].id,c.id);
             assert_eq!(db.query_row("SELECT media_entry_id FROM asset_core WHERE id=?1",[&core_id],|r|r.get::<_,String>(0)).unwrap(),c.media_id);
             assert_eq!(db.query_row("SELECT count(*) FROM project_media_entries WHERE project_id='project' AND entry_id=?1",[&c.media_id],|r|r.get::<_,i64>(0)).unwrap(),1);
             crate::learning::migrate(db)?;
             assert_eq!(ensure_course(db,&c.media_id)?.id,course_id);
-            delete_series(db,&series_id,1)?;
+            delete_series(db,&series_id,2)?;
             assert_eq!(course(db,&course_id)?.id,course_id,"deleting a series must not delete media/course");
             Ok(())
         }).unwrap();

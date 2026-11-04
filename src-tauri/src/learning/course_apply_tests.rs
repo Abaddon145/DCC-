@@ -1395,7 +1395,7 @@ fn learning_import_course_apply_schema_upgrade_rolls_back_to_v36() {
             super::migrate(db)?;
             assert_eq!(
                 db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'", [], |row| row.get::<_, String>(0)).unwrap(),
-                "41"
+                "42"
             );
             assert_eq!(
                 db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='learning_course_import_stage'", [], |row| row.get::<_, i64>(0)).unwrap(),

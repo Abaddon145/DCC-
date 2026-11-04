@@ -294,7 +294,7 @@ fn learning_note_archive_migration_and_backup_restore_keep_bytes_and_registratio
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(version, "41");
+            assert_eq!(version, "42");
             let saved = stored(db, base, bytes);
             let item =
                 add_archive_item(db, base, &saved.id, 3, bytes.len() as u64, "来源").unwrap();

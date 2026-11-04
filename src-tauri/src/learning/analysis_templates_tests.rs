@@ -52,7 +52,7 @@ fn custom_template_schema_upgrade_is_atomic() {
         db.execute_batch("DROP TRIGGER reject_v41").unwrap();
         super::migrate(db)?;
         super::migrate(db)?;
-        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"41");
+        assert_eq!(db.query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get::<_,String>(0)).unwrap(),"42");
         Ok(())
     }).unwrap();
 }

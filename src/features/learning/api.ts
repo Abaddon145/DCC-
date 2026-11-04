@@ -1,6 +1,6 @@
 import {invoke} from "@tauri-apps/api/core";
 import type {Page} from "../../types";
-import type {Course,Series,SeriesInput,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
+import type {Course,Series,SeriesInput,LearningCategory,ExternalVideoPreview,PlaybackSnapshot,PlaybackAction,NativeViewport,LearningSubtitle,TranscriptCue} from "./types";
 import type {CourseAnalysisOptions,CourseAnalysisPreview,CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisTemplate} from "./types";
 import type {NotePreviewRequest,StoredNotePreview,NoteCommitReceipt} from "./types";
 import type {ExcerptTaskRequest,ExcerptDestination,StoredExcerpt,ExcerptOperation,ExcerptOperationSummary,ExcerptTargets} from "./types";
@@ -100,6 +100,11 @@ export const learningApi={
   listCourses:(expectedLibraryId:string,offset=0,limit=80)=>invoke<Page<Course>>("list_learning_courses",{expectedLibraryId,offset,limit}),
   searchCourses:(expectedLibraryId:string,query:string,seriesId:string|null,offset=0,limit=50)=>invoke<Page<Course>>("search_learning_courses",{expectedLibraryId,query,seriesId,offset,limit}),
   listSeries:(expectedLibraryId:string)=>invoke<Series[]>("list_learning_series",{expectedLibraryId}),
+  listCategories:(expectedLibraryId:string)=>invoke<LearningCategory[]>("list_learning_categories",{expectedLibraryId}),
+  createCategory:(expectedLibraryId:string,name:string)=>invoke<LearningCategory>("create_learning_category",{expectedLibraryId,name}),
+  renameCategory:(expectedLibraryId:string,id:string,revision:number,name:string)=>invoke<LearningCategory>("rename_learning_category",{expectedLibraryId,id,revision,name}),
+  deleteCategory:(expectedLibraryId:string,id:string,revision:number)=>invoke<void>("delete_learning_category",{expectedLibraryId,id,revision}),
+  assignSeriesCategory:(expectedLibraryId:string,id:string,revision:number,categoryId:string|null)=>invoke<Series>("assign_learning_series_category",{expectedLibraryId,id,revision,categoryId}),
   upsertSeries:(expectedLibraryId:string,input:SeriesInput)=>invoke<Series>("upsert_learning_series",{expectedLibraryId,input}),
   setSeriesMembers:(expectedLibraryId:string,id:string,expectedRevision:number,courseIds:string[])=>invoke<Series>("set_learning_series_members",{expectedLibraryId,id,expectedRevision,courseIds}),
   deleteSeries:(expectedLibraryId:string,id:string,expectedRevision:number)=>invoke<void>("delete_learning_series",{expectedLibraryId,id,expectedRevision}),

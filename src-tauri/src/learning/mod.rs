@@ -133,6 +133,18 @@ pub fn migrate(db: &rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    if version < 42 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS learning_categories(id TEXT PRIMARY KEY,name TEXT NOT NULL COLLATE NOCASE UNIQUE,revision INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").map_err(|e| e.to_string())?;
+        let present:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('learning_series') WHERE name='category_id')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !present {
+            tx.execute_batch("ALTER TABLE learning_series ADD COLUMN category_id TEXT REFERENCES learning_categories(id) ON DELETE SET NULL").map_err(|e|e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE schema_meta SET value='42' WHERE key='schema_version'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 pub mod analysis;

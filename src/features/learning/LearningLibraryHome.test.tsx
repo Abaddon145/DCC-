@@ -3,10 +3,10 @@ import {beforeEach,expect,it,vi} from "vitest";
 import {LearningLibraryHome} from "./LearningLibraryHome";
 import {learningApi} from "./api";
 
-vi.mock("./api",()=>({learningApi:{listCourses:vi.fn(),listUnassignedVideos:vi.fn(),listSeries:vi.fn(),searchCourses:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listCourses:vi.fn(),listUnassignedVideos:vi.fn(),listSeries:vi.fn(),searchCourses:vi.fn(),listCategories:vi.fn(),createCategory:vi.fn(),renameCategory:vi.fn(),deleteCategory:vi.fn(),assignSeriesCategory:vi.fn()}}));
 vi.mock("./LearningVideoImport",()=>({LearningVideoImport:()=> <div>教程导入</div>}));
 vi.mock("./CourseAnalysisPanel",()=>({CourseAnalysisPanel:({courseId,autoPrepare}:{courseId:string;autoPrepare:boolean})=><div>分析 {courseId} {autoPrepare?"自动预览":""}</div>}));
-beforeEach(()=>{vi.clearAllMocks();vi.mocked(learningApi.listUnassignedVideos).mockResolvedValue({items:[],total:0,offset:0,limit:50});vi.mocked(learningApi.listSeries).mockResolvedValue([]);});
+beforeEach(()=>{vi.clearAllMocks();vi.mocked(learningApi.listUnassignedVideos).mockResolvedValue({items:[],total:0,offset:0,limit:50});vi.mocked(learningApi.listSeries).mockResolvedValue([]);vi.mocked(learningApi.listCategories).mockResolvedValue([]);});
 
 it("shows courses from the learning library and opens the chosen course",async()=>{
   vi.mocked(learningApi.listCourses).mockResolvedValue({items:[{id:"c1",mediaId:"m1",title:"教程一",positionMs:30000,durationMs:60000,rate:1,completed:false,progressRevision:1}],total:1,offset:0,limit:50});
@@ -67,4 +67,18 @@ it("does not show a stale search result after the query changes",async()=>{
   await screen.findByText("没有找到匹配的课程。");
   await act(async()=>finishFirst({items:[{id:"old",mediaId:"old",title:"旧结果",positionMs:0,durationMs:null,rate:1,completed:false,progressRevision:1}],total:1,offset:0,limit:50}));
   expect(screen.queryByText("旧结果")).toBeNull();
+});
+it("creates a learning category and assigns a series without touching courses",async()=>{
+  vi.mocked(learningApi.listCourses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
+  vi.mocked(learningApi.listSeries).mockResolvedValue([{id:"s1",name:"材质系列",description:"",revision:1,orderedCourseIds:["c1"]}]);
+  vi.mocked(learningApi.createCategory).mockResolvedValue({id:"cat1",name:"材质",revision:1});
+  vi.mocked(learningApi.assignSeriesCategory).mockResolvedValue({id:"s1",name:"材质系列",description:"",revision:2,orderedCourseIds:["c1"],categoryId:"cat1"});
+  render(<LearningLibraryHome libraryId="lib" onOpen={vi.fn()} onOrganize={vi.fn()}/>);
+  fireEvent.click(await screen.findByText("管理分类"));
+  fireEvent.change(screen.getByLabelText("新分类名称"),{target:{value:"材质"}});
+  fireEvent.click(screen.getByRole("button",{name:"创建分类"}));
+  await screen.findByRole("button",{name:"材质 · 0 系列"});
+  fireEvent.change(screen.getByLabelText("材质系列的分类"),{target:{value:"cat1"}});
+  expect(await screen.findByRole("button",{name:"材质 · 1 系列"})).toBeInTheDocument();
+  expect(learningApi.assignSeriesCategory).toHaveBeenCalledWith("lib","s1",1,"cat1");
 });
