@@ -86,6 +86,7 @@ fn maintenance_command_allowed(command: &str, backup: bool) -> bool {
     matches!(
         command,
         "list_library_tasks"
+            | "get_task_warning"
             | "get_library_task"
             | "cancel_library_task"
             | "cancel_ai_session"
@@ -741,6 +742,7 @@ mod tests {
         assert!(!maintenance_command_allowed("upsert_asset", true));
         assert!(!maintenance_command_allowed("search_assets", false));
         assert!(maintenance_command_allowed("list_library_tasks", false));
+        assert!(maintenance_command_allowed("get_task_warning", false));
         assert!(!maintenance_command_allowed("list_reference_boards", true));
         assert!(maintenance_command_allowed(
             "get_upgrade_backup_status",
