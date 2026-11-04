@@ -62,6 +62,12 @@ it("quickly prepares available subtitles without submitting a paid task",async()
   expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[]});
   expect(api.startLibraryTask).not.toHaveBeenCalled();
 });
+it("quick analysis combines subtitles with sampled frames when duration is known",async()=>{
+  render(<CourseAnalysisPanel {...props} autoPrepare durationMs={60000}/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[15000,30000,45000]});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
 it("uses the saved default template for quick analysis",async()=>{
   vi.mocked(learningApi.getCourseAnalysisDefault).mockResolvedValue("tutorial_steps");
   render(<CourseAnalysisPanel {...props} autoPrepare/>);
