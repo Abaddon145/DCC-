@@ -413,6 +413,7 @@ fn application_builder(
                     learning::commands::ensure_learning_course,
                     learning::commands::get_learning_course,
                     learning::commands::list_learning_courses,
+                    learning::commands::search_learning_courses,
                     learning::commands::list_learning_series,
                     learning::commands::upsert_learning_series,
                     learning::commands::set_learning_series_members,

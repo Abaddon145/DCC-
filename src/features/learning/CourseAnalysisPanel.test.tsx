@@ -90,6 +90,13 @@ it("quick analysis asks for materials when there are no subtitles",async()=>{
   expect(learningApi.prepareCourseAnalysis).not.toHaveBeenCalled();
   expect(api.startLibraryTask).not.toHaveBeenCalled();
 });
+it("quickly prepares sampled frames for a video without subtitles",async()=>{
+  vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);
+  render(<CourseAnalysisPanel {...props} autoPrepare durationMs={60000}/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:null,frameTimesMs:[15000,30000,45000]});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
 it("prepares the selected analysis template without starting a paid task",async()=>{
   render(<CourseAnalysisPanel {...props}/>);
   fireEvent.change(await screen.findByLabelText("分析模板"),{target:{value:"tutorial_steps"}});

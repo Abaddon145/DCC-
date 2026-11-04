@@ -98,6 +98,7 @@ export const learningApi={
   ensureCourse:(expectedLibraryId:string,mediaId:string)=>invoke<Course>("ensure_learning_course",{expectedLibraryId,mediaId}),
   getCourse:(expectedLibraryId:string,id:string)=>invoke<Course>("get_learning_course",{expectedLibraryId,id}),
   listCourses:(expectedLibraryId:string,offset=0,limit=80)=>invoke<Page<Course>>("list_learning_courses",{expectedLibraryId,offset,limit}),
+  searchCourses:(expectedLibraryId:string,query:string,seriesId:string|null,offset=0,limit=50)=>invoke<Page<Course>>("search_learning_courses",{expectedLibraryId,query,seriesId,offset,limit}),
   listSeries:(expectedLibraryId:string)=>invoke<Series[]>("list_learning_series",{expectedLibraryId}),
   upsertSeries:(expectedLibraryId:string,input:SeriesInput)=>invoke<Series>("upsert_learning_series",{expectedLibraryId,input}),
   setSeriesMembers:(expectedLibraryId:string,id:string,expectedRevision:number,courseIds:string[])=>invoke<Series>("set_learning_series_members",{expectedLibraryId,id,expectedRevision,courseIds}),

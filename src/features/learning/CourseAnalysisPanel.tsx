@@ -9,7 +9,7 @@ import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPrevie
 import "./LearningWorkspace.css";
 import {analysisTemplateLabels as templates} from "./analysisTemplates";
 
-export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;autoPrepare?:boolean;onSeek:(ms:number)=>void}
+export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;durationMs?:number|null;canSeek?:boolean;autoPrepare?:boolean;onSeek:(ms:number)=>void}
 type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
@@ -57,7 +57,7 @@ function LocalWhisperOffer({libraryId,courseId,disabled,onSubtitle}:{libraryId:s
 }
 export function CourseAnalysisPanel(props:CourseAnalysisPanelProps){return <AnalysisContent key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 
-function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSeek}:CourseAnalysisPanelProps){
+function AnalysisContent({libraryId,courseId,durationMs,canSeek=true,autoPrepare=false,onSeek}:CourseAnalysisPanelProps){
   const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState(""),[subtitleState,setSubtitleState]=useState<"loading"|"ready"|"error">("loading");
   const [templateId,setTemplateId]=useState("general");
   const [templateNotice,setTemplateNotice]=useState("");
@@ -112,7 +112,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
     if(templateOperation.current||busyRef.current||!templateDraft.id||templateDraft.version===null||!window.confirm("删除这个自定义模板？已保存的分析历史会保留。"))return;
     templateOperation.current=true;setTemplateBusy(true);setError("");try{await learningApi.deleteCourseAnalysisTemplate(libraryId,templateDraft.id,templateDraft.version);setCustomTemplates(rows=>rows.filter(row=>row.id!==templateDraft.id));if(templateId===templateDraft.id)setTemplateId("general");setTemplateDraft({id:null,version:null,name:"",focus:""});invalidatePreview();setNotice("模板已删除，分析历史仍然保留。");}catch(reason){setError(`删除模板失败：${String(reason)}`);}finally{templateOperation.current=false;setTemplateBusy(false);}
   };
-  const prepare=async(phase:Phase,parent?:string)=>{
+  const prepare=async(phase:Phase,parent?:string,automaticFrames?:number[])=>{
     if(busyRef.current||templateOperation.current||active(task))return;
     busyRef.current=true;setBusy(true);setError("");setNotice("");setPrepared(null);setConsent(false);setPreviewOffset(0);const ticket=gate.begin();
     try{
@@ -121,14 +121,14 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
         if(!parent)throw new Error("该历史缺少可核验的汇总父结果，请重新读取分析记录。");
         value=await learningApi.prepareCourseSummary(libraryId,courseId,parent);
       }else{
-        const frameTimesMs=frameText.trim()?frameText.split(/[,，\s]+/).filter(Boolean).map(raw=>{const ms=Math.round(Number(raw)*1000);if(!/^(?:\d+(?:\.\d{1,3})?|\.\d{1,3})$/.test(raw)||!Number.isSafeInteger(ms))throw new Error("采样时间必须是非负秒数，最多三位小数。");return ms;}):[];
+        const frameTimesMs=automaticFrames??(frameText.trim()?frameText.split(/[,，\s]+/).filter(Boolean).map(raw=>{const ms=Math.round(Number(raw)*1000);if(!/^(?:\d+(?:\.\d{1,3})?|\.\d{1,3})$/.test(raw)||!Number.isSafeInteger(ms))throw new Error("采样时间必须是非负秒数，最多三位小数。");return ms;}):[]);
         const custom=customTemplates.find(item=>item.id===templateId);
         value=await learningApi.prepareCourseAnalysis(libraryId,courseId,{subtitleId:subtitleId||null,frameTimesMs,...(templateId==="general"?{}:{templateId}),...(custom?{templateVersion:custom.version}:{})});
       }
       if(gate.isCurrent(ticket)&&value.courseId===courseId){setPrepared({value,phase});setNow(Date.now());}
     }catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}finally{busyRef.current=false;if(gate.isCurrent(ticket))setBusy(false);}
   };
-  useEffect(()=>{if(autoPrepare&&!autoStarted.current&&!loading&&templateReady&&!templateBusy&&subtitleState==="ready"&&subtitles.some(row=>row.id===subtitleId&&row.cueCount>0)&&!active(task)){autoStarted.current=true;void prepare("segments");}},[autoPrepare,loading,templateReady,templateBusy,subtitleState,subtitleId,subtitles,task]);
+  useEffect(()=>{if(!autoPrepare||autoStarted.current||loading||!templateReady||templateBusy||subtitleState!=="ready"||active(task))return;const usableSubtitle=subtitles.some(row=>row.id===subtitleId&&row.cueCount>0);if(usableSubtitle){autoStarted.current=true;void prepare("segments");}else if(typeof durationMs==="number"&&Number.isSafeInteger(durationMs)&&durationMs>=4){const frames=[...new Set([1,2,3].map(part=>Math.floor(durationMs*part/4)))];autoStarted.current=true;setFrameText(frames.map(ms=>String(ms/1000)).join(", "));void prepare("segments",undefined,frames);}},[autoPrepare,loading,templateReady,templateBusy,subtitleState,subtitleId,subtitles,task,durationMs]);
   const start=async()=>{
     if(!prepared||!consent||busyRef.current||templateOperation.current||active(task))return;
     if(prepared.value.expiresAt*1000<=Date.now()){setError("预览已过期，请重新预览并确认费用。");setConsent(false);return;}

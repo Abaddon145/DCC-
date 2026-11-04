@@ -414,6 +414,19 @@ pub fn list_learning_courses(
     }))
 }
 #[tauri::command]
+pub fn search_learning_courses(
+    state: State<AppState>,
+    expected_library_id: String,
+    query: String,
+    series_id: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<Course>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, _| {
+        store::search_courses(db, &query, series_id.as_deref(), offset, limit)
+    }))
+}
+#[tauri::command]
 pub fn list_learning_series(
     state: State<AppState>,
     expected_library_id: String,

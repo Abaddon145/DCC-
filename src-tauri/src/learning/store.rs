@@ -64,6 +64,62 @@ pub fn list_courses(
         limit,
     })
 }
+
+pub fn search_courses(
+    db: &Connection,
+    query: &str,
+    series_id: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<crate::models::Page<Course>, String> {
+    let query = query.trim();
+    if query.chars().count() > 200 {
+        return Err("搜索内容不能超过 200 字".into());
+    }
+    if let Some(id) = series_id {
+        uuid(id)?;
+    }
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if let Some(id) = series_id {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM learning_series WHERE id=?1)",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            return Err("系列不存在或不属于当前库".into());
+        }
+    }
+    let filter="FROM learning_courses c JOIN media_entries e ON e.id=c.media_entry_id WHERE e.kind='video' AND e.deleted_at IS NULL AND (?1='' OR instr(lower(COALESCE(NULLIF(c.title_override,''),e.name)),lower(?1))>0) AND (?2 IS NULL OR EXISTS(SELECT 1 FROM learning_series_courses sc WHERE sc.series_id=?2 AND sc.course_id=c.id))";
+    let total = tx
+        .query_row(
+            &format!("SELECT count(*) {filter}"),
+            params![query, series_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let offset = offset.max(0);
+    let limit = limit.clamp(1, 200);
+    let items = {
+        let sql=format!("SELECT c.id,c.media_entry_id,COALESCE(NULLIF(c.title_override,''),e.name),c.position_ms,c.duration_ms,c.rate,c.completed,c.progress_revision {filter} ORDER BY CASE WHEN ?2 IS NOT NULL THEN (SELECT position FROM learning_series_courses WHERE series_id=?2 AND course_id=c.id) END,c.updated_at DESC,c.id LIMIT ?3 OFFSET ?4");
+        let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![query, series_id, limit, offset], course_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(crate::models::Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
 pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
     uuid(id)?;
     let mut value = db
@@ -184,6 +240,38 @@ mod learning_store_tests {
         db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','same title',?2,'now','now')",rusqlite::params![id,file]).unwrap();
         db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,duration_ms,created_at) VALUES(?1,?2,'main','video.mp4','video.mp4',?3,1000,'now')",rusqlite::params![file,id,format!("media-library/video/{id}/video.mp4")]).unwrap();
         id
+    }
+    #[test]
+    fn learning_course_search_scopes_series_and_treats_wildcards_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+        let first = ensure_course(&db, &media(&db)).unwrap();
+        let second = ensure_course(&db, &media(&db)).unwrap();
+        db.execute(
+            "UPDATE learning_courses SET title_override='材质 100%' WHERE id=?1",
+            [&first.id],
+        )
+        .unwrap();
+        let series = upsert_series(&mut db, None, "系列", "", None).unwrap();
+        set_series_members(
+            &mut db,
+            &series.id,
+            series.revision,
+            &[second.id.clone(), first.id.clone()],
+        )
+        .unwrap();
+        let all = search_courses(&db, "", Some(&series.id), 0, 50).unwrap();
+        assert_eq!(
+            all.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![second.id.as_str(), first.id.as_str()]
+        );
+        let matched = search_courses(&db, "%", Some(&series.id), 0, 50).unwrap();
+        assert_eq!(matched.total, 1);
+        assert_eq!(matched.items[0].id, first.id);
+        assert!(search_courses(&db, "", Some("bad-id"), 0, 50).is_err());
     }
     #[test]
     fn learning_course_reuses_media_across_series() {
