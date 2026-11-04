@@ -43,6 +43,12 @@ pub fn normalize_global(mut value: GlobalPreferences) -> Result<GlobalPreference
 }
 
 pub fn normalize_library(mut value: LibraryPreferences) -> LibraryPreferences {
+    if crate::learning::analysis::template_instructions(&value.default_analysis_template_id, 1)
+        .is_err()
+        && uuid::Uuid::parse_str(&value.default_analysis_template_id).is_err()
+    {
+        value.default_analysis_template_id = "general".into();
+    }
     const GROUPS: [&[&str]; 4] = [
         &[
             "library",
@@ -739,6 +745,26 @@ fn rewrite_collection_tag_ids(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    #[test]
+    fn analysis_default_template_is_library_scoped_and_validated() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE library_preferences(id INTEGER PRIMARY KEY,settings_json TEXT NOT NULL,updated_at TEXT NOT NULL)").unwrap();
+        let mut prefs = LibraryPreferences::default();
+        prefs.default_analysis_template_id = "tutorial_steps".into();
+        save_library_preferences(&db, prefs).unwrap();
+        assert_eq!(
+            load_library_preferences(&db)
+                .unwrap()
+                .default_analysis_template_id,
+            "tutorial_steps"
+        );
+        let mut invalid = LibraryPreferences::default();
+        invalid.default_analysis_template_id = "bad-value".into();
+        assert_eq!(
+            normalize_library(invalid).default_analysis_template_id,
+            "general"
+        );
+    }
     #[test]
     fn library_preferences_keep_library_first_and_unknown_modules() {
         let mut value = LibraryPreferences::default();

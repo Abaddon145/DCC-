@@ -405,6 +405,7 @@ fn application_builder(
                     learning::commands::stop_learning_playback,
                     learning::commands::list_learning_unassigned_videos,
                     learning::commands::list_course_analysis_templates,
+                    learning::commands::get_course_analysis_default,
                     learning::commands::save_course_analysis_template,
                     learning::commands::delete_course_analysis_template,
                     learning::commands::list_learning_membership_preview,

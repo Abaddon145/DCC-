@@ -11,6 +11,8 @@ import { TranslationGlossaryManager } from "./TranslationGlossaryManager";
 import { ReliabilitySettings } from "./ReliabilitySettings";
 import { TranslationServiceOptions } from "./TranslationServiceOptions";
 import {DownloadSettingsPanel} from "../features/download/DownloadSettingsPanel";
+import {learningApi} from "../features/learning/api";
+import type {CourseAnalysisTemplate} from "../features/learning/types";
 
 type SettingsTab = "appearance" | "view" | "modules" | "shortcuts" | "startup" | "online" | "download" | "data";
 export function ExternalOriginalsNotice({libraryId}:{libraryId:string}) {
@@ -46,6 +48,7 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
   const [saved, setSaved] = useState<PersonalizationState | null>(null);
   const [global, setGlobal] = useState<GlobalPreferences>(defaultGlobalPreferences);
   const [library, setLibrary] = useState<LibraryPreferences>(defaultLibraryPreferences);
+  const [analysisTemplates,setAnalysisTemplates]=useState<CourseAnalysisTemplate[]>([]),[analysisTemplatesError,setAnalysisTemplatesError]=useState(false);
   const reorderCleanup=useRef<(()=>void)|null>(null);useEffect(()=>()=>reorderCleanup.current?.(),[]);
 
   const load = () => api.getLibraryLocations().then(setState).catch(error => notify(String(error), true));
@@ -55,6 +58,7 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
     void api.getPersonalization?.().then(value => { setSaved(value); setGlobal({...value.global,shortcuts:{...noteShortcutDefaults,...value.global.shortcuts}}); setLibrary(value.library); applyGlobalPreferences(value.global); }).catch(() => undefined);
   }, []);
   useEffect(() => { applyGlobalPreferences(global); }, [global]);
+  useEffect(()=>{let active=true;const id=state?.current.libraryId;if(id){setAnalysisTemplatesError(false);void learningApi.listCourseAnalysisTemplates(id).then(rows=>{if(active)setAnalysisTemplates(rows);}).catch(()=>{if(active){setAnalysisTemplates([]);setAnalysisTemplatesError(true);}});}return()=>{active=false};},[state?.current.libraryId]);
 
   const closeAndRestore = () => { if (saved) applyGlobalPreferences(saved.global); onClose(); };
   const conflicts = useMemo(() => shortcutConflicts(global.shortcuts), [global.shortcuts]);
@@ -121,7 +125,8 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
         {tab === "startup" && <><SettingsTitle title="启动行为" text="控制当前素材库打开时的初始状态。" /><section><SelectRow label="启动模块" value={library.startupModule} onChange={value => updateLibrary("startupModule", value)} options={moduleRegistry.filter(item => item.id === "library" || !library.disabledModules.includes(item.id)).map(item => [item.id,item.label])} /><SelectRow label="默认排序" value={library.defaultSort} onChange={value => updateLibrary("defaultSort", value as LibraryPreferences["defaultSort"])} options={[["updated","最近更新"],["name","名称"],["created","创建时间"],["recent","最近查看"],["favorite","收藏优先"]]} /><CheckRow label="记忆上次打开的模块" checked={library.rememberLastContext} onChange={value => updateLibrary("rememberLastContext", value)} /><CheckRow label="记忆各模块搜索、文件夹、项目和浏览位置" checked={library.rememberWorkspace ?? true} onChange={value => updateLibrary("rememberWorkspace", value)} /><CheckRow label="分类树默认展开" checked={library.categoryTreeExpanded} onChange={value => updateLibrary("categoryTreeExpanded", value)} /></section></>}
         {tab === "online" && <><SettingsTitle title="在线服务" text="除翻译、Fab 和链接检查外，软件可以完全离线使用。" />
           <section><h3>在线翻译</h3><div className="translation-settings"><div className="translation-settings-title"><Languages size={20} /><div><strong>百度翻译开放平台</strong><span>{baiduConfigured ? "凭据已配置" : "尚未配置凭据"} · 密钥不会进入素材库或备份</span></div></div><div className="credential-grid"><label><span>APP ID</span><input aria-label="APP ID" value={appId} onChange={event => setAppId(event.target.value)} placeholder={baiduConfigured ? "输入新的 APP ID 可替换凭据" : "百度翻译 APP ID"} /></label><label><span>密钥</span><input aria-label="密钥" type="password" value={secretKey} onChange={event => setSecretKey(event.target.value)} placeholder="不会回显已保存密钥" /></label></div><p>翻译时仅将名称、描述、标签和许可文字发送给百度翻译；首次配置可直接填写两项后点击“保存并测试”。</p><CheckRow label="Fab 导入后自动补齐缺失的中文内容" checked={translation?.fabAutoTranslate ?? true} onChange={async enabled => { try { await api.setFabAutoTranslate(enabled); setTranslation(current => current ? { ...current, fabAutoTranslate: enabled } : current); } catch (error) { notify(String(error), true); } }} /><div className="translation-settings-actions"><button className="primary-button" disabled={translationBusy || !hasEnteredCredentials} onClick={saveCredentials}>保存凭据</button><button className="secondary-button" disabled={translationBusy || (!baiduConfigured && !hasEnteredCredentials)} onClick={testTranslation}>{hasEnteredCredentials ? "保存并测试" : "测试连接"}</button><button className="secondary-button danger" disabled={!baiduConfigured || translationBusy} onClick={removeCredentials}>删除凭据</button></div></div></section>
-          <TranslationServiceOptions settings={translation} reload={loadTranslation} notify={notify} />
+          {analysisTemplatesError&&<p role="alert">无法读取自定义分析模板，请重新打开设置。</p>}
+          <TranslationServiceOptions settings={translation} reload={loadTranslation} notify={notify} defaultTemplateId={library.defaultAnalysisTemplateId||"general"} customTemplates={analysisTemplates} onDefaultTemplateChange={id=>updateLibrary("defaultAnalysisTemplateId",id)} />
           <section><TranslationGlossaryManager notify={notify} /></section>
         </>}
         {tab === "data" && state && <ExternalOriginalsNotice key={state.current.libraryId} libraryId={state.current.libraryId}/>}

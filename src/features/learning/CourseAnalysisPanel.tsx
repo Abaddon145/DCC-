@@ -7,11 +7,11 @@ import {learningApi} from "./api";
 import {learningTime} from "./LearningControls";
 import type {CourseAnalysisDetail,CourseAnalysisHistoryItem,CourseAnalysisPreview,CourseAnalysisRequest,CourseAnalysisResult,CourseAnalysisTemplate,LearningSubtitle,WhisperComponentStatus} from "./types";
 import "./LearningWorkspace.css";
+import {analysisTemplateLabels as templates} from "./analysisTemplates";
 
 export interface CourseAnalysisPanelProps {libraryId:string;courseId:string;canSeek?:boolean;autoPrepare?:boolean;onSeek:(ms:number)=>void}
 type Phase=CourseAnalysisRequest["stage"];
 const labels:Record<string,string>={queued:"排队中",running:"进行中",partial:"部分完成",completed:"已完成",failed:"失败",cancelled:"已取消",pending:"待处理",stopped:"已停止",interrupted:"已中断",paused:"已暂停"};
-const templates:Record<string,string>={general:"综合分析",tutorial_steps:"操作步骤",key_points:"核心要点",concepts:"术语与概念"};
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
 function preferredSubtitle(rows:LearningSubtitle[],previous:string){
   if(rows.some(row=>row.id===previous))return previous;
@@ -60,6 +60,7 @@ export function CourseAnalysisPanel(props:CourseAnalysisPanelProps){return <Anal
 function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSeek}:CourseAnalysisPanelProps){
   const [subtitles,setSubtitles]=useState<LearningSubtitle[]>([]),[subtitleId,setSubtitleId]=useState(""),[frameText,setFrameText]=useState(""),[subtitleState,setSubtitleState]=useState<"loading"|"ready"|"error">("loading");
   const [templateId,setTemplateId]=useState("general");
+  const [templateNotice,setTemplateNotice]=useState("");
   const [customTemplates,setCustomTemplates]=useState<CourseAnalysisTemplate[]>([]),[templateReady,setTemplateReady]=useState(false),[templateBusy,setTemplateBusy]=useState(false),[templateRead,setTemplateRead]=useState(0);
   const [templateDraft,setTemplateDraft]=useState<{id:string|null;version:number|null;name:string;focus:string}>({id:null,version:null,name:"",focus:""});
   const [subtitleRead,setSubtitleRead]=useState(0);
@@ -74,7 +75,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
   const hintId=useId();
   const autoStarted=useRef(false);
   const templateOperation=useRef(false);
-  useEffect(()=>{let keep=true;void learningApi.listCourseAnalysisTemplates(libraryId).then(rows=>{if(keep){setCustomTemplates(rows);setTemplateId(value=>templates[value]||rows.some(row=>row.id===value)?value:"general");setTemplateReady(true);}}).catch(reason=>{if(keep)setError(`读取自定义模板失败：${String(reason)}`)});return()=>{keep=false};},[libraryId,templateRead]);
+  useEffect(()=>{let keep=true;void Promise.all([learningApi.listCourseAnalysisTemplates(libraryId),learningApi.getCourseAnalysisDefault(libraryId)]).then(([rows,preferred])=>{if(keep){setCustomTemplates(rows);if(templateRead===0&&!templates[preferred]&&!rows.some(row=>row.id===preferred))setTemplateNotice("默认模板已不可用，已改用综合分析；可在设置中重新选择。");setTemplateId(value=>{const desired=templateRead===0?preferred:value;return templates[desired]||rows.some(row=>row.id===desired)?desired:"general";});setTemplateReady(true);}}).catch(reason=>{if(keep)setError(`读取分析模板失败：${String(reason)}`)});return()=>{keep=false};},[libraryId,templateRead]);
   useEffect(()=>{let keep=true;void learningApi.listSubtitles(libraryId,courseId).then(rows=>{if(!keep)return;const wanted=pendingSubtitle.current;setSubtitles(rows);setSubtitleId(previous=>wanted&&rows.some(row=>row.id===wanted)?(pendingSubtitle.current="",wanted):preferredSubtitle(rows,previous));setSubtitleState("ready");}).catch(reason=>{if(keep){setError(String(reason));setSubtitleState("error");}});return()=>{keep=false;};},[libraryId,courseId,subtitleRead]);
   const refresh=useCallback(async()=>{
     const ticket=historyGate.begin();
@@ -104,7 +105,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
   const invalidatePreview=()=>{gate.invalidate();setPrepared(null);setConsent(false);};
   const saveTemplate=async()=>{
     if(templateOperation.current||busyRef.current||!templateReady)return;templateOperation.current=true;setTemplateBusy(true);setError("");
-    try{const saved=await learningApi.saveCourseAnalysisTemplate(libraryId,templateDraft.id,templateDraft.version,templateDraft.name,templateDraft.focus);setCustomTemplates(rows=>[...rows.filter(row=>row.id!==saved.id),saved]);setTemplateId(saved.id);setTemplateDraft({id:saved.id,version:saved.version,name:saved.name,focus:saved.focus});invalidatePreview();setNotice("模板已保存；请重新预览后确认分析。");}
+    try{const saved=await learningApi.saveCourseAnalysisTemplate(libraryId,templateDraft.id,templateDraft.version,templateDraft.name,templateDraft.focus);setCustomTemplates(rows=>[...rows.filter(row=>row.id!==saved.id),saved]);setTemplateId(saved.id);setTemplateNotice("");setTemplateDraft({id:saved.id,version:saved.version,name:saved.name,focus:saved.focus});invalidatePreview();setNotice("模板已保存；请重新预览后确认分析。");}
     catch(reason){setError(`保存模板失败：${String(reason)}。可刷新模板后重试。`);}finally{templateOperation.current=false;setTemplateBusy(false);}
   };
   const deleteTemplate=async()=>{
@@ -127,7 +128,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
       if(gate.isCurrent(ticket)&&value.courseId===courseId){setPrepared({value,phase});setNow(Date.now());}
     }catch(reason){if(gate.isCurrent(ticket))setError(String(reason));}finally{busyRef.current=false;if(gate.isCurrent(ticket))setBusy(false);}
   };
-  useEffect(()=>{if(autoPrepare&&!autoStarted.current&&!loading&&!templateBusy&&subtitleState==="ready"&&subtitles.some(row=>row.id===subtitleId&&row.cueCount>0)&&!active(task)){autoStarted.current=true;void prepare("segments");}},[autoPrepare,loading,templateBusy,subtitleState,subtitleId,subtitles,task]);
+  useEffect(()=>{if(autoPrepare&&!autoStarted.current&&!loading&&templateReady&&!templateBusy&&subtitleState==="ready"&&subtitles.some(row=>row.id===subtitleId&&row.cueCount>0)&&!active(task)){autoStarted.current=true;void prepare("segments");}},[autoPrepare,loading,templateReady,templateBusy,subtitleState,subtitleId,subtitles,task]);
   const start=async()=>{
     if(!prepared||!consent||busyRef.current||templateOperation.current||active(task))return;
     if(prepared.value.expiresAt*1000<=Date.now()){setError("预览已过期，请重新预览并确认费用。");setConsent(false);return;}
@@ -156,7 +157,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
     <form className="learning-analysis-form" onSubmit={event=>{event.preventDefault();void prepare("segments");}}>
       <fieldset>
         <legend>分析材料</legend>
-        <label>分析模板<select aria-label="分析模板" value={templateId} disabled={templateBusy||busy||active(task)} onChange={event=>{setTemplateId(event.target.value);invalidatePreview();}}>{Object.entries(templates).map(([id,name])=><option value={id} key={id}>{name}</option>)}{customTemplates.map(item=><option value={item.id} key={item.id}>{item.name} · 自定义</option>)}</select></label>
+        <label>分析模板<select aria-label="分析模板" value={templateId} disabled={!templateReady||templateBusy||busy||active(task)} onChange={event=>{setTemplateId(event.target.value);setTemplateNotice("");invalidatePreview();}}>{Object.entries(templates).map(([id,name])=><option value={id} key={id}>{name}</option>)}{customTemplates.map(item=><option value={item.id} key={item.id}>{item.name} · 自定义</option>)}</select></label>{templateNotice&&<p role="status">{templateNotice}</p>}
         <details><summary>管理自定义模板</summary><p>填写希望重点分析的内容；保存或修改后，需要重新预览材料和费用。</p>
           <button type="button" className="secondary-button" disabled={templateBusy||busy||active(task)} onClick={()=>{setTemplateReady(false);setTemplateDraft({id:null,version:null,name:"",focus:""});setError("");invalidatePreview();setTemplateRead(value=>value+1);}}>刷新模板</button>
           {customTemplates.length>0&&<label>编辑已有模板<select aria-label="编辑已有模板" value={templateDraft.id||""} disabled={templateBusy||busy||active(task)} onChange={event=>{const row=customTemplates.find(item=>item.id===event.target.value);setTemplateDraft(row?{...row}:{id:null,version:null,name:"",focus:""});}}><option value="">新建模板</option>{customTemplates.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
@@ -170,7 +171,7 @@ function AnalysisContent({libraryId,courseId,canSeek=true,autoPrepare=false,onSe
         {subtitleState==="ready"&&!usable&&<LocalWhisperOffer libraryId={libraryId} courseId={courseId} disabled={busy||active(task)} onSubtitle={acceptTranscript}/>}
         <label>采样时间（秒）<input value={frameText} disabled={busy||active(task)} placeholder="例如 12.5, 30，可留空" aria-describedby={hintId} onChange={event=>{setFrameText(event.target.value);invalidatePreview();}}/></label>
         <p>留空表示不采样。填写的每个时间只抽取一张 JPEG，不是整段视频画面分析。</p>
-        <button className="secondary-button" disabled={templateBusy||busy||active(task)||loading} type="submit">预览分段分析</button>
+        <button className="secondary-button" disabled={!templateReady||templateBusy||busy||active(task)||loading} type="submit">预览分段分析</button>
       </fieldset>
     </form>
     {busy&&<LoadFeedback label="正在校验资料并处理请求…"/>}

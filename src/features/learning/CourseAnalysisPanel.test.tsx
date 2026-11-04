@@ -6,7 +6,7 @@ import {api} from "../../lib/api";
 import type {CourseAnalysisDetail,CourseAnalysisPreview,CourseAnalysisHistoryItem,CourseAnalysisResult,WhisperComponentStatus} from "./types";
 import type {LibraryTask} from "../../types";
 
-vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn(),transcriptionComponents:vi.fn(),listCourseAnalysisTemplates:vi.fn(),saveCourseAnalysisTemplate:vi.fn(),deleteCourseAnalysisTemplate:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),listCourseAnalyses:vi.fn(),getCourseAnalysis:vi.fn(),prepareCourseAnalysis:vi.fn(),prepareCourseSummary:vi.fn(),transcriptionComponents:vi.fn(),listCourseAnalysisTemplates:vi.fn(),getCourseAnalysisDefault:vi.fn(),saveCourseAnalysisTemplate:vi.fn(),deleteCourseAnalysisTemplate:vi.fn()}}));
 vi.mock("../../lib/api",()=>({api:{startLibraryTask:vi.fn(),listLibraryTasks:vi.fn(),cancelLibraryTask:vi.fn(),getLibraryTask:vi.fn()}}));
 const now=Math.floor(Date.now()/1000);
 const preview:CourseAnalysisPreview={previewId:"preview",courseId:"course",fingerprint:"a".repeat(64),subtitleId:"subtitle",frameIds:["frame"],model:"deepseek-chat",templateId:"general",templateVersion:1,promptVersion:"dcc-course-v1",createdAt:now,expiresAt:now+86400,stages:[{key:"s1",startMs:10000,endMs:12000,cached:true,tokensMax:5000},{key:"s2",startMs:40000,endMs:42000,cached:false,tokensMax:10000}],tokensMax:10000,warnings:["不上传整段视频"]};
@@ -18,6 +18,7 @@ const props={libraryId:"lib",courseId:"course",onSeek:vi.fn()};
 beforeEach(()=>{
   vi.clearAllMocks();
   vi.mocked(learningApi.listCourseAnalysisTemplates).mockResolvedValue([]);
+  vi.mocked(learningApi.getCourseAnalysisDefault).mockResolvedValue("general");
   vi.mocked(learningApi.listSubtitles).mockResolvedValue([{id:"subtitle",courseId:"course",name:"学习字幕.srt",format:"srt",sha256:"a".repeat(64),cueCount:2}]);
   vi.mocked(learningApi.listCourseAnalyses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
   vi.mocked(learningApi.prepareCourseAnalysis).mockResolvedValue(preview);
@@ -60,6 +61,27 @@ it("quickly prepares available subtitles without submitting a paid task",async()
   await screen.findByText(/本次上限 10,000 Token/);
   expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[]});
   expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("uses the saved default template for quick analysis",async()=>{
+  vi.mocked(learningApi.getCourseAnalysisDefault).mockResolvedValue("tutorial_steps");
+  render(<CourseAnalysisPanel {...props} autoPrepare/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[],templateId:"tutorial_steps"});
+  expect(api.startLibraryTask).not.toHaveBeenCalled();
+});
+it("binds quick analysis to the saved custom template version",async()=>{
+  vi.mocked(learningApi.getCourseAnalysisDefault).mockResolvedValue("custom");
+  vi.mocked(learningApi.listCourseAnalysisTemplates).mockResolvedValue([{id:"custom",name:"材质",focus:"节点",version:2}]);
+  render(<CourseAnalysisPanel {...props} autoPrepare/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[],templateId:"custom",templateVersion:2});
+});
+it("falls back to comprehensive analysis when the saved custom template was deleted",async()=>{
+  vi.mocked(learningApi.getCourseAnalysisDefault).mockResolvedValue("deleted-template");
+  render(<CourseAnalysisPanel {...props} autoPrepare/>);
+  await screen.findByText(/本次上限 10,000 Token/);
+  expect(learningApi.prepareCourseAnalysis).toHaveBeenCalledWith("lib","course",{subtitleId:"subtitle",frameTimesMs:[]});
+  expect(screen.getByText(/默认模板已不可用/)).toBeInTheDocument();
 });
 it("quick analysis asks for materials when there are no subtitles",async()=>{
   vi.mocked(learningApi.listSubtitles).mockResolvedValue([]);

@@ -9,6 +9,14 @@ fn custom_templates_survive_backup_restore() {
     let saved =
         super::analysis_templates::save(&source, &source_id, None, None, "材质", "关注节点")
             .unwrap();
+    source
+        .with_library(|db, _| {
+            let mut preferences = crate::organization::load_library_preferences(db)?;
+            preferences.default_analysis_template_id = saved.id.clone();
+            crate::organization::save_library_preferences(db, preferences)?;
+            Ok(())
+        })
+        .unwrap();
     let backup = dir.path().join("templates.dccassetlib");
     source
         .with_library(|db, base| crate::backup::export_library(db, base, &backup))
@@ -21,6 +29,15 @@ fn custom_templates_survive_backup_restore() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, saved.id);
     assert_eq!(list[0].focus, "关注节点");
+    target
+        .with_library(|db, _| {
+            assert_eq!(
+                crate::organization::load_library_preferences(db)?.default_analysis_template_id,
+                saved.id
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

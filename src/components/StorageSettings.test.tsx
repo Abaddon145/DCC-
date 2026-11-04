@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { StorageSettings, ExternalOriginalsNotice } from "./StorageSettings";
 import { api } from "../lib/api";
+vi.mock("../features/learning/api",()=>({learningApi:{listCourseAnalysisTemplates:vi.fn().mockResolvedValue([])}}));
 
 vi.mock("../lib/api", () => ({ api: {
   getLibraryLocations: vi.fn().mockResolvedValue({

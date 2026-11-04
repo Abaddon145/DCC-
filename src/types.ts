@@ -125,6 +125,7 @@ export interface LibraryPreferences {
   lastContext?: { view: ViewMode; request: SearchRequest } | null;
   workspaceContexts?: Record<string, unknown>;
   rememberWorkspace?: boolean;
+  defaultAnalysisTemplateId?: string;
 }
 export interface PersonalizationState { global: GlobalPreferences; library: LibraryPreferences }
 

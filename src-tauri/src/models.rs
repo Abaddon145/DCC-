@@ -469,6 +469,12 @@ pub struct LibraryPreferences {
     pub workspace_contexts: HashMap<String, serde_json::Value>,
     #[serde(default = "default_true_value")]
     pub remember_workspace: bool,
+    #[serde(default = "default_analysis_template_id")]
+    pub default_analysis_template_id: String,
+}
+
+fn default_analysis_template_id() -> String {
+    "general".into()
 }
 
 impl Default for LibraryPreferences {
@@ -492,6 +498,7 @@ impl Default for LibraryPreferences {
             last_context: None,
             workspace_contexts: HashMap::new(),
             remember_workspace: true,
+            default_analysis_template_id: default_analysis_template_id(),
         }
     }
 }

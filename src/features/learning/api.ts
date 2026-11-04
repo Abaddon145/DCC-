@@ -87,6 +87,7 @@ export const learningApi={
   listCourseAnalyses:(expectedLibraryId:string,courseId:string,offset=0,limit=50)=>invoke<Page<CourseAnalysisHistoryItem>>("list_course_analyses",{expectedLibraryId,courseId,offset,limit}),
   getCourseAnalysis:(expectedLibraryId:string,courseId:string,analysisId:string,stageKey:string|null=null,offset=0,limit=50)=>invoke<CourseAnalysisDetail>("get_course_analysis",{expectedLibraryId,courseId,analysisId,stageKey,offset,limit}),
   listCourseAnalysisTemplates:(expectedLibraryId:string)=>invoke<CourseAnalysisTemplate[]>("list_course_analysis_templates",{expectedLibraryId}),
+  getCourseAnalysisDefault:(expectedLibraryId:string)=>invoke<string>("get_course_analysis_default",{expectedLibraryId}),
   saveCourseAnalysisTemplate:(expectedLibraryId:string,id:string|null,version:number|null,name:string,focus:string)=>invoke<CourseAnalysisTemplate>("save_course_analysis_template",{expectedLibraryId,id,version,name,focus}),
   deleteCourseAnalysisTemplate:(expectedLibraryId:string,id:string,version:number)=>invoke<void>("delete_course_analysis_template",{expectedLibraryId,id,version}),
   prepareCourseAnalysis:(expectedLibraryId:string,courseId:string,options:CourseAnalysisOptions)=>invoke<CourseAnalysisPreview>("prepare_course_analysis",{expectedLibraryId,courseId,options}),

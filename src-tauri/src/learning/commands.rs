@@ -3,6 +3,17 @@ use super::{models::*, store};
 use crate::{models::Page, state::AppState};
 use tauri::State;
 #[tauri::command]
+pub fn get_course_analysis_default(
+    state: State<AppState>,
+    expected_library_id: String,
+) -> Result<String, String> {
+    state
+        .with_library_if_id(&expected_library_id, |db, _| {
+            Ok(crate::organization::load_library_preferences(db)?.default_analysis_template_id)
+        })?
+        .ok_or_else(|| "素材库已切换".into())
+}
+#[tauri::command]
 pub fn list_course_analysis_templates(
     state: State<AppState>,
     expected_library_id: String,

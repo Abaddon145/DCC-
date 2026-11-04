@@ -22,6 +22,12 @@ describe("TranslationServiceOptions", () => {
     expect(screen.getByText(/视频分析与翻译、创作共享同一个 DeepSeek 凭据和本机月度额度/)).toBeInTheDocument();
     expect(screen.getByLabelText("DeepSeek 本机月度 Token 上限")).toBeInTheDocument();
   });
+  it("lets the current library choose its default video analysis template", () => {
+    const change=vi.fn();
+    render(<TranslationServiceOptions settings={settings} reload={vi.fn()} notify={vi.fn()} defaultTemplateId="general" customTemplates={[{id:"custom",name:"材质",focus:"节点",version:1}]} onDefaultTemplateChange={change}/>);
+    fireEvent.change(screen.getByLabelText("默认视频分析模板"),{target:{value:"custom"}});
+    expect(change).toHaveBeenCalledWith("custom");
+  });
   it("shows course usage separately without counting it as translation", () => {
     render(<TranslationServiceOptions settings={{ ...settings, usage: { ...settings.usage!, creativeTokens: 50, courseTokens: 100 } }} reload={vi.fn()} notify={vi.fn()} />);
     const usage = screen.getByText(/DeepSeek 250 Token/);
