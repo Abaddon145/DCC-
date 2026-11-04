@@ -78,6 +78,7 @@ it("creates a learning category and assigns a series without touching courses",a
   fireEvent.change(screen.getByLabelText("新分类名称"),{target:{value:"材质"}});
   fireEvent.click(screen.getByRole("button",{name:"创建分类"}));
   await screen.findByRole("button",{name:"材质 · 0 系列"});
+  await waitFor(()=>expect(screen.getByLabelText("材质系列的分类")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("材质系列的分类"),{target:{value:"cat1"}});
   expect(await screen.findByRole("button",{name:"材质 · 1 系列"})).toBeInTheDocument();
   expect(learningApi.assignSeriesCategory).toHaveBeenCalledWith("lib","s1",1,"cat1");
@@ -98,4 +99,20 @@ it("reloads series after an assignment so an overlapping refresh cannot restore 
   await waitFor(()=>expect(learningApi.listSeries).toHaveBeenCalledTimes(3));
   await act(async()=>finishRefresh([old]));
   expect(await screen.findByRole("button",{name:"材质 · 1 系列"})).toBeInTheDocument();
+});
+it("requires an explicit in-app confirmation before deleting a category",async()=>{
+  vi.mocked(learningApi.listCourses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
+  vi.mocked(learningApi.listCategories).mockResolvedValue([{id:"cat1",name:"材质",revision:1}]);
+  vi.mocked(learningApi.deleteCategory).mockResolvedValue(undefined);
+  render(<LearningLibraryHome libraryId="lib" onOpen={vi.fn()} onOrganize={vi.fn()}/>);
+  await screen.findByRole("button",{name:"材质 · 0 系列"});
+  fireEvent.click(screen.getByText("管理分类"));
+  fireEvent.click(screen.getByRole("button",{name:"删除分类"}));
+  expect(learningApi.deleteCategory).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog",{name:"删除分类确认"})).toHaveTextContent("课程不会删除");
+  fireEvent.click(screen.getByRole("button",{name:"取消删除"}));
+  expect(learningApi.deleteCategory).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button",{name:"删除分类"}));
+  fireEvent.click(screen.getByRole("button",{name:"确认删除分类"}));
+  await waitFor(()=>expect(learningApi.deleteCategory).toHaveBeenCalledWith("lib","cat1",1));
 });
