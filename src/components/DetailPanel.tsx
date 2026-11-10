@@ -38,6 +38,7 @@ export function DetailPanel({ onTranslate, translating = false, onAi, asset, con
   const [lightbox, setLightbox] = useState(false);
   const [epicOpen, setEpicOpen] = useState<"quick" | "project" | null>(null);
   const [detailLanguage, setDetailLanguage] = useState<ContentLanguage>(contentLanguage);
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [referenceMenu, setReferenceMenu] = useState<{ left: number; top: number } | null>(null);
   const referenceButton = useRef<HTMLButtonElement>(null);
   const previews = useMemo<PreviewItem[]>(() => asset ? [...asset.images.map(image => ({ type: "image" as const, image })), ...(asset.media || []).map(media => ({ type: "media" as const, media })), ...(asset.mediaLibrary || []).map(media => ({ type: "library" as const, media }))] : [], [asset]);
@@ -50,6 +51,7 @@ export function DetailPanel({ onTranslate, translating = false, onAi, asset, con
     setEpicOpen(null);
     setReferenceMenu(null);
     setDetailLanguage(contentLanguage);
+    setDescriptionExpanded(false);
   }, [asset?.id]);
   useEffect(() => { const handler=(event:KeyboardEvent)=>{ if(event.code!=="Space" || epicOpen || !asset || !previews.length || (event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]")) return; event.preventDefault(); setLightbox(true); }; window.addEventListener("keydown",handler); return()=>window.removeEventListener("keydown",handler); },[asset,previews.length,epicOpen]);
   useEffect(() => { if (!asset) return; const handler = (event: KeyboardEvent) => { if (event.key === "Escape" && !lightbox && !referenceMenu && !epicOpen) onClose(); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [asset, lightbox, referenceMenu, epicOpen, onClose]);
@@ -74,8 +76,6 @@ export function DetailPanel({ onTranslate, translating = false, onAi, asset, con
         {!!pendingFields.length && <section className="translation-pending-status"><strong>双语待补齐</strong><p>{pendingFields.join("、")}待补译；缺失内容暂用另一语言显示。</p>{onTranslate && <button className="secondary-button" disabled={translating} onClick={() => onTranslate(asset.id)}>{translating ? "正在补译…" : "补齐缺失双语"}</button>}</section>}
         <div className="detail-language-row"><div className="language-tabs compact"><button className={detailLanguage === "zh-CN" ? "active" : ""} onClick={() => setDetailLanguage("zh-CN")}>中文</button><button className={detailLanguage === "en" ? "active" : ""} onClick={() => setDetailLanguage("en")}>English</button></div>{!preferred?.name.trim() && <span>{detailLanguage === "zh-CN" ? "暂无中文，当前显示英文" : "No English version · 当前显示中文"}</span>}</div>
         <div className="detail-title-row"><div><span className="eyebrow">{asset.categoryName || "未分类"}</span><h2>{shownName}</h2></div><button className={`icon-button ${asset.favorite ? "favorite-active" : ""}`} onClick={onFavorite}><Heart size={19} fill={asset.favorite ? "currentColor" : "none"} /></button></div>
-        {shownDescription && <p className="description"><LinkifiedText text={shownDescription} onOpen={onOpenExternal} /></p>}
-        <div className="detail-tags">{shownTags.map(tag => <span key={tag}>#{tag}</span>)}</div>
         <dl className="property-grid">
           <div><dt><FileBox size={14} />软件 / 版本</dt><dd>{[...asset.dccTools, ...asset.versions].join(" · ") || "—"}</dd></div>
           <div><dt><FileBox size={14} />格式 / 大小</dt><dd>{[asset.formats.join(", "), formatBytes(asset.sizeBytes)].filter(v => v && v !== "—").join(" · ") || "—"}</dd></div>
@@ -83,21 +83,27 @@ export function DetailPanel({ onTranslate, translating = false, onAi, asset, con
           <div><dt><Calendar size={14} />更新于</dt><dd>{new Date(asset.updatedAt).toLocaleDateString("zh-CN")}</dd></div>
           <div className="wide"><dt><Link2 size={14} />许可</dt><dd>{shownLicense || "未填写"}</dd></div>
         </dl>
+        {shownDescription && <div className="detail-description"><p className="description"><LinkifiedText text={!descriptionExpanded && shownDescription.length > 240 ? `${shownDescription.slice(0, 240)}…` : shownDescription} onOpen={onOpenExternal} /></p>{shownDescription.length > 240 && <button type="button" className="description-toggle" aria-expanded={descriptionExpanded} onClick={() => setDescriptionExpanded(value => !value)}>{descriptionExpanded ? "收起介绍" : "展开完整介绍"}</button>}</div>}
+        <div className="detail-tags">{shownTags.map(tag => <span key={tag}>#{tag}</span>)}</div>
         <div className={`link-check-detail ${asset.shareUrl ? asset.linkCheckStatus : "missing"}`}><div><strong>{!asset.shareUrl ? "未添加百度网盘链接" : asset.linkCheckStatus === "valid" ? "网盘链接有效" : asset.linkCheckStatus === "invalid" ? "网盘链接已失效" : asset.linkCheckStatus === "error" ? "暂时无法判断链接状态" : "网盘链接尚未检查"}</strong><span>{!asset.shareUrl ? "该素材可仅使用 Fab 来源和预览信息。" : asset.linkCheckMessage || "仅验证分享是否存在，不检查提取码。"}</span>{asset.linkCheckedAt && <small>检查于 {new Date(asset.linkCheckedAt).toLocaleString("zh-CN")}</small>}</div>{asset.shareUrl && <button className="secondary-button" disabled={checkingLink} onClick={onCheckLink}><RefreshCw size={14} className={checkingLink ? "spinning" : ""} />{checkingLink ? "检查中" : "重新检查"}</button>}</div>
         {asset.sourceUrl && <button className="source-link" onClick={onSourceOpen}>查看素材来源 <ExternalLink size={13} /></button>}
       </div>
       <div className="detail-actions">
+        <div className="detail-action-group" role="group" aria-label="打开素材">
         {(asset.fabListingId || /^https?:\/\/(?:www\.)?fab\.com\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?listings\/[0-9a-f-]{36}(?:[/?#]|$)/i.test(asset.sourceUrl)) && <><button className="secondary-button epic-detail-action" onClick={() => setEpicOpen("quick")}><ExternalLink size={17}/>快速定位 Fab 商品</button><button className="secondary-button epic-detail-action" onClick={() => setEpicOpen("project")}><ExternalLink size={17}/>通过 Epic 添加到 UE 工程</button></>}
+        {asset.shareUrl && <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>}
+        {asset.extractionCode && <button className="secondary-button" onClick={onCopy} title="复制提取码"><Copy size={17} /></button>}
+        </div>
+        <div className="detail-action-group" role="group" aria-label="管理素材">
         {compare&&currentPreview?.type==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"asset",id:currentPreview.image.id,title:currentPreview.image.originalName})}>加入 A/B 对比</button>}
         {compare&&currentPreview?.type==="library"&&currentPreview.media.kind==="image"&&<button className="secondary-button" onClick={()=>compare.add({kind:"media",id:currentPreview.media.primaryFileId,title:currentPreview.media.name})}>加入 A/B 对比</button>}
-        <button className="primary-button grow" onClick={onOpen}><ExternalLink size={17} />打开百度网盘</button>
-        {asset.extractionCode && <button className="secondary-button" onClick={onCopy} title="复制提取码"><Copy size={17} /></button>}
         {!!(asset.images.length + (asset.media?.length || 0)) && <button className="secondary-button" onClick={() => onCollectMedia?.(asset.id)} title="复制为独立媒体条目"><Images size={17} />收录到媒体库</button>}
         {onAi && <button className="secondary-button" onClick={() => onAi(asset.id)}>AI 整理</button>}
         {onAddProject && <button className="secondary-button" onClick={() => onAddProject(asset.id)} title="加入创作项目"><BriefcaseBusiness size={17} /></button>}
         {!!asset.images.length && onAddReference && <button ref={referenceButton} className="secondary-button" title="加入参考板" onClick={() => { const rect = referenceButton.current?.getBoundingClientRect(); if (!rect) return; const height = 82; setReferenceMenu(current => current ? null : { left: Math.max(8, Math.min(window.innerWidth - 180, rect.right - 172)), top: rect.top > height + 8 ? rect.top - height - 6 : rect.bottom + 6 }); }}><Images size={17} /></button>}
         <button className="secondary-button" onClick={onEdit} title="编辑"><Edit3 size={17} /></button>
         <button className="secondary-button danger" onClick={onDelete} title="删除"><Trash2 size={17} /></button>
+        </div>
       </div>
       {lightbox && <MediaViewer items={previews} initialIndex={selectedPreview} title={shownName} onClose={() => setLightbox(false)} />}
       {epicOpen && createPortal(<EpicFabDialog mode={epicOpen} assetId={asset.id} title={shownName} productName={asset.localizations.en?.name.trim() || shownName} onClose={() => setEpicOpen(null)}/>, document.body)}

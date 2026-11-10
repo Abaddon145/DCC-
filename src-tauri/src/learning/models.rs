@@ -20,6 +20,8 @@ pub struct Series {
     pub revision: i64,
     pub ordered_course_ids: Vec<String>,
     pub category_id: Option<String>,
+    #[serde(default)]
+    pub cover_file_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

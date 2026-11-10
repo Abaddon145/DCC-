@@ -36,17 +36,18 @@ beforeEach(()=>{
 it("retains panel input across tabs and focus changes without restarting playback",async()=>{
   render(<LearningWorkspace {...props}/>);await screen.findByRole("button",{name:"播放"});
   fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
-  const sampling=await screen.findByRole("textbox",{name:"采样时间（秒）"});
-  fireEvent.change(sampling,{target:{value:"12.5, 30"}});
+  const template=await screen.findByRole("combobox",{name:"分析模板"});
+  await waitFor(()=>expect(template).toBeEnabled());
+  fireEvent.change(template,{target:{value:"tutorial_steps"}});
   fireEvent.click(screen.getByRole("button",{name:"课程字幕"}));
   await screen.findByRole("region",{name:"课程字幕"});
   fireEvent.click(screen.getByRole("button",{name:"课程分析"}));
-  expect(await screen.findByRole("textbox",{name:"采样时间（秒）"})).toHaveValue("12.5, 30");
+  expect(await screen.findByRole("combobox",{name:"分析模板"})).toHaveValue("tutorial_steps");
   fireEvent.click(screen.getByRole("button",{name:"固定学习资料"}));
   fireEvent.click(screen.getByRole("button",{name:"专注学习"}));
   expect(screen.queryByRole("region",{name:"课程分析"})).toBeNull();
   fireEvent.click(screen.getByRole("button",{name:"恢复面板布局"}));
-  expect(screen.getByRole("textbox",{name:"采样时间（秒）"})).toHaveValue("12.5, 30");
+  expect(screen.getByRole("combobox",{name:"分析模板"})).toHaveValue("tutorial_steps");
   expect(learningApi.startPlayback).toHaveBeenCalledTimes(1);
   expect(learningApi.stopPlayback).not.toHaveBeenCalled();
 });

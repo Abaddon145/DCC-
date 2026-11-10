@@ -288,15 +288,25 @@ pub fn parse_whisper_json(
         }
     };
     let mut cues: Vec<TranscriptCue> = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
         let start = row
             .pointer("/offsets/from")
             .and_then(|v| v.as_u64())
             .ok_or("转写起始时间必须为非负整数毫秒")?;
-        let end = row
+        let raw_end = row
             .pointer("/offsets/to")
             .and_then(|v| v.as_u64())
             .ok_or("转写结束时间必须为非负整数毫秒")?;
+        // Whisper can place the final boundary slightly beyond the audio duration.
+        let end = if index + 1 == rows.len()
+            && start < duration_ms
+            && raw_end > duration_ms
+            && raw_end <= duration_ms.saturating_add(100)
+        {
+            duration_ms
+        } else {
+            raw_end
+        };
         let text = row
             .get("text")
             .and_then(|v| v.as_str())
@@ -310,7 +320,7 @@ pub fn parse_whisper_json(
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
-            return Err("转写时间、顺序或正文无效，未夹断时间或跳过坏行".into());
+            return Err("转写时间、顺序或正文无效，未导入坏行".into());
         }
         cues.push(TranscriptCue {
             id: format!("{subtitle_id}:{}", cues.len()),

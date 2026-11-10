@@ -19,7 +19,8 @@ describe("TranslationServiceOptions", () => {
   it("makes shared video analysis credentials and limits discoverable", () => {
     render(<TranslationServiceOptions settings={settings} reload={vi.fn()} notify={vi.fn()} />);
     expect(screen.getByRole("heading", {name:"视频分析设置"})).toBeInTheDocument();
-    expect(screen.getByText(/视频分析与翻译、创作共享同一个 DeepSeek 凭据和本机月度额度/)).toBeInTheDocument();
+    expect(screen.getByText(/视频分析与翻译、创作共享 DeepSeek 凭据和本机月度额度/)).toBeInTheDocument();
+    expect(screen.getByText(/请求可能产生费用/)).toBeInTheDocument();
     expect(screen.getByLabelText("DeepSeek 本机月度 Token 上限")).toBeInTheDocument();
   });
   it("lets the current library choose its default video analysis template", () => {

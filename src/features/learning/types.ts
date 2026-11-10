@@ -31,7 +31,7 @@ export interface StoredNotePreview {
   conversion:{document:import("@tiptap/react").JSONContent|null;archiveHash:string;warnings:string[];pending:boolean;unsupported:{placeholderId:string;startByte:number;endByte:number;label:string;reason:string}[]};
   receipt:NoteCommitReceipt|null;
 }
-export interface Series {id:string;name:string;description:string;revision:number;orderedCourseIds:string[];categoryId?:string|null}
+export interface Series {id:string;name:string;description:string;revision:number;orderedCourseIds:string[];categoryId?:string|null;coverFileId?:string|null}
 export interface LearningCategory {id:string;name:string;revision:number}
 export interface SeriesInput {id?:string;name:string;description:string;expectedRevision?:number}
 export interface ProgressInput {positionMs:number;durationMs:number|null;rate:number;completed:boolean}
@@ -60,7 +60,7 @@ export interface WhisperModelStatus {id:"base"|"small";label:string;bytes:number
 export interface WhisperComponentStatus {version:string;modelRevision:string;toolReady:boolean;toolMessage:string;models:WhisperModelStatus[]}
 export interface CourseAnalysisOptions {subtitleId?:string|null;frameTimesMs:number[];templateId?:string;templateVersion?:number}
 export interface CourseAnalysisTemplate {id:string;name:string;focus:string;version:number}
-export interface CourseAnalysisRequest {courseId:string;previewId:string;stage:"segments"|"summary"}
+export interface CourseAnalysisRequest {courseId:string;previewId:string;stage:"segments"|"summary";autoSummary?:boolean}
 export interface CourseStagePreview {key:string;startMs:number;endMs:number;cached:boolean;tokensMax:number}
 export interface CourseAnalysisPreview {
   previewId:string;courseId:string;fingerprint:string;subtitleId:string|null;frameIds:string[];

@@ -98,13 +98,28 @@ fn learning_transcription_keeps_complete_unicode_cues_and_srt_times() {
 }
 
 #[test]
+fn learning_transcription_trims_small_whisper_end_overrun_only() {
+    let value = rows(json!([{"offsets":{"from":5360,"to":8560},"text":" complete."}]));
+    let parsed = parse_whisper_json(&value, SUBTITLE, 8518).unwrap();
+    assert_eq!(
+        (parsed.cues[0].start_ms, parsed.cues[0].end_ms),
+        (5360, 8518)
+    );
+    assert_eq!(parsed.cues[0].text, " complete.");
+    let too_far = rows(json!([{"offsets":{"from":5360,"to":8619},"text":" complete."}]));
+    assert!(parse_whisper_json(&too_far, SUBTITLE, 8518).is_err());
+    let outside = rows(json!([{"offsets":{"from":8518,"to":8560},"text":" outside."}]));
+    assert!(parse_whisper_json(&outside, SUBTITLE, 8518).is_err());
+}
+
+#[test]
 fn learning_transcription_never_clamps_skips_or_truncates_bad_rows() {
     let valid = json!({"offsets":{"from":1000,"to":2000},"text":"完整"});
     for bad in [
         json!({"offsets":{"from":-1,"to":2000},"text":"负数"}),
         json!({"offsets":{"from":1.5,"to":2000},"text":"小数"}),
         json!({"offsets":{"from":2000,"to":2000},"text":"零长"}),
-        json!({"offsets":{"from":2000,"to":6001},"text":"越界"}),
+        json!({"offsets":{"from":2000,"to":6101},"text":"越界"}),
         json!({"offsets":{"from":500,"to":800},"text":"乱序"}),
         json!({"offsets":{"from":2000,"to":3000},"text":"   "}),
         json!({"offsets":{"from":2000,"to":3000},"text":"\u{0}"}),

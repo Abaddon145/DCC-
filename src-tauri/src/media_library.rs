@@ -739,6 +739,39 @@ pub fn import_learning_controlled(
     )
 }
 
+pub(crate) fn group_learning_import(
+    connection: &mut Connection,
+    series_id: &str,
+    report: &MediaImportReport,
+) -> Result<(), String> {
+    let series = crate::learning::store::series(connection, series_id)?;
+    let mut courses = series.ordered_course_ids;
+    let original_count = courses.len();
+    for row in &report.rows {
+        let Some(id) = row.entry_id.as_ref().or(row.duplicate_entry_id.as_ref()) else {
+            continue;
+        };
+        let course_id: Option<String> = connection.query_row(
+            "SELECT c.id FROM learning_courses c JOIN media_workspace_effective_memberships w ON w.media_entry_id=c.media_entry_id AND w.workspace='learning' WHERE c.media_entry_id=?1",
+            [id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some(id) = course_id {
+            if !courses.contains(&id) {
+                courses.push(id);
+            }
+        }
+    }
+    if courses.len() != original_count {
+        crate::learning::store::set_series_members(
+            connection,
+            series_id,
+            series.revision,
+            &courses,
+        )?;
+    }
+    Ok(())
+}
+
 fn expand_learning_sources(
     paths: &[String],
     base_dir: &Path,
@@ -818,6 +851,48 @@ fn expand_learning_sources(
 #[cfg(test)]
 mod learning_folder_tests {
     use super::*;
+
+    #[test]
+    fn learning_import_groups_multiple_courses_without_losing_existing_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let first = temp.path().join("one.mp4");
+        let second = temp.path().join("two.mp4");
+        std::fs::write(&first, b"synthetic first").unwrap();
+        std::fs::write(&second, b"synthetic second").unwrap();
+        let mut db = crate::db::open_database(&library.join("db.sqlite")).unwrap();
+        let target =
+            crate::learning::store::upsert_series(&mut db, None, "课程系列", "", None).unwrap();
+        let report = import_learning_controlled(
+            &mut db,
+            &library,
+            None,
+            MediaImportRequest {
+                kind: MediaKind::Video,
+                paths: vec![
+                    first.to_string_lossy().into(),
+                    second.to_string_lossy().into(),
+                ],
+                folder_id: None,
+                tags: vec![],
+                favorite: false,
+            },
+            &|_, _, _, _| {},
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(report.imported, 2, "{:?}", report);
+        group_learning_import(&mut db, &target.id, &report).unwrap();
+        group_learning_import(&mut db, &target.id, &report).unwrap();
+        assert_eq!(
+            crate::learning::store::series(&db, &target.id)
+                .unwrap()
+                .ordered_course_ids
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn materials_link_commands_reject_learning_only_ids() {

@@ -203,7 +203,7 @@ function AnalysisContent({libraryId,courseId,durationMs,canSeek=true,autoPrepare
   </section>;
 }
 
-function AnalysisResult({result,canSeek,onSeek}:{result:CourseAnalysisResult;canSeek:boolean;onSeek:(ms:number)=>void}){
+export function AnalysisResult({result,canSeek,onSeek}:{result:CourseAnalysisResult;canSeek:boolean;onSeek:(ms:number)=>void}){
   const jump=(ms:number,title:string)=><button className="secondary-button" disabled={!canSeek} onClick={()=>onSeek(ms)}>{learningTime(ms)} · {title}</button>;
   return <section className="learning-analysis-result" aria-label="分析结果"><h3>{result.oneSentenceSummary}</h3><p>{result.overview}</p>
     {!!result.chapters.length&&<><h4>章节</h4><ol>{result.chapters.map((c,i)=><li key={i}>{jump(c.startMs,c.title)}<p>{c.summary}</p></li>)}</ol></>}

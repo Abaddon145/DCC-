@@ -847,4 +847,37 @@ input, textarea, select { border: 1px solid var(--border-light); border-radius: 
 .translation-usage { font-variant-numeric:tabular-nums; line-height:1.8; }
 .translation-estimate { color:var(--muted); font-size:12px; line-height:1.7; margin:8px 0 14px; }
 .navigation-drag-source{opacity:.35;outline:1px dashed var(--accent);outline-offset:-1px}.navigation-snap-back{animation:navigation-return .2s ease-out}.library-drag-preview.active,.knowledge-drag-preview{box-shadow:0 12px 28px #0008;transform:translateY(-3px);pointer-events:none}.category-row,.knowledge-folder,.knowledge-tab,.structure-row{transition:background-color .12s ease,box-shadow .12s ease}.navigation-snap-back:not(.asset-card){transform-origin:center}@keyframes navigation-return{from{opacity:.35;transform:translateY(-3px)}to{opacity:1;transform:none}}@media(prefers-reduced-motion:reduce){.navigation-snap-back{animation:none}.category-row,.knowledge-folder,.knowledge-tab,.structure-row{transition:none}}html[data-reduce-motion=true] .navigation-snap-back{animation:none}
+
+/* A quieter workspace gives asset previews the visual priority. */
+.sidebar { background:var(--panel); }
+.sidebar-label { letter-spacing:.08em; }
+.topbar { gap:12px; }
+.library-header { padding-top:20px; padding-bottom:14px; }
+.library-header h1 { letter-spacing:-.025em; }
+.filter-bar { padding-bottom:14px; }
+.asset-card { border-color:var(--border); }
+.asset-card:hover { border-color:var(--border-light); }
+.card-body { padding:11px 13px; }
+.card-body h3 { letter-spacing:.01em; }
+.card-meta { color:var(--text-secondary); }
+.card-tags { color:var(--muted); }
+.link-missing-badge { opacity:0; transition:opacity .15s ease; }
+.asset-card:hover .link-missing-badge,.asset-card:focus-within .link-missing-badge { opacity:1; }
+.detail-content { padding:24px; }
+.detail-title-row h2 { line-height:1.3; letter-spacing:-.02em; }
+.detail-description .description { margin-bottom:6px; color:var(--text-secondary); }
+.description-toggle { padding:4px 0; border:0; color:var(--accent-bright); background:transparent; font:inherit; cursor:pointer; }
+.description-toggle:focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; }
+.detail-actions { background:var(--panel); }
+@media(prefers-reduced-motion:reduce){.link-missing-badge{transition:none}}
+.asset-view-switch { display:flex; gap:2px; padding:3px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--panel); }
+.asset-view-switch button { width:34px; height:32px; display:grid; place-items:center; border:0; border-radius:4px; color:var(--muted); background:transparent; cursor:pointer; }
+.asset-view-switch button[aria-pressed="true"] { color:var(--accent-bright); background:var(--accent-bg); }
+.asset-view-switch button:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+.detail-actions { display:grid; gap:8px; }
+.detail-action-group { display:flex; flex-wrap:wrap; gap:7px; min-width:0; }
+.detail-action-group:empty { display:none; }
+.detail-action-group > button { min-width:0; white-space:normal; }
+.detail-action-group .epic-detail-action { flex:1 1 100%; justify-content:center; }
+.detail-action-group .grow { flex:1 1 auto; }
 .navigation-floating-preview{position:fixed!important;z-index:10000!important;pointer-events:none!important;opacity:.94;overflow:hidden;margin:0!important;box-shadow:0 16px 34px #0009!important;transform:translateY(-3px);background:var(--panel);border:1px solid var(--accent)!important;border-radius:var(--radius-md,8px)}.navigation-placeholder{box-sizing:border-box;flex-shrink:0;border:1px dashed var(--accent);border-radius:6px;background:var(--accent-bg);min-height:28px;margin-block:3px;pointer-events:auto}.navigation-drop-inside{outline:2px solid var(--accent);outline-offset:-2px;background:var(--accent-bg)!important}.navigation-drop-invalid{outline:1px solid #d57a72;outline-offset:-1px;cursor:not-allowed!important}.note-sort-control{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:8px;color:var(--text-muted)}

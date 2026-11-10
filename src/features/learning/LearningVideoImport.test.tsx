@@ -33,3 +33,12 @@ it("queues a selected tutorial folder for the learning library",async()=>{
   await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningMediaImport",request:{kind:"video",paths:["C:/synthetic/course"],folderId:null,tags:[],favorite:false}},"lib"));
   expect(open).toHaveBeenCalledWith(expect.objectContaining({directory:true}));
 });
+
+it("queues multiple videos into the chosen series",async()=>{
+  vi.mocked(open).mockResolvedValue(["C:/synthetic/one.mp4","C:/synthetic/two.mp4"]);
+  vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task-series"} as never);
+  render(<LearningVideoImport libraryId="lib" series={[{id:"s1",name:"UE 教程",description:"",revision:0,orderedCourseIds:[]}]}/>);
+  fireEvent.change(screen.getByLabelText("导入到系列"),{target:{value:"s1"}});
+  fireEvent.click(screen.getByRole("button",{name:"导入本地教程…"}));
+  await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningMediaImport",request:{kind:"video",paths:["C:/synthetic/one.mp4","C:/synthetic/two.mp4"],folderId:null,tags:[],favorite:false,seriesId:"s1"}},"lib"));
+});

@@ -5,6 +5,173 @@ use std::io::{Read, Write};
 // These tests exercise the real app-wide single-request AI lane.
 static RUNNER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn one_click_runs_segments_and_whole_course_summary_using_fixture_service() {
+    let _serial = RUNNER_TEST_LOCK.lock().unwrap();
+    let (_dir, state, preview) = sources();
+    let library = state.active_library_id().unwrap();
+    let request = CourseAnalysisRequest {
+        course_id: preview.course_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        stage: CourseAnalysisPhase::Segments,
+        auto_summary: true,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::CourseAnalysis(request.clone()),
+        )
+        .unwrap();
+    let (url, server) = server(5, None);
+    let report = tauri::async_runtime::block_on(super::analysis_runner::run_full(
+        &state,
+        &task,
+        &request,
+        |body, images, cancel| {
+            let service = &state.translation_service;
+            let url = &url;
+            async move {
+                crate::translation_service::course_fixture_exchange(
+                    service, &body, 1000000, &cancel, images, url,
+                )
+                .await
+            }
+        },
+    ))
+    .unwrap();
+    assert_eq!(report["stage"], "summary");
+    let detail = super::analysis::get(
+        &state,
+        &library,
+        &preview.course_id,
+        report["analysisId"].as_str().unwrap(),
+        None,
+        0,
+        50,
+    )
+    .unwrap();
+    assert_eq!(detail.status, "completed");
+    assert!(
+        detail.result.is_some(),
+        "one-click result is the whole-course summary"
+    );
+    assert_eq!(server.join().unwrap().len(), 5);
+}
+
+#[test]
+fn one_click_summary_failure_keeps_completed_segments() {
+    let _serial = RUNNER_TEST_LOCK.lock().unwrap();
+    let (_dir, state, preview) = sources();
+    let library = state.active_library_id().unwrap();
+    let request = CourseAnalysisRequest {
+        course_id: preview.course_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        stage: CourseAnalysisPhase::Segments,
+        auto_summary: true,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::CourseAnalysis(request.clone()),
+        )
+        .unwrap();
+    let (url, server) = server(5, Some(4));
+    let outcome = tauri::async_runtime::block_on(super::analysis_runner::run_full(
+        &state,
+        &task,
+        &request,
+        |body, images, cancel| {
+            let service = &state.translation_service;
+            let url = &url;
+            async move {
+                crate::translation_service::course_fixture_exchange(
+                    service, &body, 1000000, &cancel, images, url,
+                )
+                .await
+            }
+        },
+    ));
+    assert!(outcome.unwrap_err().contains("已完成的结果已保留"));
+    assert_eq!(server.join().unwrap().len(), 5);
+    let base = state
+        .with_library_if_id(&library, |_, base| Ok(base.to_owned()))
+        .unwrap()
+        .unwrap();
+    let db = crate::tasks::open_media_worker_connection(&base.join("library.db")).unwrap();
+    let completed: i64 = db
+        .query_row(
+            "SELECT count(*) FROM learning_analyses WHERE course_id=?1 AND status='completed'",
+            [&preview.course_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        completed >= 1,
+        "completed segments remain available after summary failure"
+    );
+}
+
+#[test]
+fn one_click_completes_multiple_summary_layers() {
+    let _serial = RUNNER_TEST_LOCK.lock().unwrap();
+    let (dir, state, first) = sources();
+    let library = state.active_library_id().unwrap();
+    complete_segments(dir.path(), &state, &first, 10000);
+    let preview = super::analysis::prepare(
+        &state,
+        &library,
+        &first.course_id,
+        &CourseAnalysisOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert!(preview.stages.iter().all(|stage| stage.cached));
+    let request = CourseAnalysisRequest {
+        course_id: preview.course_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        stage: CourseAnalysisPhase::Segments,
+        auto_summary: true,
+    };
+    let (task, _) = state
+        .tasks
+        .submit(
+            library.clone(),
+            TaskRequest::CourseAnalysis(request.clone()),
+        )
+        .unwrap();
+    let (url, server) = server(3, None);
+    let report = tauri::async_runtime::block_on(super::analysis_runner::run_full(
+        &state,
+        &task,
+        &request,
+        |body, images, cancel| {
+            let service = &state.translation_service;
+            let url = &url;
+            async move {
+                crate::translation_service::course_fixture_exchange(
+                    service, &body, 1000000, &cancel, images, url,
+                )
+                .await
+            }
+        },
+    ))
+    .unwrap();
+    let detail = super::analysis::get(
+        &state,
+        &library,
+        &preview.course_id,
+        report["analysisId"].as_str().unwrap(),
+        None,
+        0,
+        50,
+    )
+    .unwrap();
+    assert!(detail.result.is_some());
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+
 pub(super) fn sources() -> (tempfile::TempDir, AppState, CourseAnalysisPreview) {
     let (dir, db, old) = super::analysis_tests::stored_fixture();
     std::fs::write(
@@ -151,6 +318,7 @@ fn learning_analysis_runner_summary_uses_its_own_consent_and_retries_only_missin
     let wrong = CourseAnalysisRequest {
         course_id: p.course_id.clone(),
         preview_id: p.preview_id.clone(),
+        auto_summary: false,
         stage: CourseAnalysisPhase::Segments,
     };
     let (task, _) = state
@@ -179,6 +347,7 @@ fn learning_analysis_runner_summary_uses_its_own_consent_and_retries_only_missin
         let request = CourseAnalysisRequest {
             course_id: preview.course_id.clone(),
             preview_id: preview.preview_id.clone(),
+            auto_summary: false,
             stage: CourseAnalysisPhase::Summary,
         };
         let (task, _) = state
@@ -299,6 +468,7 @@ fn learning_analysis_runner_cancellation_and_source_change_do_not_commit_a_respo
             let request = CourseAnalysisRequest {
                 course_id: preview.course_id.clone(),
                 preview_id: preview.preview_id.clone(),
+                auto_summary: false,
                 stage: if summary {
                     CourseAnalysisPhase::Summary
                 } else {
@@ -409,6 +579,7 @@ fn learning_analysis_runner_quota_or_precancel_preserves_unused_approval() {
             let request = CourseAnalysisRequest {
                 course_id: preview.course_id.clone(),
                 preview_id: preview.preview_id.clone(),
+                auto_summary: false,
                 stage: if summary {
                     CourseAnalysisPhase::Summary
                 } else {
@@ -473,6 +644,7 @@ fn learning_analysis_runner_keeps_three_successes_and_new_consent_sends_only_fou
         let request = CourseAnalysisRequest {
             course_id: preview.course_id.clone(),
             preview_id: preview.preview_id.clone(),
+            auto_summary: false,
             stage: CourseAnalysisPhase::Segments,
         };
         let (task, _) = state

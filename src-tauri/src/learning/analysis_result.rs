@@ -120,6 +120,18 @@ pub fn parse_course_result(raw: &str, s: &CourseScope<'_>) -> Result<CourseAnaly
         serde_json::from_str(raw).map_err(|_| "课程分析未返回有效JSON")?;
     if let Some(object) = json.as_object_mut() {
         object.remove("sectionValidation");
+        if let Some(steps) = object
+            .get_mut("tutorialSteps")
+            .and_then(|v| v.as_array_mut())
+        {
+            for step in steps {
+                if let Some(notes) = step.get_mut("notes") {
+                    if notes.is_string() {
+                        *notes = serde_json::Value::Array(vec![notes.take()]);
+                    }
+                }
+            }
+        }
     }
     let mut result: CourseAnalysisResult =
         serde_json::from_value(json).map_err(|_| "课程分析结构或字段类型无效")?;

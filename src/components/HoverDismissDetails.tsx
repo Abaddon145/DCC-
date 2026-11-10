@@ -2,7 +2,7 @@ import { useEffect, useRef, type DetailsHTMLAttributes } from "react";
 
 const LEAVE_GRACE_MS = 180;
 
-export function HoverDismissDetails({ children, onMouseEnter, onMouseLeave, onKeyDown, ...props }: DetailsHTMLAttributes<HTMLDetailsElement>) {
+export function HoverDismissDetails({ children, onMouseEnter, onMouseLeave, onKeyDown, closeOnLeave = true, ...props }: DetailsHTMLAttributes<HTMLDetailsElement> & {closeOnLeave?:boolean}) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const timerRef = useRef<number | null>(null);
 
@@ -21,17 +21,32 @@ export function HoverDismissDetails({ children, onMouseEnter, onMouseLeave, onKe
     }, LEAVE_GRACE_MS);
   };
 
-  useEffect(() => cancelClose, []);
+  useEffect(() => {
+    const doc = detailsRef.current?.ownerDocument;
+    const dismiss = (event: PointerEvent) => {
+      const details = detailsRef.current;
+      if (details?.open && event.target instanceof Node && !details.contains(event.target)) {
+        cancelClose();
+        details.open = false;
+      }
+    };
+    doc?.addEventListener("pointerdown", dismiss, true);
+    return () => { doc?.removeEventListener("pointerdown", dismiss, true); cancelClose(); };
+  }, []);
 
   return <details
     {...props}
     ref={detailsRef}
     onMouseEnter={event => { cancelClose(); onMouseEnter?.(event); }}
-    onMouseLeave={event => { scheduleClose(); onMouseLeave?.(event); }}
+    onMouseLeave={event => { if (closeOnLeave) scheduleClose(); onMouseLeave?.(event); }}
     onKeyDown={event => {
       if (event.key === "Escape") {
         cancelClose();
-        event.currentTarget.open = false;
+        if (event.currentTarget.open) {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+          event.stopPropagation();
+        }
       }
       onKeyDown?.(event);
     }}

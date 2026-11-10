@@ -124,7 +124,7 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
     uuid(id)?;
     let mut value = db
         .query_row(
-            "SELECT id,name,description,revision,category_id FROM learning_series WHERE id=?1",
+            "SELECT s.id,s.name,s.description,s.revision,s.category_id,(SELECT f.id FROM learning_series_courses sc JOIN learning_courses c ON c.id=sc.course_id JOIN media_entries e ON e.id=c.media_entry_id JOIN media_files f ON f.entry_id=e.id AND f.role='thumbnail' WHERE sc.series_id=s.id AND e.kind='video' AND e.deleted_at IS NULL ORDER BY sc.position,sc.course_id,f.sort_order,f.id LIMIT 1) FROM learning_series s WHERE s.id=?1",
             [id],
             |r| {
                 Ok(Series {
@@ -134,6 +134,7 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
                     revision: r.get(3)?,
                     ordered_course_ids: vec![],
                     category_id: r.get(4)?,
+                    cover_file_id: r.get(5)?,
                 })
             },
         )
@@ -348,6 +349,31 @@ mod learning_store_tests {
         db.execute("INSERT INTO media_entries(id,kind,name,primary_file_id,created_at,updated_at) VALUES(?1,'video','same title',?2,'now','now')",rusqlite::params![id,file]).unwrap();
         db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,duration_ms,created_at) VALUES(?1,?2,'main','video.mp4','video.mp4',?3,1000,'now')",rusqlite::params![file,id,format!("media-library/video/{id}/video.mp4")]).unwrap();
         id
+    }
+    #[test]
+    fn series_cover_uses_first_available_course_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+        let first_media = media(&db);
+        let second_media = media(&db);
+        let first = ensure_course(&db, &first_media).unwrap();
+        let second = ensure_course(&db, &second_media).unwrap();
+        let series = upsert_series(&mut db, None, "系列", "", None).unwrap();
+        let series =
+            set_series_members(&mut db, &series.id, series.revision, &[first.id, second.id])
+                .unwrap();
+        let thumbnail = uuid::Uuid::new_v4().to_string();
+        db.execute("INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'thumbnail','thumb.jpg','thumb.jpg',?3,'now')", rusqlite::params![thumbnail, second_media, format!("thumb/{second_media}.jpg")]).unwrap();
+        assert_eq!(
+            super::series(&db, &series.id)
+                .unwrap()
+                .cover_file_id
+                .as_deref(),
+            Some(thumbnail.as_str())
+        );
+        db.execute("DELETE FROM media_files WHERE id=?1", [&thumbnail])
+            .unwrap();
+        assert_eq!(super::series(&db, &series.id).unwrap().cover_file_id, None);
     }
     #[test]
     fn learning_category_delete_preserves_series_courses_and_rejects_stale_changes() {

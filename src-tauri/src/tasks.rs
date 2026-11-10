@@ -40,7 +40,7 @@ pub enum TaskRequest {
         id: String,
     },
     MediaImport(MediaImportRequest),
-    LearningMediaImport(MediaImportRequest),
+    LearningMediaImport(LearningMediaImportRequest),
     AssetScan {
         root: String,
     },
@@ -78,6 +78,14 @@ pub enum TaskRequest {
     },
     Migration(StorageChangeRequest),
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningMediaImportRequest {
+    #[serde(flatten)]
+    pub media: MediaImportRequest,
+    #[serde(default)]
+    pub series_id: Option<String>,
+}
 impl TaskRequest {
     fn label(&self) -> &str {
         match self {
@@ -86,7 +94,10 @@ impl TaskRequest {
             Self::ArchiveExternalVideo { .. } => "归档外部视频",
             Self::CourseTranscription(_) => "本地课程转写",
             Self::CourseAnalysis(r) => {
-                if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary {
+                if r.auto_summary {
+                    "课程分析与整课汇总"
+                } else if r.stage == crate::learning::analysis_models::CourseAnalysisPhase::Summary
+                {
                     "课程汇总分析"
                 } else {
                     "课程分段分析"
@@ -132,6 +143,11 @@ impl TaskRequest {
             Self::CourseAnalysis(r) => {
                 Uuid::parse_str(&r.course_id).map_err(|_| "课程标识无效")?;
                 Uuid::parse_str(&r.preview_id).map_err(|_| "课程预览标识无效")?;
+                if r.auto_summary
+                    && r.stage != crate::learning::analysis_models::CourseAnalysisPhase::Segments
+                {
+                    return Err("自动整课汇总必须从分段分析开始".into());
+                }
                 Ok(())
             }
             Self::AIAnalyze(r) => {
@@ -154,11 +170,14 @@ impl TaskRequest {
             }
             Self::MediaImport(r) if r.paths.len() > 500 => Err("单次媒体导入最多 500 项".into()),
             Self::LearningMediaImport(r)
-                if r.paths.len() > 500
-                    || r.kind != MediaKind::Video
-                    || r.folder_id.is_some()
-                    || !r.tags.is_empty()
-                    || r.favorite =>
+                if r.media.paths.len() > 500
+                    || r.media.kind != MediaKind::Video
+                    || r.media.folder_id.is_some()
+                    || !r.media.tags.is_empty()
+                    || r.media.favorite
+                    || r.series_id
+                        .as_ref()
+                        .is_some_and(|id| Uuid::parse_str(id).is_err()) =>
             {
                 Err("学习视频导入仅接受最多 500 个视频，且不使用素材分类或标签".into())
             }
@@ -1519,9 +1538,15 @@ pub fn retry_library_task(
     if let TaskRequest::AssetImport(request) = &mut payload {
         retain_incomplete_core_import(request, previous.result.as_ref());
     }
-    if let TaskRequest::MediaImport(request) | TaskRequest::LearningMediaImport(request) =
-        &mut payload
-    {
+    // A learning batch targeting a series must revisit already imported rows on
+    // retry: interruption may have occurred before the final grouping step.
+    let regroup = matches!(&payload, TaskRequest::LearningMediaImport(request) if request.series_id.is_some());
+    let media_request = match &mut payload {
+        TaskRequest::MediaImport(request) => Some(request),
+        TaskRequest::LearningMediaImport(request) => Some(&mut request.media),
+        _ => None,
+    };
+    if let Some(request) = media_request.filter(|_| !regroup) {
         if let Some(rows) = previous
             .result
             .and_then(|v| v.get("rows").cloned())
@@ -1947,8 +1972,14 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
             .await
             .map_err(|e| e.to_string())?
         }
-        TaskRequest::MediaImport(request) | TaskRequest::LearningMediaImport(request) => {
-            let learning = matches!(&task.payload, TaskRequest::LearningMediaImport(_));
+        TaskRequest::MediaImport(_) | TaskRequest::LearningMediaImport(_) => {
+            let (request, series_id, learning) = match &task.payload {
+                TaskRequest::MediaImport(request) => (request.clone(), None, false),
+                TaskRequest::LearningMediaImport(request) => {
+                    (request.media.clone(), request.series_id.clone(), true)
+                }
+                _ => unreachable!(),
+            };
             let worker_app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let state = worker_app.state::<AppState>();
@@ -1959,6 +1990,9 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                     Ok((active.base_dir.clone(), active.db_path.clone()))
                 })?;
                 let mut connection = open_media_worker_connection(&path)?;
+                if let Some(id) = &series_id {
+                    crate::learning::store::series(&connection, id)?;
+                }
                 let resource = worker_app.path().resource_dir().ok();
                 let stop_app = worker_app.clone();
                 let stop_id = task.id.clone();
@@ -1995,6 +2029,11 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                         &stop,
                     )?
                 };
+                if let Some(id) = &series_id {
+                    media_library::group_learning_import(&mut connection, id, &report).map_err(
+                        |error| format!("视频已导入，但加入系列失败：{error}；请在学习库手动归组"),
+                    )?;
+                }
                 serde_json::to_value(report).map_err(|e| e.to_string())
             })
             .await
@@ -2085,6 +2124,17 @@ mod tests {
         let task: TaskRequest = serde_json::from_value(value.clone()).unwrap();
         assert!(task.validate().is_ok());
         assert_eq!(task.label(), "学习视频导入");
+        let mut with_series = value.clone();
+        with_series["request"]["seriesId"] = Uuid::new_v4().to_string().into();
+        assert!(serde_json::from_value::<TaskRequest>(with_series.clone())
+            .unwrap()
+            .validate()
+            .is_ok());
+        with_series["request"]["seriesId"] = "not-a-uuid".into();
+        assert!(serde_json::from_value::<TaskRequest>(with_series)
+            .unwrap()
+            .validate()
+            .is_err());
         let mut invalid = value;
         invalid["request"]["kind"] = "image".into();
         assert!(serde_json::from_value::<TaskRequest>(invalid)
@@ -2440,6 +2490,7 @@ mod tests {
             TaskRequest::CourseAnalysis(crate::learning::analysis_models::CourseAnalysisRequest {
                 course_id: Uuid::new_v4().to_string(),
                 preview_id: Uuid::new_v4().to_string(),
+                auto_summary: false,
                 stage: crate::learning::analysis_models::CourseAnalysisPhase::Segments,
             });
         let (first, _) = registry.submit("library".into(), request.clone()).unwrap();

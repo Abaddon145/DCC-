@@ -14,28 +14,70 @@ pub(crate) async fn run(
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         let state = app.state::<AppState>();
-        tauri::async_runtime::block_on(run_segments(
-            &state,
-            &task,
-            &request,
-            |body, images, cancel| {
-                let service = &state.translation_service;
-                let limit = state.translation_preferences();
-                async move {
-                    service
-                        .course_json_with_usage(
-                            &body,
-                            limit?.deepseek_monthly_limit,
-                            &cancel,
-                            images,
-                        )
-                        .await
-                }
-            },
-        ))
+        tauri::async_runtime::block_on(run_full(&state, &task, &request, |body, images, cancel| {
+            let service = &state.translation_service;
+            let limit = state.translation_preferences();
+            async move {
+                service
+                    .course_json_with_usage(&body, limit?.deepseek_monthly_limit, &cancel, images)
+                    .await
+            }
+        }))
     })
     .await
     .map_err(|_| "课程分析执行中断，已完成阶段仍保留；请重新预览".to_string())?
+}
+
+pub(crate) async fn run_full<F, Fut>(
+    state: &AppState,
+    task: &LibraryTask,
+    request: &CourseAnalysisRequest,
+    mut exchange: F,
+) -> Result<Value, String>
+where
+    F: FnMut(Value, usize, Arc<AtomicBool>) -> Fut,
+    Fut: std::future::Future<Output = Result<CreativeReply, String>>,
+{
+    if request.auto_summary && request.stage != CourseAnalysisPhase::Segments {
+        return Err("自动整课汇总只能从分段分析开始".into());
+    }
+    let mut report = run_segments(state, task, request, &mut exchange).await?;
+    if !request.auto_summary {
+        return Ok(report);
+    }
+    for _ in 0..8 {
+        if state.tasks.should_stop(&task.id) {
+            return Err("课程分析已停止；已完成结果已保留".into());
+        }
+        state.tasks.update(
+            &task.id,
+            0,
+            0,
+            String::new(),
+            "准备整课汇总".into(),
+            Some(report.clone()),
+        );
+        let parent = report["analysisId"]
+            .as_str()
+            .ok_or("分段结果缺少分析记录")?;
+        let preview =
+            analysis::prepare_summary(state, &task.library_id, &request.course_id, parent)
+                .map_err(|e| format!("已完成的结果已保留，整课汇总准备失败：{e}"))?;
+        let terminal = preview.stages.len() == 1;
+        let summary = CourseAnalysisRequest {
+            course_id: request.course_id.clone(),
+            preview_id: preview.preview_id,
+            stage: CourseAnalysisPhase::Summary,
+            auto_summary: false,
+        };
+        report = run_segments(state, task, &summary, &mut exchange)
+            .await
+            .map_err(|e| format!("已完成的结果已保留，整课汇总未完成：{e}"))?;
+        if terminal {
+            return Ok(report);
+        }
+    }
+    Err("整课汇总层数超过限制，已完成结果已保留".into())
 }
 
 pub(crate) async fn run_segments<F, Fut>(

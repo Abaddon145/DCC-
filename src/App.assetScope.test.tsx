@@ -26,6 +26,13 @@ vi.mock("./features/assets/AssetBrowser", async importOriginal => {
   return { ...original, AssetBrowser: () => <section>统一浏览测试</section> };
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+it("allows changing the asset view without leaving the library", async () => {
+  vi.mocked(api.getPersonalization).mockResolvedValue({ global: defaultGlobalPreferences, library: defaultLibraryPreferences });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "列表视图" }));
+  await waitFor(() => expect(api.saveLibraryPreferences).toHaveBeenCalledWith(expect.objectContaining({ assetView: "list" })));
+  expect(screen.getByRole("button", { name: "列表视图" })).toHaveAttribute("aria-pressed", "true");
+});
 it("全部资产隔离隐藏分类、选择与删除快捷键，切回普通范围后恢复", async () => {
   vi.mocked(api.getPersonalization).mockResolvedValue({ global: defaultGlobalPreferences, library: defaultLibraryPreferences });
   vi.spyOn(window, "confirm").mockReturnValue(false);

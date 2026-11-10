@@ -16,7 +16,7 @@ import {NativeLearningSurface,hasLearningOverlay} from "./NativeLearningSurface"
 import {LearningControls} from "./LearningControls";
 import {TranscriptPanel} from "./TranscriptPanel";
 import {LearningSeries} from "./LearningSeries";
-import {CourseAnalysisPanel} from "./CourseAnalysisPanel";
+import {QuickCourseAnalysis} from "./QuickCourseAnalysis";
 import {ExcerptComposer} from "./ExcerptComposer";
 import type {ExcerptReceipt,ExcerptSelection,TranscriptCue,PlaybackAction,PlaybackSnapshot,ScopedPlaybackEvent,NativePointerEvent} from "./types";
 import "./LearningWorkspace.css";
@@ -219,7 +219,7 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
       <div className="learning-video-stage">{snapshot&&<NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>} {snapshot&&!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>
       <WorkspacePanel label="学习资料" side="right" state={panels.right} limits={detailLimits} onChange={next=>changePanels(value=>setLayoutPanel(value,"right",next))} tabs={[
         {id:"transcript",label:"课程字幕",icon:<Captions size={18}/>,content:<TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})} onSelection={items=>setSelectedCues({courseId,items})}/>},
-        {id:"analysis",label:"课程分析",icon:<Sparkles size={18}/>,content:<CourseAnalysisPanel libraryId={libraryId} courseId={courseId} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/>},
+        {id:"analysis",label:"课程分析",icon:<Sparkles size={18}/>,content:<QuickCourseAnalysis key={`${libraryId}:${courseId}`} libraryId={libraryId} courseId={courseId} durationMs={snapshot?.durationMs} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/>},
       ]}/>
     </div>
     {snapshot&&<LearningControls key={snapshot.sessionId} snapshot={snapshot} disabled={!snapshot.ready||!!snapshot.error||leaving} onAction={control}/>}

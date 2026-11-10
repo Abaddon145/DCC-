@@ -450,6 +450,23 @@ fn fixture() -> (Value, Vec<TranscriptCue>) {
     )
 }
 #[test]
+fn learning_analysis_accepts_single_string_step_notes_with_existing_limits() {
+    let (mut raw, cues) = fixture();
+    let scope = CourseScope {
+        start_ms: 0,
+        end_ms: 60000,
+        cues: &cues,
+        frames: &[],
+    };
+    raw["tutorialSteps"] = json!([{"order":1,"timeMs":10000,"title":"设置","description":"设置参数","notes":"字幕明确给出参数"}]);
+    let parsed = parse_course_result(&raw.to_string(), &scope).unwrap();
+    assert_eq!(parsed.tutorial_steps[0].notes, vec!["字幕明确给出参数"]);
+    raw["tutorialSteps"][0]["notes"] = json!("字".repeat(2001));
+    assert!(parse_course_result(&raw.to_string(), &scope).is_err());
+    raw["tutorialSteps"][0]["notes"] = json!(123);
+    assert!(parse_course_result(&raw.to_string(), &scope).is_err());
+}
+#[test]
 fn learning_analysis_preserves_valid_sections_and_generates_own_corrections() {
     let (mut raw, cues) = fixture();
     let scope = CourseScope {

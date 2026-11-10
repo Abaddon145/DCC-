@@ -21,6 +21,23 @@ const asset: AssetDetail = {
 const handlers = { onClose: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn(), onFavorite: vi.fn(), onOpen: vi.fn(), onSourceOpen: vi.fn(), onCopy: vi.fn(), onCheckLink: vi.fn(), checkingLink: false };
 
 describe("DetailPanel bilingual content", () => {
+  it("groups source actions separately from management actions", () => {
+    render(<DetailPanel asset={asset} contentLanguage="zh-CN" loading={false} {...handlers} />);
+    expect(screen.getByRole("group", { name: "打开素材" })).toContainElement(screen.getByRole("button", { name: "打开百度网盘" }));
+    expect(screen.getByRole("group", { name: "管理素材" })).toContainElement(screen.getByRole("button", { name: "编辑" }));
+  });
+  it("shows key properties before the long description", () => {
+    render(<DetailPanel asset={asset} contentLanguage="zh-CN" loading={false} {...handlers} />);
+    expect(screen.getByText("软件 / 版本").compareDocumentPosition(screen.getByText("中文描述")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+  it("keeps long descriptions collapsed until requested", () => {
+    const description = "长素材介绍".repeat(100);
+    render(<DetailPanel asset={{ ...asset, localizations: { ...asset.localizations, "zh-CN": { ...asset.localizations["zh-CN"]!, description } } }} contentLanguage="zh-CN" loading={false} {...handlers} />);
+    expect(screen.getByRole("button", { name: "展开完整介绍" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开完整介绍" }));
+    expect(screen.getByText(description)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收起介绍" })).toBeInTheDocument();
+  });
   it("reports a missing Chinese description even when the Chinese title exists and retries that asset", () => {
     const onTranslate = vi.fn();
     render(<DetailPanel asset={{ ...asset, localizations: { ...asset.localizations, "zh-CN": { ...asset.localizations["zh-CN"]!, description: "" } } }} contentLanguage="zh-CN" loading={false} {...handlers} onTranslate={onTranslate} />);
@@ -79,5 +96,6 @@ describe("DetailPanel bilingual content", () => {
     render(<DetailPanel asset={{ ...asset, shareUrl: "" }} contentLanguage="zh-CN" loading={false} {...handlers} />);
     expect(screen.getByText("未添加百度网盘链接")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /重新检查/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开百度网盘" })).not.toBeInTheDocument();
   });
 });

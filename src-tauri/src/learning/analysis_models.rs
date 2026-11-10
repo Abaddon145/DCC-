@@ -132,6 +132,8 @@ pub struct CourseAnalysisRequest {
     pub course_id: String,
     pub preview_id: String,
     pub stage: CourseAnalysisPhase,
+    #[serde(default)]
+    pub auto_summary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

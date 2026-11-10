@@ -20,6 +20,14 @@
 .learning-stage-row>.mode-peek{--workspace-panel-visible-width:min(var(--workspace-panel-width),calc(100cqw - 100px))}.learning-stage-row .workspace-panel-page{padding:12px}
 .learning-transcript {font-size:13px;}.learning-transcript header,.learning-transcript nav {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;}.learning-transcript h2 {font-size:15px;margin:0;}.learning-panel-actions {display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;}.learning-panel-actions label {display:grid;gap:6px;min-width:0;width:100%;}.learning-panel-actions select {width:100%;background:var(--panel);color:var(--text-primary);border:1px solid var(--border);padding:8px;}
 .learning-analysis {min-width:0;font-size:14px;line-height:1.6;overflow-wrap:anywhere;}
+.learning-quick-analysis{display:grid;align-content:start;gap:14px;padding:18px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--panel)}
+.learning-quick-analysis>p{margin:0;color:var(--text-secondary)}
+.learning-quick-analysis>button{justify-self:start;min-height:40px;padding-inline:20px}
+.analysis-template-settings{padding:16px 0;border-top:1px solid var(--border)}
+.analysis-template-settings summary{cursor:pointer;font-weight:600}
+.analysis-template-settings textarea{min-height:100px;resize:vertical}
+.analysis-template-settings .setting-row{gap:16px}
+.analysis-template-settings .setting-row :is(input,select,textarea){width:min(60%,420px);min-width:0}
 .learning-analysis header,.learning-analysis nav {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
 .learning-analysis :is(h2,h3,h4) {margin:12px 0 8px;line-height:1.4;}.learning-analysis h2 {font-size:16px;margin:0;}.learning-analysis h3 {font-size:15px;}.learning-analysis h4 {font-size:14px;}
 .learning-analysis label,.learning-analysis-form {display:grid;gap:8px;min-width:0;}.learning-analysis-form {margin:12px 0;}
