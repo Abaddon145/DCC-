@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { listen } from "@tauri-apps/api/event";
 import type { BatchTranslationRow, ImportMapping, ImportPreview, ImportProgress, ImportReport } from "../types";
 import { useFabTranslationSettings } from "../lib/bilingual";
+import { ImportTaskMap } from "./ImportTaskMap";
 import { useRequestGate } from "../lib/workspace";
 
 interface Props { onClose: () => void; onImported: () => void; notify: (message: string, error?: boolean) => void; expectedLibraryId?: string }
@@ -107,7 +108,7 @@ export function ImportDialog({ onClose, onImported, notify, expectedLibraryId }:
 
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true">
     <header className="modal-header"><div><span className="eyebrow">批量录入</span><h2>导入 Excel / CSV</h2></div><button className="icon-button" aria-label="收起导入窗口" onClick={close}><X size={19} /></button></header>
-    <div className="import-body">
+    <div className="import-body"><ImportTaskMap current="table" initiallyOpen />
       {(operationError || policy.error) && <p className="form-warning" role="alert">{operationError || policy.error}</p>}
       {busy && !progress && <p role="status">正在处理，请稍候…</p>}
       {!path ? <div className="import-drop"><FileSpreadsheet size={42} /><h3>选择素材表格</h3><p>支持 Fab 简化模板和旧版多列表格；单条与批量导入共用自动补齐中英双语设置。</p><div><button className="primary-button" disabled={busy} onClick={choose}><Upload size={16} />选择文件</button><button className="secondary-button" onClick={exportTemplate}><Download size={16} />下载 Excel 模板</button></div></div> : <>
@@ -117,8 +118,8 @@ export function ImportDialog({ onClose, onImported, notify, expectedLibraryId }:
         <h3>{fields === simpleFields ? "Fab 简化列映射" : "旧版列映射"}</h3>{fields === simpleFields && <p className="import-hint">Fab 单元格可填写完整 URL，也可使用网页标题作为显示文字并把真实地址设为 Excel 超链接。</p>}<div className="mapping-grid">{fields.map(field => <label key={field.key}><span>{field.label}{field.required && " *"}</span><select disabled={busy || !!report} value={mapping[field.key] || ""} onChange={e => { const next = { ...mapping, [field.key]: e.target.value }; setMapping(next); void inspect(path, next); }}><option value="">不导入</option>{preview?.headers.map(header => <option key={header} value={header}>{header}</option>)}</select></label>)}</div>
         {preview && <><div className="import-summary"><span className="valid"><CheckCircle2 size={15} />有效 {preview.validCount}</span><span className="warning"><AlertCircle size={15} />警告 {preview.warningCount}</span><span className="warning"><AlertCircle size={15} />重复 {preview.duplicateCount}</span><span className="error"><AlertCircle size={15} />错误 {preview.errorCount}</span></div>
           {report && <h3>逐行导入结果</h3>}<div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>行</th><th>名称</th><th>分类</th><th>状态</th><th>说明</th></tr></thead><tbody>{visibleRows.slice(page * 100, (page + 1) * 100).map(row => <tr key={row.row}><td>{row.row}</td><td>{row.name || "—"}</td><td>{row.actualCategoryPath || row.suggestedCategoryPath || "导入时识别"}</td><td><span className={`status ${row.status}`}>{row.status === "valid" ? "有效" : row.status === "warning" ? "警告" : row.status === "duplicate" ? "重复" : row.status === "imported" ? "已导入" : row.status === "translationPending" ? "待补译" : row.status === "skipped" ? "已跳过" : "错误"}</span></td><td>{row.messages.join("；") || "—"}</td></tr>)}</tbody></table></div>{visibleRows.length > 0 && <div className="result-pagination"><button disabled={page === 0} onClick={() => setPage(value => value - 1)}>上一页</button><span>第 {page + 1} / {Math.ceil(visibleRows.length / 100)} 页 · 共 {visibleRows.length} 条</span><button disabled={(page + 1) * 100 >= visibleRows.length} onClick={() => setPage(value => value + 1)}>下一页</button></div>}</>}
-        {report && <div className="report-banner">导入完成：新增 {report.imported}，双语完成 {report.imported - pendingCount}，待补译 {pendingCount}，跳过 {report.skipped}，失败 {report.failed}</div>}
-        {busy && progress && <div className="import-live-progress"><div><span style={{ width: `${progress.total ? progress.current / progress.total * 100 : 0}%` }} /></div><strong>{progress.current} / {progress.total} · {progress.phase}</strong><small>{progress.currentName || "正在完成导入"}</small><p>成功 {progress.imported} · 跳过 {progress.skipped} · 失败 {progress.failed}</p></div>}
+        {report && <div className="report-banner import-task-status">导入完成：新增 {report.imported}，双语完成 {report.imported - pendingCount}，待补译 {pendingCount}，跳过 {report.skipped}，失败 {report.failed}</div>}
+        {busy && progress && <div className="import-live-progress import-task-status" key={progress.phase}><div><span style={{ width: `${progress.total ? progress.current / progress.total * 100 : 0}%` }} /></div><strong>{progress.current} / {progress.total} · {progress.phase}</strong><small>{progress.currentName || "正在完成导入"}</small><p>成功 {progress.imported} · 跳过 {progress.skipped} · 失败 {progress.failed}</p></div>}
       </>}
     </div>
     <footer className="modal-footer">{report && pendingCount > 0 && <button className="secondary-button" disabled={busy} onClick={() => void retryPending()}>重试待补译 {pendingCount} 条</button>}<button className="secondary-button" disabled={busy} onClick={close}>{report ? "完成" : "取消"}</button>{path && !report && <button className="primary-button" disabled={busy || policy.busy || !translationSettings || !canCommit || !preview?.validCount} onClick={commit}><Upload size={16} />{busy ? "正在逐条处理…" : `导入 ${preview?.validCount || 0} 条`}</button>}</footer>

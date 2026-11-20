@@ -3,6 +3,7 @@ import {MembershipMigration} from "./MembershipMigration";
 import {LearningVideoImport} from "./LearningVideoImport";
 import {learningApi,type CourseBatchCursor,type CourseImportBatchSummary,type CourseImportEntryPage,type CourseRevertReport,type CourseSourceBinding,type ImportBatchView,type ImportItemView,type ImportNotePreview,type ImportSourceBinding} from "./api";
 import {api} from "../../lib/api";
+import {ImportTaskMap} from "../../components/ImportTaskMap";
 import CourseSqliteImport from "./CourseSqliteImport";
 import type {LibraryTask} from "../../types";
 import "./noteArchives.css";
@@ -334,6 +335,7 @@ function ImportPanel({libraryId,onClose}:Props){
       <p className="learning-import-boundary" role="note">
         同一已授权目录内可以加入多篇 Markdown，作为同一个批次准备。提交、取消和撤回仍作用于该批次。未加入本批的单篇预检仍可直接排队。
       </p>
+      <ImportTaskMap current="learningMigrate"/>
       <div className="learning-import-actions">
         <button type="button" className="primary-button" disabled={busy} onClick={()=>void pickSource()}>选择来源目录…</button>
         <button type="button" disabled={busy||!binding} onClick={()=>void pickNote()}>选择 Markdown…</button>
