@@ -8,6 +8,8 @@ describe("explicit selection scope",()=>{
    vi.mocked(api.getSelectionLabels).mockResolvedValue([{id:"a",name:"沙漠"},{id:"b",name:"石桥"}]);
    render(<SelectionSummary ids={new Set(["a","b"])} filterKey="desert" getMatchingIds={async()=>["a"]}/>);
    fireEvent.click(await screen.findByRole("button",{name:"当前条件 1 项 · 隐藏 1 项 · 查看清单"}));
+   expect(await screen.findByRole("heading",{name:"完整选中清单 · 2 项"})).toBeInTheDocument();
+   expect(screen.getByText("批量操作会作用于全部明确选中的条目，包括筛选之外的条目。")).toBeInTheDocument();
    expect(await screen.findByText("石桥")).toBeInTheDocument();expect(api.getSelectionLabels).toHaveBeenCalledWith(["a","b"],false);
  });
  it("pages a large selection without loading every label",async()=>{
