@@ -235,6 +235,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .batch-toolbar { min-height: 52px; display: flex; align-items: center; gap: 7px; padding: 8px 24px; border-top: 1px solid #574429; border-bottom: 1px solid #574429; background: #17150f; }
 .batch-count { display: flex; align-items: center; gap: 6px; color: var(--accent-bright); font-size: 11px; white-space: nowrap; }.batch-count strong { font-size: 15px; }
 .batch-toolbar select, .batch-toolbar input { min-width: 0; height: 31px; padding: 0 7px; font-size: 10px; }.batch-toolbar input { width: 125px; }.batch-toolbar select { max-width: 145px; }
+.batch-apply-note { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }.batch-apply-note.error { color: var(--danger); }
 .link-button { padding: 3px; border: 0; color: var(--accent); background: transparent; cursor: pointer; font-size: 9px; white-space: nowrap; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(3,5,8,.76); backdrop-filter: blur(5px); }

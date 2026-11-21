@@ -2373,6 +2373,77 @@ pub fn duplicate_match(
         .map_err(|e| e.to_string())
 }
 
+fn asset_has_global_tag(
+    connection: &Connection,
+    asset_id: &str,
+    normalized: &str,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM asset_tags at JOIN tags t ON t.id=at.tag_id WHERE at.asset_id=?1 AND t.normalized_name=?2)",
+            params![asset_id, normalized],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn asset_has_localized_tag(
+    connection: &Connection,
+    asset_id: &str,
+    locale: &str,
+    normalized: &str,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM asset_localized_tags at JOIN localized_tags t ON t.id=at.tag_id WHERE at.asset_id=?1 AND t.locale=?2 AND t.normalized_name=?3)",
+            params![asset_id, locale, normalized],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn batch_fields_would_change(
+    connection: &Connection,
+    asset_id: &str,
+    locale: &str,
+    update: &BatchAssetUpdate,
+    add_tags: &[String],
+    remove_tags: &HashSet<String>,
+    category_id: Option<&str>,
+    favorite: i64,
+) -> Result<bool, String> {
+    if update.clear_category {
+        if category_id.is_some() {
+            return Ok(true);
+        }
+    } else if let Some(next) = update.category_id.as_deref() {
+        if category_id != Some(next) {
+            return Ok(true);
+        }
+    }
+    if let Some(next) = update.favorite {
+        if (favorite != 0) != next {
+            return Ok(true);
+        }
+    }
+    for tag in add_tags {
+        let normalized = tag.to_lowercase();
+        if !asset_has_global_tag(connection, asset_id, &normalized)?
+            || !asset_has_localized_tag(connection, asset_id, locale, &normalized)?
+        {
+            return Ok(true);
+        }
+    }
+    for normalized in remove_tags {
+        if asset_has_global_tag(connection, asset_id, normalized)?
+            || asset_has_localized_tag(connection, asset_id, locale, normalized)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn batch_update_assets(
     connection: &mut Connection,
     update: BatchAssetUpdate,
@@ -2386,8 +2457,63 @@ pub fn batch_update_assets(
         .into_iter()
         .map(|tag| tag.to_lowercase())
         .collect::<HashSet<_>>();
+    if !update.clear_category {
+        if let Some(category_id) = update.category_id.as_ref() {
+            ensure_category_exists(connection, category_id)?;
+        }
+    }
+    let has_intent = update.clear_category
+        || update.category_id.is_some()
+        || !add_tags.is_empty()
+        || !remove_tags.is_empty()
+        || update.favorite.is_some();
+    if !has_intent {
+        return Ok(BatchUpdateReport {
+            requested: ids.len(),
+            updated: 0,
+            identical: false,
+        });
+    }
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
     let locale = valid_language(&update.content_language).to_string();
+    let mut existing = Vec::new();
+    let mut any_change = false;
+    for id in &ids {
+        let current = transaction
+            .query_row(
+                "SELECT category_id, favorite FROM assets WHERE id=?1 AND deleted_at IS NULL",
+                [id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((category_id, favorite)) = current else {
+            continue;
+        };
+        if !any_change
+            && batch_fields_would_change(
+                &transaction,
+                id,
+                &locale,
+                &update,
+                &add_tags,
+                &remove_tags,
+                category_id.as_deref(),
+                favorite,
+            )?
+        {
+            any_change = true;
+        }
+        existing.push(id.clone());
+    }
+    if !any_change {
+        drop(transaction);
+        return Ok(BatchUpdateReport {
+            requested: ids.len(),
+            updated: 0,
+            identical: !existing.is_empty(),
+        });
+    }
     let timestamp = now();
     let mut updated = 0;
     for id in &ids {
@@ -2475,6 +2601,7 @@ pub fn batch_update_assets(
     Ok(BatchUpdateReport {
         requested: ids.len(),
         updated,
+        identical: false,
     })
 }
 
@@ -3667,6 +3794,366 @@ mod tests {
                 .count,
             2
         );
+    }
+
+    fn asset_write_stamp(
+        connection: &Connection,
+        id: &str,
+    ) -> (String, i64, Option<String>, String, i64, String) {
+        let (updated_at, favorite, category, name): (String, i64, Option<String>, String) =
+            connection
+                .query_row(
+                    "SELECT updated_at, favorite, category_id, name FROM assets WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        let (rowid, text): (i64, String) = connection
+            .query_row(
+                "SELECT rowid, text FROM asset_search WHERE asset_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        (updated_at, favorite, category, name, rowid, text)
+    }
+
+    #[test]
+    fn batch_update_without_field_changes_does_not_rewrite_timestamp_or_search_index() {
+        let (dir, mut connection) = setup();
+        let saved = upsert_asset(
+            &mut connection,
+            dir.path(),
+            AssetInput {
+                id: None,
+                name: "未改素材".into(),
+                description: "保持描述".into(),
+                category_id: None,
+                tags: vec!["Nanite".into()],
+                dcc_tools: vec!["Unreal Engine".into()],
+                versions: vec!["5.5".into()],
+                formats: vec!["uasset".into()],
+                size_bytes: Some(12),
+                author: "作者".into(),
+                source_url: "https://example.com/asset".into(),
+                fab_listing_id: None,
+                auto_category_path: Vec::new(),
+                license: "CC0".into(),
+                share_url: String::new(),
+                extraction_code: String::new(),
+                favorite: true,
+                images: Vec::new(),
+                localizations: HashMap::new(),
+                content_language: "zh-CN".into(),
+            },
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE assets SET updated_at='2020-01-01T00:00:00+00:00' WHERE id=?1",
+                [&saved.card.id],
+            )
+            .unwrap();
+        reindex_asset(&connection, &saved.card.id).unwrap();
+        let before = asset_write_stamp(&connection, &saved.card.id);
+        let changes_before: i64 = connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let report = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: vec![saved.card.id.clone()],
+                category_id: None,
+                clear_category: false,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                favorite: None,
+                content_language: "zh-CN".into(),
+            },
+        )
+        .unwrap();
+        let changes_after: i64 = connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let after = asset_write_stamp(&connection, &saved.card.id);
+        assert_eq!(
+            changes_after - changes_before,
+            0,
+            "sqlite row writes must stay 0; before={before:?} after={after:?} report={report:?}"
+        );
+        assert_eq!(
+            before, after,
+            "updated_at, favorite, category, name, and search row must stay"
+        );
+        assert_eq!(report.updated, 0, "no-op batch must not count a write");
+        assert!(
+            !report.identical,
+            "no requested action is not the same as identical values"
+        );
+    }
+
+    fn sample_asset(name: &str, favorite: bool, tags: Vec<String>) -> AssetInput {
+        AssetInput {
+            id: None,
+            name: name.into(),
+            description: "保持描述".into(),
+            category_id: None,
+            tags,
+            dcc_tools: Vec::new(),
+            versions: Vec::new(),
+            formats: Vec::new(),
+            size_bytes: None,
+            author: String::new(),
+            source_url: String::new(),
+            fab_listing_id: None,
+            auto_category_path: Vec::new(),
+            license: String::new(),
+            share_url: String::new(),
+            extraction_code: String::new(),
+            favorite,
+            images: Vec::new(),
+            localizations: HashMap::new(),
+            content_language: "zh-CN".into(),
+        }
+    }
+
+    fn sqlite_changes(connection: &Connection) -> i64 {
+        connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn batch_update_identical_values_do_not_write_and_illegal_requests_still_fail() {
+        let (dir, mut connection) = setup();
+        let saved = upsert_asset(
+            &mut connection,
+            dir.path(),
+            sample_asset("已有标签", true, vec!["Nanite".into()]),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO categories(id,name,parent_id,sort_order,created_at) VALUES('cat-1','环境',NULL,0,'2020-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE assets SET category_id='cat-1', updated_at='2020-01-01T00:00:00+00:00' WHERE id=?1",
+                [&saved.card.id],
+            )
+            .unwrap();
+        reindex_asset(&connection, &saved.card.id).unwrap();
+        let before = asset_write_stamp(&connection, &saved.card.id);
+        let changes = sqlite_changes(&connection);
+        let same = |connection: &mut Connection,
+                    category: Option<String>,
+                    clear: bool,
+                    add: Vec<String>,
+                    remove: Vec<String>,
+                    favorite: Option<bool>| {
+            batch_update_assets(
+                connection,
+                BatchAssetUpdate {
+                    ids: vec![saved.card.id.clone()],
+                    category_id: category,
+                    clear_category: clear,
+                    add_tags: add,
+                    remove_tags: remove,
+                    favorite,
+                    content_language: "zh-CN".into(),
+                },
+            )
+        };
+        for report in [
+            same(
+                &mut connection,
+                Some("cat-1".into()),
+                false,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .unwrap(),
+            same(
+                &mut connection,
+                None,
+                false,
+                vec!["Nanite".into()],
+                Vec::new(),
+                None,
+            )
+            .unwrap(),
+            same(
+                &mut connection,
+                None,
+                false,
+                Vec::new(),
+                vec!["不存在".into()],
+                None,
+            )
+            .unwrap(),
+            same(
+                &mut connection,
+                None,
+                false,
+                Vec::new(),
+                Vec::new(),
+                Some(true),
+            )
+            .unwrap(),
+        ] {
+            assert!(report.identical, "{report:?}");
+            assert_eq!(report.updated, 0);
+        }
+        assert_eq!(asset_write_stamp(&connection, &saved.card.id), before);
+        assert_eq!(sqlite_changes(&connection), changes);
+        let cleared = upsert_asset(
+            &mut connection,
+            dir.path(),
+            sample_asset("无分类", false, Vec::new()),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE assets SET updated_at='2020-01-01T00:00:00+00:00' WHERE id=?1",
+                [&cleared.card.id],
+            )
+            .unwrap();
+        let clear_report = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: vec![cleared.card.id.clone()],
+                category_id: None,
+                clear_category: true,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                favorite: None,
+                content_language: "zh-CN".into(),
+            },
+        )
+        .unwrap();
+        assert!(clear_report.identical);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT updated_at FROM assets WHERE id=?1",
+                    [&cleared.card.id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "2020-01-01T00:00:00+00:00"
+        );
+        assert_eq!(asset_write_stamp(&connection, &saved.card.id), before);
+
+        let changes = sqlite_changes(&connection);
+        let missing = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: vec![saved.card.id.clone()],
+                category_id: Some("missing-category".into()),
+                clear_category: false,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                favorite: Some(true),
+                content_language: "zh-CN".into(),
+            },
+        );
+        assert_eq!(missing.unwrap_err(), "目标分类不存在");
+        assert_eq!(asset_write_stamp(&connection, &saved.card.id), before);
+        let empty = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: Vec::new(),
+                category_id: None,
+                clear_category: false,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                favorite: None,
+                content_language: "zh-CN".into(),
+            },
+        );
+        assert_eq!(empty.unwrap_err(), "请先选择素材");
+        assert_eq!(sqlite_changes(&connection), changes);
+    }
+
+    #[test]
+    fn batch_update_partial_change_still_touches_every_selected_row_and_keeps_other_fields() {
+        let (dir, mut connection) = setup();
+        let same = upsert_asset(
+            &mut connection,
+            dir.path(),
+            sample_asset("已经收藏", true, vec!["Nanite".into()]),
+        )
+        .unwrap();
+        let changed = upsert_asset(
+            &mut connection,
+            dir.path(),
+            sample_asset("尚未收藏", false, vec!["Nanite".into()]),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "DELETE FROM asset_localized_tags WHERE asset_id=?1",
+                [&changed.card.id],
+            )
+            .unwrap();
+        for id in [&same.card.id, &changed.card.id] {
+            connection
+                .execute(
+                    "UPDATE assets SET updated_at='2020-01-01T00:00:00+00:00' WHERE id=?1",
+                    [id],
+                )
+                .unwrap();
+        }
+        let report = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: vec![same.card.id.clone(), changed.card.id.clone()],
+                category_id: None,
+                clear_category: false,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                favorite: Some(true),
+                content_language: "zh-CN".into(),
+            },
+        )
+        .unwrap();
+        assert!(!report.identical);
+        assert_eq!(report.updated, 2);
+        for id in [&same.card.id, &changed.card.id] {
+            let (updated_at, favorite, _category, name, _rowid, _text) =
+                asset_write_stamp(&connection, id);
+            assert_ne!(updated_at, "2020-01-01T00:00:00+00:00");
+            assert_eq!(favorite, 1);
+            assert!(name == "已经收藏" || name == "尚未收藏");
+        }
+        let detail = get_asset(&connection, &changed.card.id, false, "zh-CN").unwrap();
+        assert_eq!(detail.description, "保持描述");
+        let gap = batch_update_assets(
+            &mut connection,
+            BatchAssetUpdate {
+                ids: vec![changed.card.id.clone()],
+                category_id: None,
+                clear_category: false,
+                add_tags: vec!["Nanite".into()],
+                remove_tags: Vec::new(),
+                favorite: None,
+                content_language: "zh-CN".into(),
+            },
+        )
+        .unwrap();
+        assert!(!gap.identical);
+        assert_eq!(gap.updated, 1);
+        let localized: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM asset_localized_tags WHERE asset_id=?1",
+                [&changed.card.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(localized, 1);
     }
 
     #[test]

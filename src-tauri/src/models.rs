@@ -672,6 +672,9 @@ pub struct BatchAssetUpdate {
 pub struct BatchUpdateReport {
     pub requested: usize,
     pub updated: usize,
+    /// True only when every existing asset already had the requested values.
+    #[serde(default)]
+    pub identical: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

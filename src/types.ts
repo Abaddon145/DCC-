@@ -390,7 +390,7 @@ export interface BatchAssetUpdate {
   contentLanguage: ContentLanguage;
 }
 
-export interface BatchUpdateReport { requested: number; updated: number }
+export interface BatchUpdateReport { requested: number; updated: number; identical?: boolean }
 export interface AdvancedSearchError { message: string; position?: number }
 export interface MoveCategoryRequest { id: string; targetParentId: string | null; targetIndex: number }
 export interface MoveResult { moved: number; message: string; undoToken: string | null }

@@ -1538,6 +1538,7 @@ pub fn batch_update(
     Ok(BatchUpdateReport {
         requested: update.ids.len(),
         updated: changed,
+        identical: false,
     })
 }
 pub fn delete_entries(connection: &mut Connection, ids: Vec<String>) -> Result<usize, String> {
