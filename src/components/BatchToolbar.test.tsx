@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { BatchToolbar } from "./BatchToolbar";
 
@@ -56,5 +56,34 @@ describe("BatchToolbar", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("目标分类不存在");
     expect(screen.queryByText("没有要应用的更改")).toBeNull();
     expect(screen.queryByText("所选操作与当前值相同，不会更新记录")).toBeNull();
+  });
+
+  it("does not apply a late identical or error result after the pending controls or selection change", async () => {
+    let resolveApply: (value: "identical") => void = () => {};
+    let rejectApply: (error: Error) => void = () => {};
+    const onApply = vi.fn()
+      .mockImplementationOnce(() => new Promise<"identical">(resolve => { resolveApply = resolve; }))
+      .mockImplementationOnce(() => new Promise<never>((_resolve, reject) => { rejectApply = reject; }))
+      .mockResolvedValueOnce("updated");
+    const view = render(<BatchToolbar count={2} totalCount={12} selectionKey={"a\nb"} categories={[{ id: "cat", name: "环境", parentId: null, sortOrder: 0, assetCount: 1 }]} onSelectAll={vi.fn()} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onTranslate={vi.fn()} onApply={onApply} />);
+    fireEvent.change(screen.getByLabelText("批量收藏"), { target: { value: "true" } });
+    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("批量收藏"), { target: { value: "false" } });
+    await act(async () => { resolveApply("identical"); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "应用" })).toBeEnabled());
+    expect(screen.queryByText("所选操作与当前值相同，不会更新记录")).toBeNull();
+    expect(screen.getByLabelText("批量收藏")).toHaveValue("false");
+    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+    expect(onApply).toHaveBeenLastCalledWith({ categoryId: null, clearCategory: false, addTags: [], removeTags: [], favorite: false });
+    view.rerender(<BatchToolbar count={1} totalCount={12} selectionKey="c" categories={[{ id: "cat", name: "环境", parentId: null, sortOrder: 0, assetCount: 1 }]} onSelectAll={vi.fn()} onClear={vi.fn()} onExit={vi.fn()} onAddToReference={vi.fn()} onTranslate={vi.fn()} onApply={onApply} />);
+    await act(async () => { rejectApply(new Error("目标分类不存在")); });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.queryByText("目标分类不存在")).toBeNull();
+    expect(screen.queryByText("所选操作与当前值相同，不会更新记录")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(3));
+    expect(onApply).toHaveBeenLastCalledWith(expect.objectContaining({ favorite: false }));
   });
 });

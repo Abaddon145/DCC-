@@ -575,11 +575,12 @@ export default function App() {
     return next;
   });
   const applyBatch = async (update: Omit<BatchAssetUpdate, "ids" | "contentLanguage">) => {
+    const submittedIds=[...selectedIds];
     try {
-      let updated=0;let identical=true;const ids=[...selectedIds];
-      for(let start=0;start<ids.length;start+=5000){const report=await api.batchUpdate({...update,ids:ids.slice(start,start+5000),contentLanguage});updated+=report.updated;if(!report.identical)identical=false;}
+      let updated=0;let identical=true;
+      for(let start=0;start<submittedIds.length;start+=5000){const report=await api.batchUpdate({...update,ids:submittedIds.slice(start,start+5000),contentLanguage});updated+=report.updated;if(!report.identical)identical=false;}
       if(identical&&updated===0){notify("所选操作与当前值相同，不会更新记录");return "identical" as const;}
-      notify(`已更新 ${updated} 项素材`); setSelectedIds(new Set()); await refreshAll(); if (view === "health") refreshHealth();
+      notify(`已更新 ${updated} 项素材`); setSelectedIds(previous=>{const next=new Set(previous);for(const id of submittedIds)next.delete(id);return next;}); await refreshAll(); if (view === "health") refreshHealth();
       return "updated" as const;
     } catch (error) { notify(String(error), true); throw error; }
   };

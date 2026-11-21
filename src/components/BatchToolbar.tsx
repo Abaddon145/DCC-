@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BriefcaseBusiness, CheckSquare, Images, Languages, X } from "lucide-react";
 import type { BatchAssetUpdate, Category } from "../types";
 import { splitValues } from "../lib/validation";
@@ -24,15 +24,21 @@ export function BatchToolbar({ onAi, count, totalCount, selectingAll = false, se
   const identical = outcome === "identical" && !noChange;
   const applyBlocked = !count || busy || noChange || identical;
   const reason = noChange ? "没有要应用的更改" : identical ? "所选操作与当前值相同，不会更新记录" : outcome === "error" ? errorText : "";
+  const live = useRef({ category, addTags, removeTags, favorite, selectionKey, count });
+  live.current = { category, addTags, removeTags, favorite, selectionKey, count };
   useEffect(() => { setOutcome(null); setErrorText(""); }, [category, addTags, removeTags, favorite, count, selectionKey]);
   const apply = async () => {
     if (applyBlocked) return;
+    const submitted = live.current;
+    const submittedKey = JSON.stringify(submitted);
     setBusy(true);
     setErrorText("");
     try {
-      const result = await onApply({ categoryId: category.startsWith("set:") ? category.slice(4) : null, clearCategory: category === "clear", addTags: splitValues(addTags), removeTags: splitValues(removeTags), favorite: favorite === "true" ? true : favorite === "false" ? false : null });
+      const result = await onApply({ categoryId: submitted.category.startsWith("set:") ? submitted.category.slice(4) : null, clearCategory: submitted.category === "clear", addTags: splitValues(submitted.addTags), removeTags: splitValues(submitted.removeTags), favorite: submitted.favorite === "true" ? true : submitted.favorite === "false" ? false : null });
+      if (JSON.stringify(live.current) !== submittedKey) return;
       setOutcome(result === "identical" ? "identical" : "updated");
     } catch (error) {
+      if (JSON.stringify(live.current) !== submittedKey) return;
       setOutcome("error");
       setErrorText(error instanceof Error ? error.message : String(error));
     } finally { setBusy(false); }
