@@ -19,7 +19,8 @@ const OAUTH_HOST: &str = "account-public-service-prod03.ol.epicgames.com";
 // Epic Games Launcher 的公开客户端标识，只用来换取当前用户自己的令牌。
 const LAUNCHER_CLIENT_ID: &str = "34a02cf8f4414e29b15921876da36f9a";
 const LAUNCHER_CLIENT_SECRET: &str = "daafbccc737745039dffe53d94fc76cf";
-const LAUNCHER_USER_AGENT: &str = "UELauncher/11.0.1-14937197+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
+const LAUNCHER_USER_AGENT: &str =
+    "UELauncher/11.0.1-14937197+++Portal+Release-Live Windows/10.0.19041.1.256.64bit";
 const MAX_LIBRARY_PAGES: usize = 400;
 const MAX_LIBRARY_ITEMS: usize = 20_000;
 const LIBRARY_DONE_HOST: &str = "fab-login.invalid";
@@ -199,7 +200,8 @@ pub(crate) fn canonical_listing_url(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn parse_library_page(body: &str) -> Result<ParsedLibraryPage, String> {
-    let value: Value = serde_json::from_str(body).map_err(|_| "Fab 已购库返回的不是可识别的列表".to_string())?;
+    let value: Value =
+        serde_json::from_str(body).map_err(|_| "Fab 已购库返回的不是可识别的列表".to_string())?;
     let results = value
         .get("results")
         .and_then(Value::as_array)
@@ -244,11 +246,7 @@ pub(crate) fn organize_owned_items(items: Vec<ParsedLibraryItem>) -> Vec<OwnedFa
     for item in items {
         match canonical_listing_url(&item.url) {
             Some(url) => {
-                let listing_id = url
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
+                let listing_id = url.rsplit('/').next().unwrap_or_default().to_string();
                 if !seen.insert(listing_id.clone()) {
                     continue;
                 }
@@ -293,7 +291,8 @@ pub(crate) fn write_listing_csv(urls: &[String]) -> Result<PathBuf, String> {
         return Err("没有选择新的商品".into());
     }
     let path = std::env::temp_dir().join(format!("dcc-fab-library-{}.csv", uuid::Uuid::new_v4()));
-    let mut writer = csv::Writer::from_path(&path).map_err(|error| format!("无法准备导入清单：{error}"))?;
+    let mut writer =
+        csv::Writer::from_path(&path).map_err(|error| format!("无法准备导入清单：{error}"))?;
     writer
         .write_record(["fab_url"])
         .map_err(|error| format!("无法准备导入清单：{error}"))?;
@@ -321,7 +320,10 @@ fn http_client() -> Result<Client, String> {
         .map_err(|error| format!("无法初始化网络请求：{error}"))
 }
 
-async fn request_token(form: &[(&str, &str)], clear_on_reject: bool) -> Result<TokenResponse, String> {
+async fn request_token(
+    form: &[(&str, &str)],
+    clear_on_reject: bool,
+) -> Result<TokenResponse, String> {
     let response = http_client()?
         .post(format!("https://{OAUTH_HOST}/account/api/oauth/token"))
         .basic_auth(LAUNCHER_CLIENT_ID, Some(LAUNCHER_CLIENT_SECRET))
@@ -330,7 +332,10 @@ async fn request_token(form: &[(&str, &str)], clear_on_reject: bool) -> Result<T
         .await
         .map_err(|_| "无法连接 Epic 登录服务".to_string())?;
     let status = response.status();
-    let body = response.text().await.map_err(|_| "Epic 登录服务没有返回结果".to_string())?;
+    let body = response
+        .text()
+        .await
+        .map_err(|_| "Epic 登录服务没有返回结果".to_string())?;
     if !status.is_success() {
         let rejected = body.to_ascii_lowercase().contains("invalid_grant")
             || body.contains("invalid_refresh_token")
@@ -392,7 +397,8 @@ fn load_stored() -> Result<Option<StoredSession>, String> {
     match entry()?.get_password() {
         Ok(raw) => match serde_json::from_str::<StoredSession>(&raw) {
             Ok(session)
-                if account_id_ok(&session.account_id) && !session.refresh_token.trim().is_empty() =>
+                if account_id_ok(&session.account_id)
+                    && !session.refresh_token.trim().is_empty() =>
             {
                 Ok(Some(session))
             }
@@ -451,7 +457,10 @@ fn emit_sync(app: &AppHandle, phase: &str, fetched: usize) {
     );
 }
 
-async fn fetch_owned_pages(app: &AppHandle, live: &LiveSession) -> Result<Vec<ParsedLibraryItem>, String> {
+async fn fetch_owned_pages(
+    app: &AppHandle,
+    live: &LiveSession,
+) -> Result<Vec<ParsedLibraryItem>, String> {
     let client = http_client()?;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
@@ -488,7 +497,9 @@ async fn fetch_owned_pages(app: &AppHandle, live: &LiveSession) -> Result<Vec<Pa
         items.extend(page.items);
         emit_sync(app, "正在读取已购库", items.len());
         if items.len() > MAX_LIBRARY_ITEMS {
-            return Err(format!("已购库超过 {MAX_LIBRARY_ITEMS} 条，已停止以免一次写入过多"));
+            return Err(format!(
+                "已购库超过 {MAX_LIBRARY_ITEMS} 条，已停止以免一次写入过多"
+            ));
         }
         match page.next_cursor {
             Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
@@ -498,7 +509,10 @@ async fn fetch_owned_pages(app: &AppHandle, live: &LiveSession) -> Result<Vec<Pa
     Err("已购库分页没有结束，已停止".into())
 }
 
-fn apply_duplicates(connection: &rusqlite::Connection, rows: &mut [OwnedFabRow]) -> Result<(), String> {
+fn apply_duplicates(
+    connection: &rusqlite::Connection,
+    rows: &mut [OwnedFabRow],
+) -> Result<(), String> {
     for row in rows.iter_mut().filter(|row| row.status == "new") {
         if let Some(existing) = db::fab_duplicate_match(connection, &row.listing_id, None)? {
             row.status = "duplicate".into();
@@ -514,7 +528,10 @@ fn duplicate_message(existing: &FabDuplicateMatch) -> String {
     } else if existing.category_path.is_empty() {
         format!("已在库中：{}", existing.asset_name)
     } else {
-        format!("已在库中：{} · {}", existing.asset_name, existing.category_path)
+        format!(
+            "已在库中：{} · {}",
+            existing.asset_name, existing.category_path
+        )
     }
 }
 
@@ -573,7 +590,11 @@ async fn capture_authorization_code(app: &AppHandle) -> Result<String, String> {
     let deliver = {
         let slot = std::sync::Arc::clone(&slot);
         move |result: Result<String, String>| {
-            if let Some(sender) = slot.lock().unwrap_or_else(|error| error.into_inner()).take() {
+            if let Some(sender) = slot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
                 let _ = sender.send(result);
             }
         }
@@ -652,10 +673,8 @@ mod tests {
     fn reads_authorization_code_only_from_the_login_handoff() {
         let code = "abcDEF123456";
         assert_eq!(
-            authorization_code_from_url(&format!(
-                "https://fab-login.invalid/done?code={code}"
-            ))
-            .as_deref(),
+            authorization_code_from_url(&format!("https://fab-login.invalid/done?code={code}"))
+                .as_deref(),
             Some(code)
         );
         assert_eq!(
@@ -665,9 +684,14 @@ mod tests {
             .as_deref(),
             Some(code)
         );
-        assert!(authorization_code_from_url("https://www.epicgames.com/id/login?code=abcDEF123456").is_none());
+        assert!(authorization_code_from_url(
+            "https://www.epicgames.com/id/login?code=abcDEF123456"
+        )
+        .is_none());
         assert!(authorization_code_from_url("https://fab-login.invalid/done?code=short").is_none());
-        assert!(authorization_code_from_document("{\"authorizationCode\":\"abcDEF123456\"}").is_some());
+        assert!(
+            authorization_code_from_document("{\"authorizationCode\":\"abcDEF123456\"}").is_some()
+        );
         assert!(authorization_code_from_document("login form").is_none());
         assert!(LOGIN_WATCH_SCRIPT.contains("authorizationCode"));
         assert!(LOGIN_WATCH_SCRIPT.contains(LIBRARY_DONE_HOST));
@@ -708,7 +732,8 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some("page-2"));
         assert_eq!(page.items[1].title, "未命名商品");
         let rows = organize_owned_items(page.items);
-        let path = write_listing_csv(&rows.iter().map(|row| row.url.clone()).collect::<Vec<_>>()).unwrap();
+        let path =
+            write_listing_csv(&rows.iter().map(|row| row.url.clone()).collect::<Vec<_>>()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(text.lines().next().unwrap().contains("fab_url"));
