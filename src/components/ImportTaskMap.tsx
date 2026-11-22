@@ -2,6 +2,7 @@ import { useState } from "react";
 
 export const importTasks = [
   { id: "table", entry: "批量导入", place: "普通素材", summary: "Excel / CSV 素材表。先预览，确认后才写入。" },
+  { id: "fabLibrary", entry: "同步已购 Fab", place: "普通素材", summary: "在栈藏内登录 Epic 后读取已购库。先对照现有素材去重，确认后才写入商品记录，不下载 UE 原件。" },
   { id: "quick", entry: "快速录入", place: "普通素材", summary: "解析百度网盘分享文本，再进入素材表单确认。" },
   { id: "scan", entry: "扫描 / 导入文件", place: "全部资产", summary: "扫描只生成清单，不会自动入库；确认后才复制原件，不移动源文件。" },
   { id: "media", entry: "导入文件", place: "图片 / 模型 / 音频 / 视频库", summary: "把当前媒体库支持的原件复制进来。模型不走全部资产扫描。" },

@@ -10,6 +10,7 @@ mod db;
 mod downloader;
 mod epic;
 mod fab;
+mod fab_account;
 mod file_digest;
 mod glossary;
 mod images;
@@ -478,6 +479,11 @@ fn application_builder(
                     epic::list_ue_project_targets,
                     epic::inspect_ue_project,
                     epic::open_fab_in_epic,
+                    fab_account::fab_account_status,
+                    fab_account::begin_fab_login,
+                    fab_account::logout_fab_account,
+                    fab_account::preview_owned_fab_library,
+                    fab_account::stage_owned_fab_import,
                     browser_capture::get_browser_capture_connection,
                     browser_capture::pump_browser_captures,
                     browser_capture::register_browser_capture_host,

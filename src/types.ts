@@ -373,6 +373,29 @@ export interface FabDuplicateMatch {
   location: "library" | "trash";
 }
 
+export interface FabAccountStatus {
+  signedIn: boolean;
+  displayName: string;
+  message: string;
+}
+
+export interface OwnedFabRow {
+  title: string;
+  url: string;
+  listingId: string;
+  status: "new" | "duplicate" | "skipped" | string;
+  message: string;
+}
+
+export interface OwnedFabPreview {
+  displayName: string;
+  fetched: number;
+  newCount: number;
+  duplicateCount: number;
+  skippedCount: number;
+  rows: OwnedFabRow[];
+}
+
 export interface FabPreviewImage {
   sourcePath: string;
   previewDataUrl: string;

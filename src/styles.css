@@ -260,6 +260,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .result-pagination button { padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
 .editor-modal, .import-modal, .quick-modal, .settings-modal { width: min(920px, 96vw); max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-light); border-radius: 12px; background: #11161d; box-shadow: 0 28px 90px rgba(0,0,0,.62); }
 .import-modal { width: min(860px, 96vw); }
+.fab-library-list { min-height: 180px; max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.fab-library-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.fab-library-list label { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.fab-library-list small { color: var(--muted); }
 .quick-modal { width: min(610px, 94vw); }.settings-modal { width: min(780px, 95vw); }
 .modal-header { height: 75px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; border-bottom: 1px solid var(--border); }
 .modal-header h2 { margin: 4px 0 0; font-size: 18px; }
