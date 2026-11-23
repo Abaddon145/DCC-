@@ -76,6 +76,75 @@ pub fn import_model(config: &Path, id: &str, source: &Path) -> Result<(), String
         .ok_or("模型选项无效")?;
     import_model_with_spec(config, source, &spec)
 }
+pub async fn download_model(config: PathBuf, id: String) -> Result<(), String> {
+    let spec = super::transcription::component_specs()?
+        .models
+        .into_iter()
+        .find(|m| m.id == id)
+        .ok_or("模型选项无效")?;
+    if !spec.url.starts_with("https://") {
+        return Err("模型下载地址必须使用 HTTPS".into());
+    }
+    let paths = WhisperPaths::new(&config);
+    let target = paths.models.join(&spec.filename);
+    crate::media_access::reject_links(&target)?;
+    if target.exists() {
+        return verify_model_file(&paths.models, &spec, &|| false).map(|_| ());
+    }
+    safe_directory(&paths.models)?;
+    crate::runtime::tools::ensure_space(
+        &paths.models,
+        spec.bytes.saturating_add(32 * 1024 * 1024),
+    )?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("无法初始化下载客户端：{e}"))?;
+    let mut response = client
+        .get(&spec.url)
+        .send()
+        .await
+        .map_err(|e| format!("模型下载失败：{e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("模型下载失败：HTTP {}", response.status().as_u16()));
+    }
+    let temp = tempfile::Builder::new()
+        .prefix("whisper-model-dl-")
+        .suffix(".bin")
+        .tempfile_in(&paths.models)
+        .map_err(|e| format!("无法创建临时模型文件：{e}"))?;
+    let temp_path = temp.path().to_path_buf();
+    let mut file = temp.into_file();
+    let mut written: u64 = 0;
+    use std::io::Write;
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("模型下载中断：{e}")
+    })? {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > spec.bytes {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err("下载文件大小超过模型清单声明，已中止".into());
+        }
+        file.write_all(&chunk).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("写入临时模型失败：{e}")
+        })?;
+    }
+    file.sync_all().map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("同步临时模型失败：{e}")
+    })?;
+    drop(file);
+    let result = tokio::task::spawn_blocking(move || {
+        let imported = import_model_with_spec(&config, &temp_path, &spec);
+        let _ = std::fs::remove_file(&temp_path);
+        imported
+    })
+    .await
+    .map_err(|_| "模型校验任务中断".to_string())?;
+    result
+}
 pub(super) fn import_model_with_spec(
     config: &Path,
     source: &Path,

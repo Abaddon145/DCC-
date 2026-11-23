@@ -840,7 +840,7 @@ fn expand_learning_sources(
             return Err("一次最多导入 500 个视频".into());
         }
     }
-    files.sort();
+    files.sort_by(|a, b| natural_cmp(a, b));
     files.dedup();
     if files.is_empty() {
         return Err("所选文件夹中没有支持的视频".into());
@@ -848,9 +848,80 @@ fn expand_learning_sources(
     Ok(files)
 }
 
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek(), bi.peek()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(&ac), Some(&bc)) if ac.is_ascii_digit() && bc.is_ascii_digit() => {
+                let mut an = String::new();
+                while let Some(&c) = ai.peek() {
+                    if c.is_ascii_digit() {
+                        an.push(c);
+                        ai.next();
+                    } else {
+                        break;
+                    }
+                }
+                let mut bn = String::new();
+                while let Some(&c) = bi.peek() {
+                    if c.is_ascii_digit() {
+                        bn.push(c);
+                        bi.next();
+                    } else {
+                        break;
+                    }
+                }
+                let a_trim = an.trim_start_matches('0');
+                let b_trim = bn.trim_start_matches('0');
+                let ord = a_trim
+                    .len()
+                    .cmp(&b_trim.len())
+                    .then_with(|| a_trim.cmp(b_trim));
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(&ac), Some(&bc)) => {
+                let al = ac.to_lowercase().next().unwrap_or(ac);
+                let bl = bc.to_lowercase().next().unwrap_or(bc);
+                let ord = al.cmp(&bl);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+                ai.next();
+                bi.next();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod learning_folder_tests {
     use super::*;
+
+    #[test]
+    fn natural_sort_orders_numbered_lessons_humanly() {
+        let mut items = vec![
+            "C:/course/lesson10.mp4".to_string(),
+            "C:/course/lesson2.mp4".to_string(),
+            "C:/course/lesson1.mp4".to_string(),
+            "C:/course/Lesson20.mp4".to_string(),
+        ];
+        items.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            items,
+            vec![
+                "C:/course/lesson1.mp4",
+                "C:/course/lesson2.mp4",
+                "C:/course/lesson10.mp4",
+                "C:/course/Lesson20.mp4",
+            ]
+        );
+    }
 
     #[test]
     fn learning_import_groups_multiple_courses_without_losing_existing_members() {

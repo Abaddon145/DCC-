@@ -1,6 +1,7 @@
 use super::models::*;
 use rusqlite::{params, Connection, OptionalExtension};
-const COURSE_SELECT:&str="SELECT c.id,c.media_entry_id,COALESCE(NULLIF(c.title_override,''),e.name),c.position_ms,c.duration_ms,c.rate,c.completed,c.progress_revision FROM learning_courses c JOIN media_entries e ON e.id=c.media_entry_id WHERE e.kind='video' AND e.deleted_at IS NULL";
+const COURSE_THUMB_SQL: &str = "(SELECT f.id FROM media_files f WHERE f.entry_id=e.id AND f.role='thumbnail' ORDER BY f.sort_order,f.id LIMIT 1)";
+const COURSE_SELECT: &str = "SELECT c.id,c.media_entry_id,COALESCE(NULLIF(c.title_override,''),e.name),c.position_ms,c.duration_ms,c.rate,c.completed,c.progress_revision,(SELECT f.id FROM media_files f WHERE f.entry_id=e.id AND f.role='thumbnail' ORDER BY f.sort_order,f.id LIMIT 1) FROM learning_courses c JOIN media_entries e ON e.id=c.media_entry_id WHERE e.kind='video' AND e.deleted_at IS NULL";
 fn uuid(id: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(id)
         .map(|_| ())
@@ -16,6 +17,7 @@ fn course_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Course> {
         rate: r.get(5)?,
         completed: r.get(6)?,
         progress_revision: r.get(7)?,
+        cover_file_id: r.get(8)?,
     })
 }
 pub fn ensure_course(db: &Connection, media: &str) -> Result<Course, String> {
@@ -65,10 +67,25 @@ pub fn list_courses(
     })
 }
 
+#[allow(dead_code)]
 pub fn search_courses(
     db: &Connection,
     query: &str,
     series_id: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<crate::models::Page<Course>, String> {
+    search_courses_filtered(db, query, series_id, None, None, None, offset, limit)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_courses_filtered(
+    db: &Connection,
+    query: &str,
+    series_id: Option<&str>,
+    category_id: Option<&str>,
+    status: Option<&str>,
+    sort: Option<&str>,
     offset: i64,
     limit: i64,
 ) -> Result<crate::models::Page<Course>, String> {
@@ -79,6 +96,32 @@ pub fn search_courses(
     if let Some(id) = series_id {
         uuid(id)?;
     }
+    let category_mode = match category_id {
+        None | Some("") | Some("all") => None,
+        Some("uncategorized") => Some("uncategorized"),
+        Some(id) => {
+            uuid(id)?;
+            Some(id)
+        }
+    };
+    let status_clause = match status.unwrap_or("all") {
+        "" | "all" => "",
+        "completed" => " AND c.completed=1",
+        "in_progress" => " AND c.completed=0 AND c.position_ms>0",
+        "not_started" => " AND c.completed=0 AND c.position_ms=0",
+        _ => return Err("无效的课程状态筛选".into()),
+    };
+    let category_clause = match category_mode {
+        None => " AND (?3 IS NULL OR 1=1)",
+        Some("uncategorized") => " AND (?3 IS NULL AND EXISTS(SELECT 1 FROM learning_series_courses sc JOIN learning_series s ON s.id=sc.series_id WHERE sc.course_id=c.id AND s.category_id IS NULL))",
+        Some(_) => " AND EXISTS(SELECT 1 FROM learning_series_courses sc JOIN learning_series s ON s.id=sc.series_id WHERE sc.course_id=c.id AND s.category_id=?3)",
+    };
+    let order_clause = match sort.unwrap_or("default") {
+        "title" => "COALESCE(NULLIF(c.title_override,''),e.name) COLLATE NOCASE ASC, c.id",
+        "progress" => "c.completed DESC, CASE WHEN c.duration_ms>0 THEN (c.position_ms * 1000 / c.duration_ms) ELSE 0 END DESC, c.updated_at DESC, c.id",
+        "recent" => "c.updated_at DESC, c.id",
+        _ => "CASE WHEN ?2 IS NOT NULL THEN (SELECT position FROM learning_series_courses WHERE series_id=?2 AND course_id=c.id) END, c.updated_at DESC, c.id",
+    };
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     if let Some(id) = series_id {
         let exists: bool = tx
@@ -92,21 +135,32 @@ pub fn search_courses(
             return Err("系列不存在或不属于当前库".into());
         }
     }
-    let filter="FROM learning_courses c JOIN media_entries e ON e.id=c.media_entry_id WHERE e.kind='video' AND e.deleted_at IS NULL AND (?1='' OR instr(lower(COALESCE(NULLIF(c.title_override,''),e.name)),lower(?1))>0) AND (?2 IS NULL OR EXISTS(SELECT 1 FROM learning_series_courses sc WHERE sc.series_id=?2 AND sc.course_id=c.id))";
+    let category_param = match category_mode {
+        Some("uncategorized") | None => None,
+        Some(id) => Some(id),
+    };
+    let filter = format!(
+        "FROM learning_courses c JOIN media_entries e ON e.id=c.media_entry_id WHERE e.kind='video' AND e.deleted_at IS NULL AND (?1='' OR instr(lower(COALESCE(NULLIF(c.title_override,''),e.name)),lower(?1))>0) AND (?2 IS NULL OR EXISTS(SELECT 1 FROM learning_series_courses sc WHERE sc.series_id=?2 AND sc.course_id=c.id)){category_clause}{status_clause}"
+    );
     let total = tx
         .query_row(
             &format!("SELECT count(*) {filter}"),
-            params![query, series_id],
+            params![query, series_id, category_param],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
     let offset = offset.max(0);
     let limit = limit.clamp(1, 200);
     let items = {
-        let sql=format!("SELECT c.id,c.media_entry_id,COALESCE(NULLIF(c.title_override,''),e.name),c.position_ms,c.duration_ms,c.rate,c.completed,c.progress_revision {filter} ORDER BY CASE WHEN ?2 IS NOT NULL THEN (SELECT position FROM learning_series_courses WHERE series_id=?2 AND course_id=c.id) END,c.updated_at DESC,c.id LIMIT ?3 OFFSET ?4");
+        let sql = format!(
+            "SELECT c.id,c.media_entry_id,COALESCE(NULLIF(c.title_override,''),e.name),c.position_ms,c.duration_ms,c.rate,c.completed,c.progress_revision,{COURSE_THUMB_SQL} {filter} ORDER BY {order_clause} LIMIT ?4 OFFSET ?5"
+        );
         let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![query, series_id, limit, offset], course_row)
+            .query_map(
+                params![query, series_id, category_param, limit, offset],
+                course_row,
+            )
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -124,9 +178,10 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
     uuid(id)?;
     let mut value = db
         .query_row(
-            "SELECT s.id,s.name,s.description,s.revision,s.category_id,(SELECT f.id FROM learning_series_courses sc JOIN learning_courses c ON c.id=sc.course_id JOIN media_entries e ON e.id=c.media_entry_id JOIN media_files f ON f.entry_id=e.id AND f.role='thumbnail' WHERE sc.series_id=s.id AND e.kind='video' AND e.deleted_at IS NULL ORDER BY sc.position,sc.course_id,f.sort_order,f.id LIMIT 1) FROM learning_series s WHERE s.id=?1",
+            "SELECT s.id,s.name,s.description,s.revision,s.category_id,(SELECT f.id FROM learning_series_courses sc JOIN learning_courses c ON c.id=sc.course_id JOIN media_entries e ON e.id=c.media_entry_id JOIN media_files f ON f.entry_id=e.id AND f.role='thumbnail' WHERE sc.series_id=s.id AND e.kind='video' AND e.deleted_at IS NULL ORDER BY sc.position,sc.course_id,f.sort_order,f.id LIMIT 1),(SELECT count(*) FROM learning_series_courses sc JOIN learning_courses c ON c.id=sc.course_id JOIN media_entries e ON e.id=c.media_entry_id WHERE sc.series_id=s.id AND e.kind='video' AND e.deleted_at IS NULL AND c.completed=1) FROM learning_series s WHERE s.id=?1",
             [id],
             |r| {
+                let completed_count: i64 = r.get(6)?;
                 Ok(Series {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -135,6 +190,7 @@ pub fn series(db: &Connection, id: &str) -> Result<Series, String> {
                     ordered_course_ids: vec![],
                     category_id: r.get(4)?,
                     cover_file_id: r.get(5)?,
+                    completed_course_count: completed_count.max(0) as usize,
                 })
             },
         )
@@ -531,5 +587,59 @@ mod learning_store_tests {
             assert_eq!(course(db,&course_id)?.id,course_id,"deleting a series must not delete media/course");
             Ok(())
         }).unwrap();
+    }
+    #[test]
+    fn filtered_course_search_and_series_completion_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = crate::db::open_database(&dir.path().join("library.db")).unwrap();
+        let m1 = media(&db);
+        let m2 = media(&db);
+        let thumb = uuid::Uuid::new_v4().to_string();
+        db.execute(
+            "INSERT INTO media_files(id,entry_id,role,logical_path,original_name,rel_path,created_at) VALUES(?1,?2,'thumbnail','t.jpg','t.jpg','t.jpg','now')",
+            params![thumb, m1],
+        )
+        .unwrap();
+        let c1 = ensure_course(&db, &m1).unwrap();
+        let c2 = ensure_course(&db, &m2).unwrap();
+        assert_eq!(c1.cover_file_id.as_deref(), Some(thumb.as_str()));
+        db.execute(
+            "UPDATE learning_courses SET completed=1 WHERE id=?1",
+            [&c1.id],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE learning_courses SET position_ms=500 WHERE id=?1",
+            [&c2.id],
+        )
+        .unwrap();
+        let cat = create_learning_category(&db, "渲染").unwrap();
+        let s = upsert_series(&mut db, None, "材质课", "", None).unwrap();
+        let s = set_series_members(&mut db, &s.id, s.revision, &[c1.id.clone(), c2.id.clone()])
+            .unwrap();
+        let s = assign_series_category(&db, &s.id, s.revision, Some(&cat.id)).unwrap();
+        assert_eq!(s.completed_course_count, 1);
+
+        let by_cat =
+            search_courses_filtered(&db, "", None, Some(&cat.id), None, None, 0, 50).unwrap();
+        assert_eq!(by_cat.total, 2);
+        let done =
+            search_courses_filtered(&db, "", None, Some(&cat.id), Some("completed"), None, 0, 50)
+                .unwrap();
+        assert_eq!(done.items.len(), 1);
+        assert_eq!(done.items[0].id, c1.id);
+        let active = search_courses_filtered(
+            &db,
+            "",
+            None,
+            None,
+            Some("in_progress"),
+            Some("progress"),
+            0,
+            50,
+        )
+        .unwrap();
+        assert_eq!(active.items.len(), 1);
+        assert_eq!(active.items[0].id, c2.id);
     }
 }

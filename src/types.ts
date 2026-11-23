@@ -25,7 +25,7 @@ export type LibraryTaskRequest =
   | { kind: "assetMediaRetry"; request: { id: string } }
   | { kind: "modelThumbnail"; request: { entryId:string } }
   | { kind: "mediaImport"; request: MediaImportRequest }
-  | { kind: "learningMediaImport"; request: MediaImportRequest & {seriesId?:string} }
+  | { kind: "learningMediaImport"; request: MediaImportRequest & {seriesId?:string; autoCreateSeriesFromFolder?:boolean} }
   | { kind: "assetScan"; request: { root: string } }
   | { kind: "assetImport"; request: CoreAssetImportRequest }
   | { kind: "assetProcess"; request: { assetId: string; force?: boolean } }

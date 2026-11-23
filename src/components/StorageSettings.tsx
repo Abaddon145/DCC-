@@ -14,6 +14,7 @@ import {DownloadSettingsPanel} from "../features/download/DownloadSettingsPanel"
 import {learningApi} from "../features/learning/api";
 import type {CourseAnalysisTemplate} from "../features/learning/types";
 import {AnalysisTemplateSettings} from "../features/learning/AnalysisTemplateSettings";
+import {WhisperSettingsPanel} from "../features/learning/WhisperSettingsPanel";
 
 type SettingsTab = "appearance" | "view" | "modules" | "shortcuts" | "startup" | "online" | "download" | "data";
 export function ExternalOriginalsNotice({libraryId}:{libraryId:string}) {
@@ -130,6 +131,7 @@ export function StorageSettings({ onClose, onLibraryChanged, notify, libraryLock
           {analysisTemplatesError&&<p role="alert">无法读取自定义分析模板，请重新打开设置。</p>}
           <TranslationServiceOptions settings={translation} reload={loadTranslation} notify={notify} defaultTemplateId={library.defaultAnalysisTemplateId||"general"} customTemplates={analysisTemplates} onDefaultTemplateChange={id=>updateLibrary("defaultAnalysisTemplateId",id)} />
           {state?.current.libraryId&&<AnalysisTemplateSettings key={state.current.libraryId} libraryId={state.current.libraryId} templates={analysisTemplates} onChange={()=>setAnalysisTemplatesRevision(value=>value+1)}/>}
+          {state?.current.libraryId&&<WhisperSettingsPanel key={`whisper:${state.current.libraryId}`} libraryId={state.current.libraryId} notify={notify}/>}
           <section><TranslationGlossaryManager notify={notify} /></section>
         </>}
         {tab === "data" && state && <ExternalOriginalsNotice key={state.current.libraryId} libraryId={state.current.libraryId}/>}

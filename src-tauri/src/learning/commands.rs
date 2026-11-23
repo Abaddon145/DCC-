@@ -131,6 +131,94 @@ pub async fn install_learning_transcription_tools(
     .await
 }
 #[tauri::command]
+pub async fn download_learning_transcription_model(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    model_id: String,
+) -> Result<super::transcription_install::ComponentStatus, String> {
+    use tauri::Manager;
+    let config = {
+        let state = app.state::<AppState>();
+        if state.active_library_id()? != expected_library_id {
+            return Err("素材库已切换，未下载模型".into());
+        }
+        state.config_directory()
+    };
+    super::transcription_install::download_model(config.clone(), model_id).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let result = super::transcription_install::inspect_components(&config)?;
+        if state.active_library_id()? != expected_library_id {
+            return Err("素材库已切换；模型已保存至本机全局目录，请在当前库刷新状态".into());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "模型状态刷新中断".to_owned())?
+}
+#[tauri::command]
+pub fn search_transcript_cues(
+    state: State<AppState>,
+    expected_library_id: String,
+    course_id: String,
+    subtitle_id: String,
+    query: String,
+    offset: i64,
+    limit: i64,
+) -> Result<Page<TranscriptCue>, String> {
+    current(state.with_library_if_id(&expected_library_id, |db, base| {
+        super::subtitles::search_cues(db, base, &course_id, &subtitle_id, &query, offset, limit)
+    }))
+}
+#[tauri::command]
+pub async fn detect_learning_subtitles(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+) -> Result<Vec<DetectedSubtitleSource>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let config = state.config_directory();
+        let resources = app.path().resource_dir().ok();
+        current(state.with_library_if_id(&expected_library_id, |db, base| {
+            super::subtitles::detect_sources(db, base, &config, resources.as_deref(), &course_id)
+        }))
+    })
+    .await
+    .map_err(|_| "字幕探测任务中断".to_owned())?
+}
+#[tauri::command]
+pub async fn import_detected_learning_subtitle(
+    app: tauri::AppHandle,
+    expected_library_id: String,
+    course_id: String,
+    kind: String,
+    path_or_index: String,
+    label: Option<String>,
+) -> Result<LearningSubtitle, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let config = state.config_directory();
+        let resources = app.path().resource_dir().ok();
+        current(state.with_library_if_id(&expected_library_id, |db, base| {
+            super::subtitles::import_detected(
+                db,
+                base,
+                &config,
+                resources.as_deref(),
+                &course_id,
+                &kind,
+                &path_or_index,
+                label.as_deref(),
+            )
+        }))
+    })
+    .await
+    .map_err(|_| "导入探测字幕中断".to_owned())?
+}
+#[tauri::command]
 pub fn list_course_analyses(
     state: State<AppState>,
     expected_library_id: String,
@@ -414,16 +502,29 @@ pub fn list_learning_courses(
     }))
 }
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn search_learning_courses(
     state: State<AppState>,
     expected_library_id: String,
     query: String,
     series_id: Option<String>,
+    category_id: Option<String>,
+    status: Option<String>,
+    sort: Option<String>,
     offset: i64,
     limit: i64,
 ) -> Result<Page<Course>, String> {
     current(state.with_library_if_id(&expected_library_id, |db, _| {
-        store::search_courses(db, &query, series_id.as_deref(), offset, limit)
+        store::search_courses_filtered(
+            db,
+            &query,
+            series_id.as_deref(),
+            category_id.as_deref(),
+            status.as_deref(),
+            sort.as_deref(),
+            offset,
+            limit,
+        )
     }))
 }
 #[tauri::command]

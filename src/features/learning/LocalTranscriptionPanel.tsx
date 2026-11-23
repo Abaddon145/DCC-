@@ -4,13 +4,15 @@ import {LoadFeedback} from "../../components/LoadFeedback";
 import {api} from "../../lib/api";
 import {useRequestGate} from "../../lib/workspace";
 import {learningApi} from "./api";
+import {loadWhisperPrefs} from "./whisperPrefs";
 import type {LibraryTask} from "../../types";
 import type {WhisperComponentStatus,CourseTranscriptionRequest} from "./types";
 export interface LocalTranscriptionProps {libraryId:string;courseId:string;onComplete:(id:string)=>void}
 const active=(task:LibraryTask|null)=>!!task&&["queued","running"].includes(task.status);
 export function LocalTranscriptionPanel(props:LocalTranscriptionProps){return <LocalContent key={`${props.libraryId}:${props.courseId}`} {...props}/>;}
 function LocalContent({libraryId,courseId,onComplete}:LocalTranscriptionProps){
-  const [status,setStatus]=useState<WhisperComponentStatus|null>(null),[model,setModel]=useState<CourseTranscriptionRequest["modelId"]>("base"),[consent,setConsent]=useState(false);
+  const initialPrefs=loadWhisperPrefs();
+  const [status,setStatus]=useState<WhisperComponentStatus|null>(null),[model,setModel]=useState<CourseTranscriptionRequest["modelId"]>(initialPrefs.defaultModel),[consent,setConsent]=useState(initialPrefs.skipRepeatConsent);
   const [task,setTask]=useState<LibraryTask|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(""),[notice,setNotice]=useState(""),[pollRevision,setPollRevision]=useState(0);
   const gate=useRequestGate(),busyRef=useRef(false),watched=useRef(new Set<string>()),delivered=useRef(new Set<string>()),complete=useRef(onComplete);complete.current=onComplete;
   const scoped=useCallback((value:LibraryTask)=>value.libraryId===libraryId&&value.payload.kind==="courseTranscription"&&value.payload.request.courseId===courseId,[libraryId,courseId]);
@@ -52,6 +54,12 @@ function LocalContent({libraryId,courseId,onComplete}:LocalTranscriptionProps){
     const next=kind==="tools"?await learningApi.installTranscriptionTools(libraryId,path):await learningApi.importTranscriptionModel(libraryId,model,path);
     if(gate.isCurrent(ticket)){setStatus(next);setConsent(false);setNotice("已核验所选组件。组件与模型为全局本机数据，不进入素材库备份。");}
   });
+  const download=()=>action(async ticket=>{
+    if(!learningApi.downloadTranscriptionModel)return;
+    setNotice(`正在下载并校验 ${model} 模型…`);
+    const next=await learningApi.downloadTranscriptionModel(libraryId,model);
+    if(gate.isCurrent(ticket)){setStatus(next);setNotice("模型已下载并完成 SHA-256 校验。");}
+  });
   const start=()=>action(async ticket=>{
     if(!consent||!status?.toolReady||!status.models.some(m=>m.id===model&&m.installed)||active(task))return;
     const next=await api.startLibraryTask({kind:"courseTranscription",request:{courseId,modelId:model}},libraryId);
@@ -71,6 +79,7 @@ function LocalContent({libraryId,courseId,onComplete}:LocalTranscriptionProps){
     </>}
     <div className="learning-panel-actions">
       <button className="secondary-button" disabled={locked||!status} onClick={()=>void install("tools")}>安装本地组件包</button>
+      {selected&&!selected.installed&&typeof learningApi.downloadTranscriptionModel==="function"&&<button className="primary-button" disabled={locked} onClick={()=>void download()}>一键下载并校验模型</button>}
       <button className="secondary-button" disabled={locked||!selected} onClick={()=>void install("model")}>导入所选模型</button>
       <button className="secondary-button" disabled={!selected||busy} onClick={()=>void action(async ticket=>{await navigator.clipboard.writeText(selected!.url);if(gate.isCurrent(ticket))setNotice("已复制固定版本模型下载链接；请自行选择下载后导入。");})}>复制模型下载链接</button>
     </div>

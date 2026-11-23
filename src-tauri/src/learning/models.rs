@@ -10,6 +10,8 @@ pub struct Course {
     pub rate: f64,
     pub completed: bool,
     pub progress_revision: i64,
+    #[serde(default)]
+    pub cover_file_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +24,16 @@ pub struct Series {
     pub category_id: Option<String>,
     #[serde(default)]
     pub cover_file_id: Option<String>,
+    #[serde(default)]
+    pub completed_course_count: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedSubtitleSource {
+    pub kind: String,
+    pub label: String,
+    pub path_or_index: String,
+    pub language: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,4 +1,4 @@
-use super::models::{LearningSubtitle, TranscriptCue};
+use super::models::{DetectedSubtitleSource, LearningSubtitle, TranscriptCue};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
@@ -324,6 +324,251 @@ pub fn page(
         offset,
         limit,
     })
+}
+
+pub fn search_cues(
+    db: &Connection,
+    base: &Path,
+    course: &str,
+    id: &str,
+    query: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<crate::models::Page<TranscriptCue>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return page(db, base, course, id, offset, limit);
+    }
+    if query.chars().count() > 200 {
+        return Err("字幕搜索词不能超过 200 字".into());
+    }
+    if offset < 0 || !(1..=50).contains(&limit) {
+        return Err("字幕分页范围无效，每页最多50段".into());
+    }
+    registered(db, base, course, id)?;
+    let total: i64 = db
+        .query_row(
+            "SELECT count(*) FROM learning_subtitle_cues WHERE subtitle_id=?1 AND instr(lower(text),lower(?2))>0",
+            params![id, query],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare("SELECT id,subtitle_id,start_ms,end_ms,text FROM learning_subtitle_cues WHERE subtitle_id=?1 AND instr(lower(text),lower(?2))>0 ORDER BY ordinal LIMIT ?3 OFFSET ?4")
+        .map_err(|e| e.to_string())?;
+    let items = stmt
+        .query_map(params![id, query, limit, offset], |r| {
+            Ok(TranscriptCue {
+                id: r.get(0)?,
+                subtitle_id: r.get(1)?,
+                start_ms: r.get(2)?,
+                end_ms: r.get(3)?,
+                text: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(crate::models::Page {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
+
+fn open_course_video(
+    db: &Connection,
+    base: &Path,
+    config_dir: &Path,
+    course: &str,
+) -> Result<crate::media_access::CheckedMediaFile, String> {
+    let c = super::store::course(db, course)?;
+    let file_id = super::analysis::source_file_id(db, &c.media_id)?;
+    let grants = crate::media_access::LocalMediaGrants::new(config_dir);
+    let prepared = crate::media_access::prepare_media_file(db, base, &file_id, &grants)?;
+    prepared.open_for_playback(&|| false)
+}
+
+pub fn detect_sources(
+    db: &Connection,
+    base: &Path,
+    config_dir: &Path,
+    resource_dir: Option<&Path>,
+    course: &str,
+) -> Result<Vec<DetectedSubtitleSource>, String> {
+    let video = open_course_video(db, base, config_dir, course)?;
+    let video_path: &Path = video.as_ref();
+    let mut detected = Vec::new();
+    if let (Some(parent), Some(stem)) = (video_path.parent(), video_path.file_stem()) {
+        let stem_lower = stem.to_string_lossy().to_lowercase();
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let candidate = entry.path();
+                if !candidate.is_file() || crate::media_access::reject_links(&candidate).is_err() {
+                    continue;
+                }
+                let ext = candidate
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(ext.as_str(), "srt" | "vtt") {
+                    continue;
+                }
+                let name = candidate
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let cand_stem = candidate
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if cand_stem == stem_lower || cand_stem.starts_with(&format!("{stem_lower}.")) {
+                    if let Some(path_str) = candidate.to_str() {
+                        detected.push(DetectedSubtitleSource {
+                            kind: "sidecar".into(),
+                            label: format!("同目录字幕 · {name}"),
+                            path_or_index: path_str.to_owned(),
+                            language: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let (_, ffprobe) = crate::media::ffmpeg_paths(resource_dir);
+    if let Some(ffprobe_bin) = ffprobe {
+        let mut command = std::process::Command::new(ffprobe_bin);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        if let Ok(output) = command
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title",
+                "-of",
+                "json",
+            ])
+            .arg(video_path)
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(streams) = json.get("streams").and_then(|v| v.as_array()) {
+                        for (pos, stream) in streams.iter().enumerate() {
+                            let codec = stream
+                                .get("codec_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !matches!(
+                                codec,
+                                "subrip" | "ass" | "ssa" | "webvtt" | "mov_text" | "text" | "srt"
+                            ) {
+                                continue;
+                            }
+                            let Some(index) = stream.get("index").and_then(|v| v.as_u64()) else {
+                                continue;
+                            };
+                            let lang = stream
+                                .pointer("/tags/language")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .map(str::to_owned);
+                            let title = stream
+                                .pointer("/tags/title")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty());
+                            let desc = match (title, lang.as_deref()) {
+                                (Some(t), Some(l)) => format!("内嵌字幕 #{pos} · {t} ({l})"),
+                                (Some(t), None) => format!("内嵌字幕 #{pos} · {t}"),
+                                (None, Some(l)) => format!("内嵌字幕 #{pos} · {l}"),
+                                (None, None) => format!("内嵌字幕 #{pos} ({codec})"),
+                            };
+                            detected.push(DetectedSubtitleSource {
+                                kind: "embedded".into(),
+                                label: desc,
+                                path_or_index: index.to_string(),
+                                language: lang,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(detected)
+}
+
+pub fn import_detected(
+    db: &Connection,
+    base: &Path,
+    config_dir: &Path,
+    resource_dir: Option<&Path>,
+    course: &str,
+    kind: &str,
+    path_or_index: &str,
+    label: Option<&str>,
+) -> Result<LearningSubtitle, String> {
+    match kind {
+        "sidecar" => import(db, base, course, Path::new(path_or_index)),
+        "embedded" => {
+            let stream_index: u32 = path_or_index
+                .parse()
+                .map_err(|_| "内嵌字幕流编号无效".to_string())?;
+            let video = open_course_video(db, base, config_dir, course)?;
+            let (ffmpeg, _) = crate::media::ffmpeg_paths(resource_dir);
+            let ffmpeg_bin = ffmpeg.ok_or("未找到 FFmpeg，无法提取内嵌字幕")?;
+            let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let safe_name = label
+                .unwrap_or("embedded")
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '·' | '(' | ')') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .take(60)
+                .collect::<String>();
+            let file_name = format!("{}.vtt", safe_name.trim().trim_matches('_'));
+            let target = temp_dir.path().join(if file_name == ".vtt" {
+                "embedded.vtt".into()
+            } else {
+                file_name
+            });
+            let mut command = std::process::Command::new(ffmpeg_bin);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            let output = command
+                .args(["-y", "-v", "error", "-i"])
+                .arg(video.as_ref())
+                .args(["-map", &format!("0:{stream_index}"), "-f", "webvtt"])
+                .arg(&target)
+                .output()
+                .map_err(|e| format!("提取内嵌字幕失败：{e}"))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("提取内嵌字幕失败：{}", stderr.trim()));
+            }
+            import(db, base, course, &target)
+        }
+        _ => Err("不支持的字幕来源类型".into()),
+    }
 }
 
 pub(crate) fn verified_cues(

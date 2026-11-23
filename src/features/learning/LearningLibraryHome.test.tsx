@@ -3,7 +3,7 @@ import {beforeEach,expect,it,vi} from "vitest";
 import {LearningLibraryHome} from "./LearningLibraryHome";
 import {learningApi} from "./api";
 
-vi.mock("./api",()=>({learningApi:{listCourses:vi.fn(),listUnassignedVideos:vi.fn(),listSeries:vi.fn(),upsertSeries:vi.fn(),setSeriesMembers:vi.fn(),searchCourses:vi.fn(),listCategories:vi.fn(),createCategory:vi.fn(),renameCategory:vi.fn(),deleteCategory:vi.fn(),assignSeriesCategory:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listCourses:vi.fn(),listUnassignedVideos:vi.fn(),listSeries:vi.fn(),upsertSeries:vi.fn(),deleteSeries:vi.fn(),setSeriesMembers:vi.fn(),searchCourses:vi.fn(),listCategories:vi.fn(),createCategory:vi.fn(),renameCategory:vi.fn(),deleteCategory:vi.fn(),assignSeriesCategory:vi.fn(),ensureCourse:vi.fn()}}));
 vi.mock("./LearningVideoImport",()=>({LearningVideoImport:()=> <div>教程导入</div>}));
 vi.mock("./QuickCourseAnalysis",()=>({QuickCourseAnalysis:({courseId}:{courseId:string})=><div>分析 {courseId}</div>}));
 beforeEach(()=>{vi.clearAllMocks();vi.mocked(learningApi.listUnassignedVideos).mockResolvedValue({items:[],total:0,offset:0,limit:50});vi.mocked(learningApi.listSeries).mockResolvedValue([]);vi.mocked(learningApi.listCategories).mockResolvedValue([]);});
@@ -181,4 +181,19 @@ it("shows an available series thumbnail and falls back when it cannot load",asyn
   fireEvent.error(cover);
   expect(screen.queryByAltText("材质系列封面")).not.toBeInTheDocument();
   expect(screen.getByRole("button",{name:"材质系列 · 1 课"})).toBeInTheDocument();
+});
+
+it("filters by learning status and allows one-click course creation for unassigned videos",async()=>{
+  vi.mocked(learningApi.listCourses).mockResolvedValue({items:[],total:0,offset:0,limit:50});
+  vi.mocked(learningApi.searchCourses).mockResolvedValue({items:[{id:"c-done",mediaId:"m-done",title:"已完成教程",positionMs:60000,durationMs:60000,rate:1,completed:true,progressRevision:1}],total:1,offset:0,limit:50});
+  vi.mocked(learningApi.listUnassignedVideos).mockResolvedValue({items:[{mediaId:"m-new",name:"待建课视频"}],total:1,offset:0,limit:50});
+  vi.mocked(learningApi.ensureCourse).mockResolvedValue({id:"c-new",mediaId:"m-new",title:"待建课视频",positionMs:0,durationMs:null,rate:1,completed:false,progressRevision:0});
+  const onOpen=vi.fn();
+  render(<LearningLibraryHome libraryId="lib" onOpen={onOpen} onOrganize={vi.fn()}/>);
+  fireEvent.click(screen.getByRole("button",{name:"已完成"}));
+  await waitFor(()=>expect(learningApi.searchCourses).toHaveBeenCalledWith("lib","",null,0,50,{categoryId:null,status:"completed",sort:"default"}));
+  expect(await screen.findByText("已完成教程")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button",{name:"建课并学习"}));
+  await waitFor(()=>expect(learningApi.ensureCourse).toHaveBeenCalledWith("lib","m-new"));
+  expect(onOpen).toHaveBeenCalledWith("c-new","m-new");
 });

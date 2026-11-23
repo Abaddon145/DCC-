@@ -47,3 +47,24 @@ it("shows completed segments when the subsequent summary failed",async()=>{
   render(<QuickCourseAnalysis libraryId="lib" courseId="course" onSeek={()=>{}}/>);
   expect(await screen.findByText("保留的分段")).toBeInTheDocument();
 });
+
+it("shows material readiness and switches analysis result tabs",async()=>{
+  vi.mocked(learningApi.listCourseAnalyses).mockResolvedValue({items:[{id:"done",stage:"summary",status:"completed",completedStages:1,totalStages:1,error:"",createdAt:1700000000}],total:1,offset:0,limit:10});
+  vi.mocked(learningApi.getCourseAnalysis).mockResolvedValue({
+    id:"done",courseId:"course",previewId:"p",sourceFingerprint:"fp",model:"deepseek",parentAnalysisId:null,status:"completed",error:"",createdAt:1,updatedAt:1,staleReasons:[],
+    stages:{items:[],offset:0,total:0,limit:50},selectedStageKey:null,
+    result:{
+      contentType:"tutorial",oneSentenceSummary:"总结一句",overview:"总览正文",
+      chapters:[{startMs:0,endMs:5000,title:"第一章",summary:"章节说明",keywords:[],keyframeIds:[]}],
+      keyPoints:[{timeMs:10000,title:"重点A",content:"重点内容",importance:3,sourceSegmentIds:[]}],
+      tutorialSteps:[{order:1,timeMs:20000,title:"步骤一",description:"先做这个",notes:[]}],
+      terms:[],actionItems:[],sections:[],tags:["UE5"],warnings:[],sectionValidation:[],
+    },
+  } as never);
+  render(<QuickCourseAnalysis libraryId="lib" courseId="course" courseTitle="UE材质" canSeek onSeek={vi.fn()}/>);
+  expect(await screen.findByText(/材料已就绪/)).toBeInTheDocument();
+  expect(await screen.findByText("总结一句")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab",{name:"操作步骤 (1)"}));
+  expect(screen.getByText("先做这个")).toBeInTheDocument();
+  expect(screen.queryByText("总览正文")).toBeNull();
+});

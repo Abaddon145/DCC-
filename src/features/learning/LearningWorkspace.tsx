@@ -13,7 +13,7 @@ import {learningApi} from "./api";
 import {defaultLearningBindings,learningBindingLabels,nativeBindings} from "./nativeBindings";
 import {classifyVideoPointer,type VideoPointer} from "./playerInteraction";
 import {NativeLearningSurface,hasLearningOverlay} from "./NativeLearningSurface";
-import {LearningControls} from "./LearningControls";
+import {LearningControls,PLAYBACK_RATES} from "./LearningControls";
 import {TranscriptPanel} from "./TranscriptPanel";
 import {LearningSeries} from "./LearningSeries";
 import {QuickCourseAnalysis} from "./QuickCourseAnalysis";
@@ -21,7 +21,7 @@ import {ExcerptComposer} from "./ExcerptComposer";
 import type {ExcerptReceipt,ExcerptSelection,TranscriptCue,PlaybackAction,PlaybackSnapshot,ScopedPlaybackEvent,NativePointerEvent} from "./types";
 import "./LearningWorkspace.css";
 
-export interface LearningWorkspaceProps {libraryId:string;courseId:string;projectId?:string;initialPositionMs?:number;sourceFingerprint?:string;backLabel?:string;onBack:()=>void;onOpenReceipt?:(receipt:ExcerptReceipt)=>void|Promise<void>;notify:(message:string,error?:boolean)=>void}
+export interface LearningWorkspaceProps {libraryId:string;courseId:string;projectId?:string;initialPositionMs?:number;sourceFingerprint?:string;backLabel?:string;onBack:()=>void;onOpenReceipt?:(receipt:ExcerptReceipt)=>void|Promise<void>;onOpenSettings?:()=>void;onOpenNote?:(noteId:string)=>void;notify:(message:string,error?:boolean)=>void}
 const seriesLimits={min:220,max:440,defaultWidth:300},detailLimits={min:260,max:560,defaultWidth:340};
 const initialPanels=():PanelLayout=>({left:{mode:"closed",width:300,tab:"series"},right:{mode:"closed",width:340,tab:"transcript"},focusSnapshot:null});
 function restoredPanels(raw:unknown):PanelLayout {
@@ -30,7 +30,7 @@ function restoredPanels(raw:unknown):PanelLayout {
   const panels={left:normalizePanel(value.left,fallback.left,seriesLimits,["series"]),right:normalizePanel(value.right,fallback.right,detailLimits,["transcript","analysis"]),focusSnapshot:null};
   return {...persistPanels(panels),focusSnapshot:null};
 }
-export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,initialPositionMs,sourceFingerprint,backLabel,onBack,onOpenReceipt,notify}:LearningWorkspaceProps){
+export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,initialPositionMs,sourceFingerprint,backLabel,onBack,onOpenReceipt,onOpenSettings,onOpenNote,notify}:LearningWorkspaceProps){
   const [courseId,setCourseId]=useState(initialCourseId),[title,setTitle]=useState("学习视频"),[snapshot,setSnapshot]=useState<PlaybackSnapshot|null>(null),[error,setError]=useState(""),[retry,setRetry]=useState(0),[leaving,setLeaving]=useState(false);
   const [focus,setFocus]=useState<"learning"|"editor">("learning"),[blocked,setBlocked]=useState(false),[composing,setComposing]=useState(false),[menu,setMenu]=useState<{x:number;y:number}|null>(null),[help,setHelp]=useState(false);
   const [selectedCues,setSelectedCues]=useState<{courseId:string;items:TranscriptCue[]}>({courseId,items:[]}),[excerpt,setExcerpt]=useState<ExcerptSelection|null>(null);
@@ -149,6 +149,9 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
       case "player.exit-fullscreen":if(value.fullscreen)control({type:"fullscreen",enabled:false});break;
       case "player.mute":control(value=>({type:"mute",muted:!value.muted}));break;
       case "player.next":void adjacent(1);break;case "player.previous":void adjacent(-1);break;
+      case "player.rate-down":{const idx=PLAYBACK_RATES.findIndex(r=>r>=value.rate);const nextIdx=Math.max(0,(idx<0?PLAYBACK_RATES.length-1:idx)-1);control({type:"rate",rate:PLAYBACK_RATES[nextIdx]});break;}
+      case "player.rate-up":{const idx=PLAYBACK_RATES.findIndex(r=>r>=value.rate);const nextIdx=Math.min(PLAYBACK_RATES.length-1,(idx<0?0:idx)+1);control({type:"rate",rate:PLAYBACK_RATES[nextIdx]});break;}
+      case "player.excerpt":createExcerpt();break;
     }
   };
   const pointer=useCallback((event:VideoPointer,native=false)=>{
@@ -190,6 +193,11 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
     const compositionStart=()=>setComposing(true),compositionEnd=()=>setComposing(false);
     const key=(event:KeyboardEvent)=>{
       if(event.defaultPrevented||event.isComposing||interaction.current.composing||interaction.current.blocked||hasLearningOverlay()||(event.target as HTMLElement)?.closest("input,textarea,select,[contenteditable=true]"))return;
+      if(!event.ctrlKey&&!event.altKey&&!event.metaKey){
+        if(event.key==="["){event.preventDefault();event.stopPropagation();actionRef.current("player.rate-down");return;}
+        if(event.key==="]"){event.preventDefault();event.stopPropagation();actionRef.current("player.rate-up");return;}
+        if((event.key==="e"||event.key==="E")&&!event.shiftKey&&!event.repeat){event.preventDefault();event.stopPropagation();actionRef.current("player.excerpt");return;}
+      }
       const binding=defaultLearningBindings.find(binding=>shortcutMatches(event,binding.shortcut));if(!binding)return;
       event.preventDefault();event.stopPropagation();if(!event.repeat||!binding.id.includes("fullscreen"))actionRef.current(binding.id);
     };
@@ -218,13 +226,14 @@ export function LearningWorkspace({libraryId,courseId:initialCourseId,projectId,
       <WorkspacePanel label="课程导航" side="left" state={panels.left} limits={seriesLimits} onChange={next=>changePanels(value=>setLayoutPanel(value,"left",next))} tabs={[{id:"series",label:"课程系列",icon:<ListVideo size={18}/>,content:<LearningSeries libraryId={libraryId} courseId={courseId} onOrderChange={ids=>{seriesOrder.current=ids;}} onOpen={async id=>{if(busy.current)return;const ticket=adjacentGate.begin();await flushWorkspaceEdits();if(adjacentGate.isCurrent(ticket))setCourseId(id);}}/>}]}/>
       <div className="learning-video-stage">{snapshot&&<NativeLearningSurface snapshot={snapshot} hidden={!!menu||help} onBlockedChange={setBlocked} onPointer={pointer} onError={setError}/>} {snapshot&&!snapshot.ready&&!failure&&<LoadFeedback label="正在校验视频并等待首帧…"/>}</div>
       <WorkspacePanel label="学习资料" side="right" state={panels.right} limits={detailLimits} onChange={next=>changePanels(value=>setLayoutPanel(value,"right",next))} tabs={[
-        {id:"transcript",label:"课程字幕",icon:<Captions size={18}/>,content:<TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} onSeek={positionMs=>control({type:"seek",positionMs})} onSelection={items=>setSelectedCues({courseId,items})}/>},
-        {id:"analysis",label:"课程分析",icon:<Sparkles size={18}/>,content:<QuickCourseAnalysis key={`${libraryId}:${courseId}`} libraryId={libraryId} courseId={courseId} durationMs={snapshot?.durationMs} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})}/>},
+        {id:"transcript",label:"课程字幕",icon:<Captions size={18}/>,content:<TranscriptPanel libraryId={libraryId} courseId={courseId} sessionId={snapshot?.ready?snapshot.sessionId:undefined} positionMs={snapshot?.positionMs} onSeek={positionMs=>control({type:"seek",positionMs})} onSelection={items=>setSelectedCues({courseId,items})}/>},
+        {id:"analysis",label:"课程分析",icon:<Sparkles size={18}/>,content:<QuickCourseAnalysis key={`${libraryId}:${courseId}`} libraryId={libraryId} courseId={courseId} courseTitle={title} durationMs={snapshot?.durationMs} canSeek={!!snapshot?.ready&&!snapshot.error&&!leaving} onSeek={positionMs=>control({type:"seek",positionMs})} onOpenSettings={onOpenSettings} onOpenNote={onOpenNote}/>},
       ]}/>
     </div>
+    {snapshot?.ready&&snapshot.ended&&<div className="learning-ended-banner" role="region" aria-label="本节播放结束"><span>本节课程已播放完毕</span><div>{!completed&&<button className="secondary-button" disabled={leaving} onClick={()=>control({type:"completed",completed:true})}>标记已完成</button>}<button className="primary-button" disabled={leaving} onClick={()=>void adjacent(1)}>播放下一课</button><button className="secondary-button" disabled={leaving} onClick={()=>{control({type:"seek",positionMs:0});control({type:"pause",paused:false});}}>重播</button></div></div>}
     {snapshot&&<LearningControls key={snapshot.sessionId} snapshot={snapshot} disabled={!snapshot.ready||!!snapshot.error||leaving} onAction={control}/>}
     {excerpt&&<ExcerptComposer libraryId={libraryId} courseId={courseId} selection={excerpt} durationMs={snapshot?.durationMs} projectId={projectId} onClose={()=>setExcerpt(null)} onOpen={openExcerptReceipt}/>}
-    {help&&<div ref={helpDialog} className="learning-shortcut-help" data-native-overlay role="dialog" aria-modal="true" aria-label="播放器快捷键"><header><h2>播放器快捷键</h2><button className="secondary-button" autoFocus onClick={()=>{setHelp(false);helpButton.current?.focus();}}>关闭</button></header><p>编辑输入、中文输入法和弹窗优先。单击播放/暂停，双击全屏，视频区域滚轮调整音量。</p><dl>{defaultLearningBindings.map(binding=><div key={binding.id}><dt>{learningBindingLabels[binding.id]}</dt><dd><kbd>{binding.shortcut}</kbd></dd></div>)}</dl></div>}
+    {help&&<div ref={helpDialog} className="learning-shortcut-help" data-native-overlay role="dialog" aria-modal="true" aria-label="播放器快捷键"><header><h2>播放器快捷键</h2><button className="secondary-button" autoFocus onClick={()=>{setHelp(false);helpButton.current?.focus();}}>关闭</button></header><p>编辑输入、中文输入法和弹窗优先。单击播放/暂停，双击全屏，视频区域滚轮调整音量。</p><dl>{defaultLearningBindings.map(binding=><div key={binding.id}><dt>{learningBindingLabels[binding.id]}</dt><dd><kbd>{binding.shortcut}</kbd></dd></div>)}<div><dt>降低播放倍速</dt><dd><kbd>[</kbd></dd></div><div><dt>提高播放倍速</dt><dd><kbd>]</kbd></dd></div><div><dt>创建学习摘录</dt><dd><kbd>E</kbd></dd></div></dl></div>}
     {menu&&<ContextMenu {...menu} title="播放控制" onClose={()=>setMenu(null)} items={[{label:snapshot?.paused?"播放":"暂停",run:()=>actionRef.current("player.toggle")},{label:"后退 5 秒",run:()=>actionRef.current("player.seek-back")},{label:"前进 5 秒",run:()=>actionRef.current("player.seek-forward")},{label:"切换全屏",run:()=>actionRef.current("player.fullscreen")},{label:"快捷键说明",run:()=>setHelp(true)}]}/>}
   </section>;
 }

@@ -85,6 +85,8 @@ pub struct LearningMediaImportRequest {
     pub media: MediaImportRequest,
     #[serde(default)]
     pub series_id: Option<String>,
+    #[serde(default)]
+    pub auto_create_series_from_folder: bool,
 }
 impl TaskRequest {
     fn label(&self) -> &str {
@@ -1540,7 +1542,11 @@ pub fn retry_library_task(
     }
     // A learning batch targeting a series must revisit already imported rows on
     // retry: interruption may have occurred before the final grouping step.
-    let regroup = matches!(&payload, TaskRequest::LearningMediaImport(request) if request.series_id.is_some());
+    let regroup = matches!(
+        &payload,
+        TaskRequest::LearningMediaImport(request)
+            if request.series_id.is_some() || request.auto_create_series_from_folder
+    );
     let media_request = match &mut payload {
         TaskRequest::MediaImport(request) => Some(request),
         TaskRequest::LearningMediaImport(request) => Some(&mut request.media),
@@ -1973,11 +1979,14 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
             .map_err(|e| e.to_string())?
         }
         TaskRequest::MediaImport(_) | TaskRequest::LearningMediaImport(_) => {
-            let (request, series_id, learning) = match &task.payload {
-                TaskRequest::MediaImport(request) => (request.clone(), None, false),
-                TaskRequest::LearningMediaImport(request) => {
-                    (request.media.clone(), request.series_id.clone(), true)
-                }
+            let (request, series_id, auto_series, learning) = match &task.payload {
+                TaskRequest::MediaImport(request) => (request.clone(), None, false, false),
+                TaskRequest::LearningMediaImport(request) => (
+                    request.media.clone(),
+                    request.series_id.clone(),
+                    request.auto_create_series_from_folder,
+                    true,
+                ),
                 _ => unreachable!(),
             };
             let worker_app = app.clone();
@@ -1990,8 +1999,38 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                     Ok((active.base_dir.clone(), active.db_path.clone()))
                 })?;
                 let mut connection = open_media_worker_connection(&path)?;
-                if let Some(id) = &series_id {
+                let mut resolved_series_id = series_id;
+                if let Some(id) = &resolved_series_id {
                     crate::learning::store::series(&connection, id)?;
+                } else if learning && auto_series {
+                    if let Some(folder_name) = request
+                        .paths
+                        .iter()
+                        .map(std::path::Path::new)
+                        .find(|p| p.is_dir())
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                    {
+                        let truncated: String = folder_name.chars().take(200).collect();
+                        let existing = crate::learning::store::list_series(&connection)?
+                            .into_iter()
+                            .find(|s| s.name.eq_ignore_ascii_case(&truncated));
+                        let target = if let Some(s) = existing {
+                            s.id
+                        } else {
+                            crate::learning::store::upsert_series(
+                                &mut connection,
+                                None,
+                                &truncated,
+                                "",
+                                None,
+                            )?
+                            .id
+                        };
+                        resolved_series_id = Some(target);
+                    }
                 }
                 let resource = worker_app.path().resource_dir().ok();
                 let stop_app = worker_app.clone();
@@ -2029,7 +2068,7 @@ async fn execute(app: AppHandle, task: LibraryTask) -> Result<Value, String> {
                         &stop,
                     )?
                 };
-                if let Some(id) = &series_id {
+                if let Some(id) = &resolved_series_id {
                     media_library::group_learning_import(&mut connection, id, &report).map_err(
                         |error| format!("视频已导入，但加入系列失败：{error}；请在学习库手动归组"),
                     )?;

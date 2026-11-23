@@ -1,6 +1,7 @@
 export interface Course {
   id: string; mediaId: string; title: string; positionMs: number;
   durationMs: number | null; rate: number; completed: boolean; progressRevision: number;
+  coverFileId?: string | null;
 }
 export interface ExcerptSelection {subtitleId:string|null;cueIds:string[];ranges:import("../../lib/learningNoteNodes").LearningReferenceData["ranges"];comment:string;frameTimeMs:number|null}
 export interface ExcerptText {courseId:string;mediaId:string;title:string;subtitleId:string|null;subtitleSha256:string|null;ranges:ExcerptSelection["ranges"];cues:TranscriptCue[];comment:string;frameTimeMs:number|null}
@@ -31,7 +32,8 @@ export interface StoredNotePreview {
   conversion:{document:import("@tiptap/react").JSONContent|null;archiveHash:string;warnings:string[];pending:boolean;unsupported:{placeholderId:string;startByte:number;endByte:number;label:string;reason:string}[]};
   receipt:NoteCommitReceipt|null;
 }
-export interface Series {id:string;name:string;description:string;revision:number;orderedCourseIds:string[];categoryId?:string|null;coverFileId?:string|null}
+export interface Series {id:string;name:string;description:string;revision:number;orderedCourseIds:string[];categoryId?:string|null;coverFileId?:string|null;completedCourseCount?:number}
+export interface DetectedSubtitleSource {kind:"sidecar"|"embedded";label:string;pathOrIndex:string;language?:string|null}
 export interface LearningCategory {id:string;name:string;revision:number}
 export interface SeriesInput {id?:string;name:string;description:string;expectedRevision?:number}
 export interface ProgressInput {positionMs:number;durationMs:number|null;rate:number;completed:boolean}

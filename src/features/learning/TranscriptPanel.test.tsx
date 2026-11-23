@@ -3,7 +3,7 @@ import {beforeEach,expect,it,vi} from "vitest";
 import {TranscriptPanel} from "./TranscriptPanel";
 import {learningApi} from "./api";
 import type {TranscriptCue} from "./types";
-vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),transcriptPage:vi.fn(),importSubtitle:vi.fn(),loadSubtitle:vi.fn(),transcriptionComponents:vi.fn()}}));
+vi.mock("./api",()=>({learningApi:{listSubtitles:vi.fn(),transcriptPage:vi.fn(),searchTranscriptCues:vi.fn(),importSubtitle:vi.fn(),loadSubtitle:vi.fn(),transcriptionComponents:vi.fn()}}));
 vi.mock("../../lib/api",()=>({api:{listLibraryTasks:vi.fn().mockResolvedValue([])}}));
 vi.mock("@tauri-apps/plugin-dialog",()=>({open:vi.fn().mockResolvedValue(null)}));
 const subtitle={id:"subtitle",courseId:"course",name:"中文字幕.srt",format:"srt" as const,sha256:"a".repeat(64),cueCount:55};
@@ -41,4 +41,14 @@ it("does not expose old-library cues after a delayed response and reports missin
   vi.mocked(learningApi.listSubtitles).mockResolvedValue([subtitle]);vi.mocked(learningApi.transcriptPage).mockRejectedValue(new Error("学习资料缺失"));
   rerender(<TranscriptPanel libraryId="lib" courseId="course" onSeek={vi.fn()}/>);
   expect(await screen.findByRole("alert")).toHaveTextContent("学习资料缺失");
+});
+
+it("highlights the active cue by playback position and searches transcript cues",async()=>{
+  vi.mocked(learningApi.searchTranscriptCues).mockResolvedValue({items:[cues[5]],total:1,offset:0,limit:50});
+  render(<TranscriptPanel libraryId="lib" courseId="course" positionMs={1500} onSeek={vi.fn()}/>);
+  const activeBtn=await screen.findByRole("button",{name:"跳转到 00:01 · 第 2 段"});
+  expect(activeBtn.closest("li")).toHaveClass("active-cue");
+  fireEvent.change(screen.getByRole("searchbox",{name:"搜索字幕内容"}),{target:{value:"5"}});
+  await waitFor(()=>expect(learningApi.searchTranscriptCues).toHaveBeenCalledWith("lib","course","subtitle","5",0,50));
+  expect(await screen.findByText(/完整中文.* 5 第二行/)).toBeInTheDocument();
 });

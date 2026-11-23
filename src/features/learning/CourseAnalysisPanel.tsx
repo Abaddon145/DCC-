@@ -1,5 +1,7 @@
 import {useCallback,useEffect,useId,useRef,useState} from "react";
+import type {JSONContent} from "@tiptap/react";
 import {api} from "../../lib/api";
+import {knowledgeApi} from "../../lib/knowledge";
 import {LoadFeedback} from "../../components/LoadFeedback";
 import {useRequestGate} from "../../lib/workspace";
 import type {LibraryTask,Page} from "../../types";
@@ -203,16 +205,376 @@ function AnalysisContent({libraryId,courseId,durationMs,canSeek=true,autoPrepare
   </section>;
 }
 
-export function AnalysisResult({result,canSeek,onSeek}:{result:CourseAnalysisResult;canSeek:boolean;onSeek:(ms:number)=>void}){
-  const jump=(ms:number,title:string)=><button className="secondary-button" disabled={!canSeek} onClick={()=>onSeek(ms)}>{learningTime(ms)} · {title}</button>;
-  return <section className="learning-analysis-result" aria-label="分析结果"><h3>{result.oneSentenceSummary}</h3><p>{result.overview}</p>
-    {!!result.chapters.length&&<><h4>章节</h4><ol>{result.chapters.map((c,i)=><li key={i}>{jump(c.startMs,c.title)}<p>{c.summary}</p></li>)}</ol></>}
-    {!!result.keyPoints.length&&<><h4>重点</h4><ol>{result.keyPoints.map((p,i)=><li key={i}>{jump(p.timeMs,p.title)}<p>{p.content}</p></li>)}</ol></>}
-    {!!result.tutorialSteps.length&&<><h4>操作步骤</h4><ol>{result.tutorialSteps.map(s=><li key={s.order}>{jump(s.timeMs,s.title)}<p>{s.description}</p>{s.notes.map((text,i)=><p key={i}>{text}</p>)}</li>)}</ol></>}
-    {!!result.terms.length&&<><h4>术语</h4><dl>{result.terms.map((t,i)=><div key={i}><dt>{jump(t.timeMs,t.name)}</dt><dd>{t.definition}</dd></div>)}</dl></>}
-    {!!result.actionItems.length&&<><h4>建议练习</h4><ul>{result.actionItems.map((text,i)=><li key={i}>{text}</li>)}</ul></>}
-    {result.sections.map(section=><section key={section.id}><h4>{section.title}</h4>{section.items.map((item,i)=><div key={i}>{item.timeMs===null?<strong>{item.title}</strong>:jump(item.timeMs,item.title)}<p>{item.content}</p></div>)}</section>)}
-    {!!result.tags.length&&<p>标签：{result.tags.join("、")}</p>}{result.warnings.map((warning,i)=><p key={i} role="status">{warning}</p>)}
-    {!!result.sectionValidation.length&&<details open><summary>本机来源校验 · {result.sectionValidation.length} 项</summary><ul>{result.sectionValidation.map((issue,i)=><li key={i}><strong>{issue.itemTitle}</strong><p>{issue.reason}</p></li>)}</ul></details>}
-  </section>;
+export function analysisResultToMarkdown(result: CourseAnalysisResult, title?: string): string {
+  const lines: string[] = [];
+  if (title) lines.push(`# ${title} · 视频分析`, "");
+  if (result.oneSentenceSummary) lines.push(`> ${result.oneSentenceSummary}`, "");
+  if (result.overview) lines.push("## 概览", "", result.overview, "");
+  if (result.chapters.length) {
+    lines.push("## 章节", "");
+    for (const c of result.chapters) {
+      lines.push(`- **[${learningTime(c.startMs)}—${learningTime(c.endMs)}] ${c.title}**`);
+      if (c.summary) lines.push(`  ${c.summary}`);
+    }
+    lines.push("");
+  }
+  if (result.tutorialSteps.length) {
+    lines.push("## 操作步骤", "");
+    for (const s of result.tutorialSteps) {
+      lines.push(`${s.order}. **[${learningTime(s.timeMs)}] ${s.title}**`);
+      if (s.description) lines.push(`   ${s.description}`);
+      for (const note of s.notes) lines.push(`   - ${note}`);
+    }
+    lines.push("");
+  }
+  if (result.keyPoints.length) {
+    lines.push("## 重点", "");
+    for (const p of result.keyPoints) {
+      lines.push(`- **[${learningTime(p.timeMs)}] ${p.title}**：${p.content}`);
+    }
+    lines.push("");
+  }
+  if (result.terms.length) {
+    lines.push("## 术语", "");
+    for (const t of result.terms) {
+      lines.push(`- **${t.name}**（${learningTime(t.timeMs)}）：${t.definition}`);
+    }
+    lines.push("");
+  }
+  if (result.actionItems.length) {
+    lines.push("## 建议练习", "");
+    for (const item of result.actionItems) lines.push(`- [ ] ${item}`);
+    lines.push("");
+  }
+  for (const section of result.sections) {
+    lines.push(`## ${section.title}`, "");
+    for (const item of section.items) {
+      const prefix = item.timeMs === null ? "" : `[${learningTime(item.timeMs)}] `;
+      lines.push(`- **${prefix}${item.title}**：${item.content}`);
+    }
+    lines.push("");
+  }
+  if (result.tags.length) lines.push(`标签：${result.tags.map(t => `#${t}`).join(" ")}`, "");
+  return lines.join("\n").trim() + "\n";
+}
+
+function analysisResultToNoteDocument(result: CourseAnalysisResult): JSONContent {
+  const blocks: JSONContent[] = [];
+  const heading = (text: string, level = 2): JSONContent => ({
+    type: "heading",
+    attrs: { level },
+    content: [{ type: "text", text }],
+  });
+  const para = (text: string): JSONContent => ({
+    type: "paragraph",
+    content: text ? [{ type: "text", text }] : [],
+  });
+  const bullet = (items: string[]): JSONContent => ({
+    type: "bulletList",
+    content: items.map(text => ({ type: "listItem", content: [para(text)] })),
+  });
+  if (result.oneSentenceSummary) blocks.push(para(result.oneSentenceSummary));
+  if (result.overview) {
+    blocks.push(heading("概览"), para(result.overview));
+  }
+  if (result.chapters.length) {
+    blocks.push(
+      heading("章节"),
+      bullet(
+        result.chapters.map(
+          c => `[${learningTime(c.startMs)}—${learningTime(c.endMs)}] ${c.title}${c.summary ? `：${c.summary}` : ""}`
+        )
+      )
+    );
+  }
+  if (result.tutorialSteps.length) {
+    blocks.push(
+      heading("操作步骤"),
+      bullet(
+        result.tutorialSteps.map(
+          s =>
+            `${s.order}. [${learningTime(s.timeMs)}] ${s.title}${s.description ? ` — ${s.description}` : ""}${
+              s.notes.length ? `（${s.notes.join("；")}）` : ""
+            }`
+        )
+      )
+    );
+  }
+  if (result.keyPoints.length) {
+    blocks.push(
+      heading("核心重点"),
+      bullet(result.keyPoints.map(p => `[${learningTime(p.timeMs)}] ${p.title}：${p.content}`))
+    );
+  }
+  if (result.terms.length) {
+    blocks.push(
+      heading("术语与概念"),
+      bullet(result.terms.map(t => `${t.name}（${learningTime(t.timeMs)}）：${t.definition}`))
+    );
+  }
+  if (result.actionItems.length) {
+    blocks.push(heading("建议练习"), bullet(result.actionItems));
+  }
+  for (const section of result.sections) {
+    blocks.push(
+      heading(section.title),
+      bullet(
+        section.items.map(
+          item => `${item.timeMs === null ? "" : `[${learningTime(item.timeMs)}] `}${item.title}：${item.content}`
+        )
+      )
+    );
+  }
+  return { type: "doc", content: blocks.length ? blocks : [para("课程分析结果")] };
+}
+
+type ResultTab = "all" | "overview" | "chapters" | "steps" | "points";
+
+export function AnalysisResult({
+  result,
+  canSeek,
+  onSeek,
+  libraryId,
+  courseTitle,
+  onOpenNote,
+}: {
+  result: CourseAnalysisResult;
+  canSeek: boolean;
+  onSeek: (ms: number) => void;
+  libraryId?: string;
+  courseTitle?: string;
+  onOpenNote?: (noteId: string) => void;
+}) {
+  const [tab, setTab] = useState<ResultTab>("all");
+  const [actionStatus, setActionStatus] = useState("");
+  const [savedNoteId, setSavedNoteId] = useState<string | null>(null);
+  const [savingNote, setSavingNote] = useState(false);
+
+  const jump = (ms: number, title: string) => (
+    <button type="button" className="secondary-button" disabled={!canSeek} onClick={() => onSeek(ms)}>
+      {learningTime(ms)} · {title}
+    </button>
+  );
+
+  const copyMarkdown = async () => {
+    try {
+      const md = analysisResultToMarkdown(result, courseTitle);
+      await navigator.clipboard.writeText(md);
+      setActionStatus("已复制 Markdown 到剪贴板");
+    } catch (reason) {
+      setActionStatus(`复制失败：${String(reason)}`);
+    }
+  };
+
+  const saveAsNote = async () => {
+    if (!libraryId || savingNote) return;
+    setSavingNote(true);
+    setActionStatus("");
+    try {
+      const note = await knowledgeApi(libraryId).save({
+        id: null,
+        expectedRevision: null,
+        notebookId: null,
+        title: `${courseTitle || "课程"} · 视频分析`,
+        document: analysisResultToNoteDocument(result),
+        tags: [...new Set(["视频分析", ...result.tags])].slice(0, 12),
+        favorite: false,
+        journalDate: null,
+      });
+      setSavedNoteId(note.id);
+      setActionStatus(`已保存至知识库笔记「${note.title}」`);
+    } catch (reason) {
+      setActionStatus(`保存笔记失败：${String(reason)}`);
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const pointsTotal = result.keyPoints.length + result.terms.length;
+  const showOverview = tab === "all" || tab === "overview";
+  const showChapters = tab === "all" || tab === "chapters";
+  const showSteps = tab === "all" || tab === "steps";
+  const showPoints = tab === "all" || tab === "points";
+
+  return (
+    <section className="learning-analysis-result" aria-label="分析结果">
+      <div className="learning-analysis-result-toolbar">
+        <div className="learning-analysis-tabs" role="tablist" aria-label="分析结果分类">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "all"}
+            className={tab === "all" ? "primary-button" : "secondary-button"}
+            onClick={() => setTab("all")}
+          >
+            全部
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "overview"}
+            className={tab === "overview" ? "primary-button" : "secondary-button"}
+            onClick={() => setTab("overview")}
+          >
+            概览
+          </button>
+          {result.chapters.length > 0 && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "chapters"}
+              className={tab === "chapters" ? "primary-button" : "secondary-button"}
+              onClick={() => setTab("chapters")}
+            >
+              章节 ({result.chapters.length})
+            </button>
+          )}
+          {result.tutorialSteps.length > 0 && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "steps"}
+              className={tab === "steps" ? "primary-button" : "secondary-button"}
+              onClick={() => setTab("steps")}
+            >
+              操作步骤 ({result.tutorialSteps.length})
+            </button>
+          )}
+          {pointsTotal > 0 && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "points"}
+              className={tab === "points" ? "primary-button" : "secondary-button"}
+              onClick={() => setTab("points")}
+            >
+              重点与术语 ({pointsTotal})
+            </button>
+          )}
+        </div>
+        <div className="learning-analysis-export-actions">
+          <button type="button" className="secondary-button" onClick={() => void copyMarkdown()}>
+            复制 Markdown
+          </button>
+          {libraryId && (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={savingNote}
+              onClick={() => void saveAsNote()}
+            >
+              {savingNote ? "保存中…" : "存为知识库笔记"}
+            </button>
+          )}
+          {savedNoteId && onOpenNote && (
+            <button type="button" className="primary-button" onClick={() => onOpenNote(savedNoteId)}>
+              打开笔记
+            </button>
+          )}
+        </div>
+      </div>
+      {actionStatus && <p role="status">{actionStatus}</p>}
+      <h3>{result.oneSentenceSummary}</h3>
+      {showOverview && (
+        <>
+          <p>{result.overview}</p>
+          {!!result.actionItems.length && (
+            <>
+              <h4>建议练习</h4>
+              <ul>
+                {result.actionItems.map((text, i) => (
+                  <li key={i}>{text}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {result.sections.map(section => (
+            <section key={section.id}>
+              <h4>{section.title}</h4>
+              {section.items.map((item, i) => (
+                <div key={i}>
+                  {item.timeMs === null ? <strong>{item.title}</strong> : jump(item.timeMs, item.title)}
+                  <p>{item.content}</p>
+                </div>
+              ))}
+            </section>
+          ))}
+        </>
+      )}
+      {showChapters && !!result.chapters.length && (
+        <>
+          <h4>章节</h4>
+          <ol>
+            {result.chapters.map((c, i) => (
+              <li key={i}>
+                {jump(c.startMs, c.title)}
+                <p>{c.summary}</p>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      {showSteps && !!result.tutorialSteps.length && (
+        <>
+          <h4>操作步骤</h4>
+          <ol>
+            {result.tutorialSteps.map(s => (
+              <li key={s.order}>
+                {jump(s.timeMs, s.title)}
+                <p>{s.description}</p>
+                {s.notes.map((text, i) => (
+                  <p key={i}>{text}</p>
+                ))}
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      {showPoints && !!result.keyPoints.length && (
+        <>
+          <h4>重点</h4>
+          <ol>
+            {result.keyPoints.map((p, i) => (
+              <li key={i}>
+                {jump(p.timeMs, p.title)}
+                <p>{p.content}</p>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      {showPoints && !!result.terms.length && (
+        <>
+          <h4>术语</h4>
+          <dl>
+            {result.terms.map((t, i) => (
+              <div key={i}>
+                <dt>{jump(t.timeMs, t.name)}</dt>
+                <dd>{t.definition}</dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      )}
+      {!!result.tags.length && <p>标签：{result.tags.join("、")}</p>}
+      {result.warnings.map((warning, i) => (
+        <p key={i} role="status">
+          {warning}
+        </p>
+      ))}
+      {!!result.sectionValidation.length && (
+        <details open>
+          <summary>本机来源校验 · {result.sectionValidation.length} 项</summary>
+          <ul>
+            {result.sectionValidation.map((issue, i) => (
+              <li key={i}>
+                <strong>{issue.itemTitle}</strong>
+                <p>{issue.reason}</p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  );
 }

@@ -42,3 +42,12 @@ it("queues multiple videos into the chosen series",async()=>{
   fireEvent.click(screen.getByRole("button",{name:"导入本地教程…"}));
   await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningMediaImport",request:{kind:"video",paths:["C:/synthetic/one.mp4","C:/synthetic/two.mp4"],folderId:null,tags:[],favorite:false,seriesId:"s1"}},"lib"));
 });
+
+it("passes autoCreateSeriesFromFolder when enabled for folder import",async()=>{
+  vi.mocked(open).mockResolvedValue("C:/synthetic/UE5材质全套");
+  vi.mocked(api.startLibraryTask).mockResolvedValue({id:"task-auto"} as never);
+  render(<LearningVideoImport libraryId="lib"/>);
+  fireEvent.click(screen.getByRole("checkbox",{name:/按文件夹名自动创建/}));
+  fireEvent.click(screen.getByRole("button",{name:"导入教程文件夹…"}));
+  await waitFor(()=>expect(api.startLibraryTask).toHaveBeenCalledWith({kind:"learningMediaImport",request:{kind:"video",paths:["C:/synthetic/UE5材质全套"],folderId:null,tags:[],favorite:false,autoCreateSeriesFromFolder:true}},"lib"));
+});
