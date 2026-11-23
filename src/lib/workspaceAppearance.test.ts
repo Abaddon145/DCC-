@@ -51,6 +51,26 @@ describe("workspace text contrast", () => {
     }
   });
 
+  it("keeps import and quick modal bodies scrollable so modal footers are not clipped", () => {
+    style.textContent = stylesheet;
+    document.head.append(style);
+    const modal = document.createElement("section");
+    modal.className = "import-modal";
+    modal.innerHTML = '<div class="import-body fab-library-body"></div><div class="quick-body"></div><footer class="modal-footer"></footer>';
+    document.body.append(modal);
+    try {
+      for (const selector of [".import-body.fab-library-body", ".quick-body"]) {
+        const computed = getComputedStyle(modal.querySelector(selector)!);
+        expect(computed.minHeight).toBe("0px");
+        expect(computed.flexGrow).toBe("1");
+        expect(computed.overflowY).toBe("auto");
+      }
+      expect(getComputedStyle(modal.querySelector(".modal-footer")!).flexShrink).toBe("0");
+    } finally {
+      modal.remove();
+    }
+  });
+
   it.each(["graphite", "ue-slate", "midnight"])("keeps small metadata readable in %s", theme => {
     style.textContent = stylesheet;
     document.head.append(style);

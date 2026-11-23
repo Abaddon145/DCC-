@@ -258,8 +258,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .single-import-result p, .translation-pending-status p { margin:8px 0; line-height:1.6; }
 .result-pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; flex-wrap:wrap; }
 .result-pagination button { padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
-.editor-modal, .import-modal, .quick-modal, .settings-modal { width: min(920px, 96vw); max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-light); border-radius: 12px; background: #11161d; box-shadow: 0 28px 90px rgba(0,0,0,.62); }
+.editor-modal, .import-modal, .quick-modal, .settings-modal { width: min(920px, 96vw); max-height: min(92vh, calc(100dvh - 56px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-light); border-radius: 12px; background: #11161d; box-shadow: 0 28px 90px rgba(0,0,0,.62); }
 .import-modal { width: min(860px, 96vw); }
+.fab-library-body p { margin: 10px 0; color: var(--muted); font-size: var(--font-small); line-height: 1.6; }
+.fab-library-list { min-height: 160px; max-height: min(360px, 38vh); overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.fab-library-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.fab-library-list label { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.fab-library-list small { color: var(--muted); }
 .quick-modal { width: min(610px, 94vw); }.settings-modal { width: min(780px, 95vw); }
 .modal-header { height: 75px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; border-bottom: 1px solid var(--border); }
 .modal-header h2 { margin: 4px 0 0; font-size: 18px; }
@@ -310,7 +315,7 @@ input, textarea, select { border: 1px solid var(--border-light); border-radius: 
 .image-order button:disabled { opacity: .25; }
 .modal-footer { min-height: 64px; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding: 0 22px; border-top: 1px solid var(--border); background: #0d1117; }
 
-.quick-body { padding: 25px 26px; }.quick-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; color: var(--accent-bright); background: var(--accent-bg); }.quick-body p { margin: 13px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }.quick-body textarea { width: 100%; padding: 11px; resize: vertical; line-height: 1.6; }.paste-button { margin-top: 9px; }
+.quick-body { min-height: 0; flex: 1; overflow-y: auto; padding: 25px 26px; }.quick-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; color: var(--accent-bright); background: var(--accent-bg); }.quick-body p { margin: 13px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }.quick-body textarea { width: 100%; padding: 11px; resize: vertical; line-height: 1.6; }.paste-button { margin-top: 9px; }
 .settings-body { min-height: 0; flex: 1; overflow-y: auto; padding: 20px 22px; }.settings-body section + section { margin-top: 24px; }.settings-body h3 { margin: 0 0 10px; color: #dce1e8; font-size: 12px; }
 .settings-warning { margin-bottom: 15px; padding: 10px 12px; border: 1px solid #6b4e29; border-radius: 7px; color: #e0ad5b; background: rgba(217,154,66,.08); font-size: 11px; }
 .current-library { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid #59452a; border-radius: 9px; background: var(--accent-bg); }.library-icon { width: 43px; height: 43px; display: grid; place-items: center; border-radius: 9px; color: var(--accent-bright); background: #221b12; }.current-library > div:last-child { min-width: 0; }.current-library strong, .current-library span, .current-library small { display: block; }.current-library strong { font-size: 14px; }.current-library span { margin-top: 4px; overflow: hidden; color: #aeb6c2; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.current-library small { margin-top: 4px; color: var(--muted-2); font-size: 9px; }
