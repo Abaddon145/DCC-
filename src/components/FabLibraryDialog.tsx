@@ -123,7 +123,7 @@ export function FabLibraryDialog({ onClose, onImported, notify, expectedLibraryI
 
   return <div className="modal-backdrop"><section className="import-modal" role="dialog" aria-modal="true" aria-label="同步已购 Fab">
     <header className="modal-header"><div><span className="eyebrow">EPIC · FAB</span><h2>同步已购 Fab</h2></div><button className="icon-button" aria-label="关闭同步已购 Fab" onClick={onClose}><X size={19} /></button></header>
-    <div className="quick-body">
+    <div className="import-body fab-library-body">
       <ImportTaskMap current="fabLibrary" />
       <p>在弹出的 Epic 窗口里自己完成登录和二次验证。密码不会进入栈藏，登录凭证保存在 Windows 凭据管理器。读取的是这个账号 Fab 里带 UE 版本的已入库商品，含已领取的免费商品；愿望单和没有 UE 版本的网页商品不会出现。</p>
       <p>{account?.signedIn ? `已登录 ${account.displayName || "Epic 账号"}` : account?.message || "正在确认登录状态…"}</p>
